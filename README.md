@@ -677,6 +677,14 @@ node tools/desktop-skill-e2e.cjs    # 17 项（同样需要先开 CDP 端口编�
 Rust 侧对每一次调用重新校验，绝不信任前端传进来的参数；两边改一边就要改另一边。
 跑命令只在桌面端可用，浏览器直开时直接报错，不会悄悄降级成别的东西。
 
+**Windows 上的命令名解析**（这件事在 Windows 上必踩，不是玄学）：Windows 的
+`CreateProcessW` 只自动补 `.exe`，补不了 `.cmd`，而本机 npm / npx 正是批处理文件，
+所以直接 `Command::new("npm")` 会报 `program not found`。`run_allowed` 会先按 PATH
+把命令名解析到真实存在的文件（`npm.exe` / `npm.cmd` 都试，命中谁 spawn 谁）再执行。
+命令名只认 PATH 上的裸名字，带路径或分隔符的一律拒绝。依然不额外启 shell：
+argv 数组原样传给子进程。因为 `.cmd` 最终由 COMSPEC 执行，元字符黑名单比 unix 侧更严，
+把 `% ^ ! " ' ( )` 和反斜杠一并挡掉（`has_shell_meta` 里可以看到完整清单）。
+
 ### 14.3 测试回路
 
 写完文件（工具写入或 `file:` 写入都算）且自动测试回路开启、且在桌面端时，
@@ -685,12 +693,42 @@ Rust 侧对每一次调用重新校验，绝不信任前端传进来的参数；
 已停止自动修复”，不许模型在测试通过前宣称完成。单次对话的读写轮数上限仍是 6 轮，
 测试轮数单独计，不互相顶掉。
 
+**两个必须知道的约束**（承接 14.2，这里是最容易看漏的一层）：
+
+- `autoTest` **默认关闭**，而且要显式写成 `true` 才生效。原因：`npm test` 真正执行的是
+  工程 `package.json` 里写死的脚本，而 npm 会自己起 shell 去跑它——白名单审的是 argv[0]，
+  审不到这一层。这个文件可能正是模型刚写的，默认开等于默认允许自动执行未经人审的命令。
+- 就算开关打开了，程序也会先读工程的 `package.json`，只有当 `scripts.test` 是受信任的
+  测试运行器（`vitest` / `jest` / `mocha` / `node --test` / `tsc`）时才真的跑；
+  认不出来就只提示“未运行”，不动手。判据在 `src/lib/tools.ts` 的 `isSafeTestScript`。
+
 ### 14.4 本版验证状态（先说清楚，再谈功能）
 
-- 前端已验：`npm test` 237/237、`npm run build` 通过；工具白名单、tool_calls 合并、
+- 前端已验：`npm test`（vitest）通过、类型检查 0 error；工具白名单、tool_calls 合并、
   测试回路决策、工具消息展开都有单测。
 - Rust 已按 fsx 的老办法处理：`runx.rs` 不依赖 tauri，`tools/fs-harness` 用
-  `#[path]` 直接引用它跑白名单与执行单测，CI 的 rust-fs 任务会跑到；
-  但本机没有 cargo，`src-tauri` 本体（lib.rs 的 IPC 注册、api.rs 的工具转发）
+  `#[path]` 直接引用它跑白名单与执行单测，CI 的 rust-fs 任务会跑到。
+- 本机没有 cargo，`src-tauri` 本体（lib.rs 的 IPC 注册、api.rs 的工具转发）
   在本机没有编译过，桌面全量构建与真模型工具调用仍需在 Windows 真机上验证
   后才能算“跑通过”。没验过的不要宣称已验。
+
+### 14.5 集成时的补充验证（本机 Windows 真机）
+
+补丁作者上面那句“src-tauri 本体没有编译过”，已由本机补上：
+
+| 项目 | 结果 |
+| --- | --- |
+| `cargo check`（含 runx.rs、lib.rs IPC 注册、api.rs 工具转发） | 通过，0 warning |
+| fs-harness Rust 单测 | 通过（含 runx 白名单与真实 spawn） |
+| vitest | 通过（补丁 237 + 本次修复补的用例） |
+| `run_allowed` 在本机真 spawn `npm --version` | 退出码 0，输出 10.9.7 |
+
+**集成过程中修掉的两个缺陷**（都是原补丁在 Windows 上的真问题）：
+
+1. `npm` / `npx` 无法 spawn。原实现直接 `Command::new("npm")`，本机实测报
+   `program not found`（Windows 不给 `.cmd` 补后缀）。修法：spawn 前先按 PATH 解析真实文件名，
+   白名单同时认 `npm.cmd` 这类形态，并补严元字符黑名单（见 14.2）。修完实测才拿到 10.9.7。
+   作者的 runx 单测只 spawn 过 `git`（真 .exe），所以这条当时漏网。
+2. 自动测试回路会把白名单“绕过一层”。`is_allowed` 审的是 argv[0]，但 `npm test`
+   执行的是 package.json 里的用户脚本。修法：`autoTest` 默认关 + 跑之前先验脚本内容
+   （见 14.3）。

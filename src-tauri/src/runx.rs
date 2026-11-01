@@ -33,8 +33,90 @@ pub struct RunResult {
     pub truncated: bool,
 }
 
+// 5) Windows 上 npm / npx 是批处理（npm.cmd / npx.cmd）：CreateProcess 只自动补
+//    `.exe`，补不了 `.cmd`，直接 `Command::new("npm")` 会报 program not found。
+//    run_allowed 里会先按 PATH 把命令名解析成真实文件名再 spawn。
+//    Kernel 会用 COMSPEC 去跑 .cmd，所以下面的元字符集比 unix 更严，把 cmd 的
+//    展开符（% ^ !）和引号一并挡掉。
 fn has_shell_meta(arg: &str) -> bool {
-    arg.chars().any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '<' | '>' | '\0' | '\n' | '\r'))
+    arg.chars().any(|c| {
+        matches!(
+            c,
+            ';' | '|'
+                | '&'
+                | '$'
+                | '`'
+                | '<'
+                | '>'
+                | '\0'
+                | '\n'
+                | '\r'
+                | '\\'
+                | '^'
+                | '%'
+                | '!'
+                | '"'
+                | '\''
+                | '('
+                | ')'
+        )
+    })
+}
+
+/// 去掉可执行后缀取命令名：`npm.cmd` → `npm`、`node.exe` → `node`。
+/// Windows 下模型可能直接输出带后缀的命令名，白名单要认它，但不能因此放宽命令清单。
+fn strip_exec_ext(cmd: &str) -> &str {
+    let lower = cmd.to_ascii_lowercase();
+    for ext in [".cmd", ".bat", ".exe"] {
+        if let Some(base) = lower.strip_suffix(ext) {
+            if !base.is_empty() {
+                return &cmd[..base.len()];
+            }
+        }
+    }
+    cmd
+}
+
+/// 命令名里不能带路径分隔符：白名单只认 PATH 上的裸命令名，不给可执行文件的路径。
+fn has_path_sep(cmd: &str) -> bool {
+    cmd.contains('/') || cmd.contains('\\')
+}
+
+/// PATH 里能不能找到这个文件（只看是不是普通文件，不执行它）
+fn exists_in_path(name: &str) -> bool {
+    let Some(dirs) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let has_sep = has_path_sep(name);
+    for dir in std::env::split_paths(&dirs) {
+        let candidate = if has_sep { std::path::PathBuf::from(name) } else { dir.join(name) };
+        if candidate.is_file() {
+            return true;
+        }
+        if has_sep {
+            break;
+        }
+    }
+    false
+}
+
+/// 真正要 spawn 的文件名。Windows 上 npm/npx 要先找 `.cmd` 版本，
+/// 否则 Kernel 找不到；其它平台或已带可执行名时原样返回。
+fn resolve_spawn_name(cmd: &str) -> String {
+    let candidates: Vec<String> = if cfg!(windows) && !has_path_sep(cmd) {
+        let base = strip_exec_ext(cmd);
+        [format!("{base}.exe"), format!("{base}.cmd"), base.to_string()]
+            .iter()
+            .filter(|c| exists_in_path(c))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if let Some(found) = candidates.into_iter().next() {
+        return found;
+    }
+    cmd.to_string()
 }
 
 /// 附加参数是不是安全的测试文件过滤词：不以 - 开头、不含 ..、不含 shell 元字符
@@ -61,7 +143,10 @@ pub fn is_allowed(argv: &[String]) -> Result<(), String> {
             return Err("命令参数不能为空或含控制字符".into());
         }
     }
-    let cmd = argv[0].as_str();
+    let cmd = strip_exec_ext(argv[0].as_str());
+    if has_path_sep(cmd) {
+        return Err("命令必须是 PATH 上的裸名字，不接受路径".into());
+    }
     let rest = &argv[1..];
     match cmd {
         "npm" => {
@@ -138,9 +223,13 @@ pub fn run_allowed(root: &str, argv: &[String]) -> Result<RunResult, String> {
         return Err(format!("工程目录不可用：{root}"));
     }
 
-    let mut child: Child = Command::new(&argv[0])
+    // Windows 上 npm / npx 得换成 PATH 里真实存在的那个文件名（多半是 .cmd），
+    // 否则 Kernel 只补 .exe，spawn 直接失败。
+    let spawn_name = resolve_spawn_name(argv[0].as_str());
+    let mut child: Child = Command::new(&spawn_name)
         .args(&argv[1..])
         .current_dir(dir)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -177,29 +266,13 @@ pub fn run_allowed(root: &str, argv: &[String]) -> Result<RunResult, String> {
         }));
     }
 
-    let start = Instant::now();
-    let mut timed_out = false;
-    let mut status: Option<std::process::ExitStatus> = None;
-    loop {
-        match child.try_wait().map_err(|e| format!("等待命令失败：{e}"))? {
-            Some(s) => {
-                status = Some(s);
-                break;
-            }
-            None => {
-                if start.elapsed() >= Duration::from_secs(RUN_TIMEOUT_SECS) {
-                    let _ = child.kill();
-                    timed_out = true;
-                    status = child.wait().ok();
-                    break;
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
-        }
-    }
+    let timed_out = self::run_timeout_watch(&mut child)?;
+
     for r in readers {
         let _ = r.join();
     }
+
+    let status = child.wait().ok();
 
     let stdout_raw = String::from_utf8_lossy(&stdout_buf.lock().unwrap()).into_owned();
     let stderr_raw = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
@@ -212,6 +285,24 @@ pub fn run_allowed(root: &str, argv: &[String]) -> Result<RunResult, String> {
         timed_out,
         truncated: t1 || t2,
     })
+}
+
+/// 轮询等待子进程：到点就杀掉并标记超时。抽成单独函数后等待循环只管超时，
+/// 管道与退出的处理留在 run_allowed 里，改一处不会误伤另一处。
+fn run_timeout_watch(child: &mut Child) -> Result<bool, String> {
+    let start = Instant::now();
+    loop {
+        match child.try_wait().map_err(|e| format!("等待命令失败：{e}"))? {
+            Some(_) => return Ok(false),
+            None => {
+                if start.elapsed() >= Duration::from_secs(RUN_TIMEOUT_SECS) {
+                    let _ = child.kill();
+                    return Ok(true);
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
 }
 
 fn out_read<R: Read>(r: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -254,5 +345,37 @@ mod tests {
     fn rejects_relative_root() {
         let r = run_allowed("relative/path", &argv(&["git", "status"]));
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn accepts_command_name_with_exec_extension() {
+        // Windows 下模型可能直接输出 npm.cmd / node.exe，白名单要认，
+        // 但不能因此放宽命令清单：同名的危险子命令照样拒绝。
+        assert!(is_allowed(&argv(&["npm.cmd", "test"])).is_ok());
+        assert!(is_allowed(&argv(&["npm.cmd", "run", "build"])).is_ok());
+        assert!(is_allowed(&argv(&["npx.cmd", "vitest", "run"])).is_ok());
+        assert!(is_allowed(&argv(&["node.exe", "--version"])).is_ok());
+        assert!(is_allowed(&argv(&["git.exe", "status"])).is_ok());
+        assert!(is_allowed(&argv(&["npm.cmd", "install"])).is_err());
+        assert!(is_allowed(&argv(&["git.cmd", "push"])).is_err());
+    }
+
+    #[test]
+    fn rejects_path_shaped_command() {
+        // 白名单只认 PATH 上的裸命令名，给绝对路径等于绕过命令清单
+        assert!(is_allowed(&argv(&["/usr/bin/npm", "test"])).is_err());
+        assert!(is_allowed(&argv(&["C:\\tools\\npm.cmd", "test"])).is_err());
+        assert!(is_allowed(&argv(&["./npm", "test"])).is_err());
+    }
+
+    #[test]
+    fn rejects_cmd_expansion_and_quote_chars() {
+        // .cmd 最终由 COMSPEC 执行，所以要连 cmd 的展开符一起挡掉
+        assert!(is_allowed(&argv(&["npm", "test", "%PATH%"])).is_err());
+        assert!(is_allowed(&argv(&["npm", "test", "a^b"])).is_err());
+        assert!(is_allowed(&argv(&["npm", "test", "a!b"])).is_err());
+        assert!(is_allowed(&argv(&["npm", "test", "a\"b"])).is_err());
+        assert!(is_allowed(&argv(&["npm", "test", "a(b"])).is_err());
+        assert!(is_allowed(&argv(&["npm", "test", "src\\lib"])).is_err());
     }
 }

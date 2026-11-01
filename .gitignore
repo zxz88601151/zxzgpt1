@@ -18,6 +18,7 @@ desktop.ini
 # 全流程测试时模型新建的工程目录
 skilltest-*/
 webtest-*/
+tooltest-*/
 
 # 测试证据截图（体积大且可随时重跑）
 tools/shots/

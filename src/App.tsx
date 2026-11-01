@@ -36,6 +36,7 @@ import {
 } from "./lib/files";
 import {
   isAllowedCommand,
+  isSafeTestScript,
   MAX_TEST_ROUNDS,
   testLoopDecision,
   TOOL_DEFS,
@@ -700,17 +701,25 @@ export default function App() {
           // 通过就停在本轮；失败把报错当成隐藏消息回传，模型下一轮再改；
           // 3 轮不过就停下，把失败原样报给人，不许模型宣称已修好。
           let testGiveUp = false;
+          // autoTest 默认关，且写成 === true：想开必须显式打开，默认路径不自动跑命令
           if (
             wroteSomething &&
-            s.autoTest !== false &&
+            s.autoTest === true &&
             s.toolCalls !== false &&
             !planMode &&
             fsAvailable() &&
             ws
           ) {
             try {
-              const r = await runAllowed(ws.root, ["npm", "test"]);
-              testRounds += 1;
+              // npm test 会执行 package.json 里写死的脚本，而这文件可能是模型刚写的：
+              // 白名单只审 argv[0]，审不到这层，所以先看脚本是不是受信任的测试运行器。
+              const pkgRaw = await fsRead(ws.root, "package.json");
+              const pkg = JSON.parse(pkgRaw) as { scripts?: Record<string, unknown> };
+              if (!isSafeTestScript(pkg.scripts?.test)) {
+                toast("自动测试未运行：package.json 的 test 脚本不是受信任的测试运行器（只认 vitest / jest / mocha / node --test / tsc）", "error");
+              } else {
+                const r = await runAllowed(ws.root, ["npm", "test"]);
+                testRounds += 1;
               const combined = [r.stdout, r.stderr ? `--- stderr ---\n${r.stderr}` : ""].filter(Boolean).join("\n");
               const decision = testLoopDecision(r.exit_code, testRounds);
               if (decision === "pass") {
@@ -732,6 +741,7 @@ export default function App() {
               } else {
                 testGiveUp = true;
                 toast(`测试 ${MAX_TEST_ROUNDS} 轮仍未通过，已停止自动修复，请人工处理`, "error");
+              }
               }
             } catch (e) {
               // 跑测试本身失败（比如不在桌面端、命令被拒）不阻断主流程，只报一声

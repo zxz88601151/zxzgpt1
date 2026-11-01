@@ -106,14 +106,31 @@ export const MAX_TEST_ROUNDS = 3;
 /** Rust 侧 run_allowed 的超时秒数，前端只做提示，不以此为准 */
 export const RUN_TIMEOUT_SECS = 60;
 
-const SHELL_META = /[;|&$`\\\n\r<>]/;
+/** 转义符黑名单：unix 侧一套 + Windows .cmd 经 COMSPEC 执行时会被解释的一套。
+ * 两边 white list 必须和 Rust `runx.rs` 的 `has_shell_meta` 完全一致，改一处就改两处。*/
+const SHELL_META = /[;|&$`\\\n\r<>^%!"'()]/;
+
+/** 去掉可执行后缀取命令名：npm.cmd → npm、node.exe → node。
+ * Windows 下模型可能直接输出带后缀的命令名，白名单要认，但命令清单不放宽。*/
+function stripExecExt(cmd: string): string {
+  const lower = cmd.toLowerCase();
+  for (const ext of [".cmd", ".bat", ".exe"]) {
+    if (lower.endsWith(ext) && lower.length > ext.length) return cmd.slice(0, -ext.length);
+  }
+  return cmd;
+}
+
+/** 命令名不接受路径：白名单只认 PATH 上的裸命令名 */
+function hasPathSep(cmd: string): boolean {
+  return cmd.includes("/") || cmd.includes("\\");
+}
 
 /** 额外参数是不是一个安全的相对路径/过滤词：不以 - 开头、不含..、不含 shell 元字符、不以 / 开头 */
 function isSafeFilterArg(arg: string): boolean {
-if (!arg || arg.startsWith("-")) return false;
-if (arg.split("/").some((seg) => seg === ".." || seg === "")) return false;
-if (SHELL_META.test(arg)) return false;
-return true;
+  if (!arg || arg.startsWith("-")) return false;
+  if (arg.split("/").some((seg) => seg === ".." || seg === "")) return false;
+  if (SHELL_META.test(arg)) return false;
+  return true;
 }
 
 /**
@@ -126,7 +143,9 @@ for (const a of argv) {
 if (typeof a!== "string" ||!a) return "命令参数不能为空";
 if (/[\0\n\r]/.test(a)) return "命令参数不能含控制字符";
 }
-const [cmd,...rest] = argv;
+const cmd = stripExecExt(argv[0] ?? "");
+if (hasPathSep(cmd)) return "命令必须是 PATH 上的裸名字，不接受路径";
+const rest = argv.slice(1);
 if (cmd === "npm") {
 if (rest.length >= 1 && rest[0] === "test") {
 const filters = rest.slice(1);
@@ -243,6 +262,21 @@ return out;
 export function truncateToolOutput(text: string): string {
 if (text.length <= MAX_TOOL_OUTPUT_CHARS) return text;
 return text.slice(0, MAX_TOOL_OUTPUT_CHARS) + `\n\n/* 工具输出已截断：原文 ${text.length} 字符，只取前 ${MAX_TOOL_OUTPUT_CHARS} 字符 */`;
+}
+
+/**
+ * 自动测试回路能不能跑：只看工程 package.json 里 test 脚本的内容。
+ *
+ * 为什么需要这一道：`run_command` 的白名单审的是 argv[0]，但 `npm test` 真正执行的是
+ * package.json 里写死的那个脚本（npm 自己会起 shell 跑它）。这个文件可能正是模型刚写
+ * 进去的，也可能被模型读到的内容引导改写——等于把受控执行变成了任意命令执行。
+ * 所以自动回路只认这些已知的测试运行器；不认识的脚本不自动跑，想跑就在界面上自己开开关。
+ */
+const SAFE_TEST_RUNNERS = /^\s*(vitest|jest|mocha|node\s+--test|tsc)\b/i;
+
+export function isSafeTestScript(script: unknown): boolean {
+  if (typeof script !== "string" || !script.trim()) return false;
+  return SAFE_TEST_RUNNERS.test(script.trim());
 }
 
 /** 测试回路决策：completedRounds 是已经跑完的轮数（含本轮） */

@@ -80,7 +80,9 @@ export const DEFAULT_SETTINGS: Settings = {
   planMode: false,
   confirmWrites: false,
   toolCalls: true,
-  autoTest: true,
+  // 写完自动跑测试默认关：npm test 会执行工程 package.json 里写死的脚本，
+  // 而这文件可能是模型刚写的，默认开等于默认允许自动执行未经人审的命令。
+  autoTest: false,
 };
 
 /** 空会话时的引导卡片 */
