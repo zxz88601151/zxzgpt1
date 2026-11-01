@@ -95,8 +95,17 @@ function check(name, ok, detail) {
     window.__TAURI_INTERNALS__ = {
       invoke: async (cmd, args) => {
         if (cmd === 'proxy_info') return null; // 保持直连，请求直接打 mock 上游
+        // 工作区会话：真实实现里 root 只在这里登记一次，之后只认 sessionId
+        if (cmd === 'ws_open') {
+          const base = String(args.root).split(/[\\/]/).filter(Boolean).pop() || String(args.root);
+          return { id: 'ws-e2e', root: String(args.root), name: base };
+        }
+        if (cmd === 'ws_info') return { id: String(args.sessionId), root: ROOT, name: 'demo' };
+        if (cmd === 'ws_close') return null;
         if (cmd === 'fs_roots') return [DRIVE];
         if (cmd === 'fs_list') return listOf(args.path);
+        // 工程内列目录：只收 sessionId + 相对路径
+        if (cmd === 'fs_list_in') return listOf(args.rel ? toAbs(args.rel) : ROOT);
         if (cmd === 'fs_mkdir') {
           // 与 Rust 侧同口径：已存在就报错，不静默复用
           if (listOf(args.dir).some((e) => e.name === args.name)) {
@@ -115,7 +124,7 @@ function check(name, ok, detail) {
         if (cmd === 'fs_write') {
           const created = !Object.prototype.hasOwnProperty.call(disk, args.rel);
           disk[args.rel] = args.content;
-          written.push({ root: args.root, rel: args.rel, bytes: args.content.length, created });
+          written.push({ sessionId: args.sessionId, rel: args.rel, bytes: args.content.length, created });
           return { path: toAbs(args.rel), bytes: args.content.length, created };
         }
         throw new Error('unknown cmd: ' + cmd);
@@ -207,7 +216,11 @@ function check(name, ok, detail) {
     '路径直接来自模型输出',
     writes.some((w) => w.rel === 'index.html') && writes.some((w) => w.rel === 'src/main.js')
   );
-  check('根目录取自所选文件夹', writes.every((w) => w.root === 'F:\\demo'), writes[0] && writes[0].root);
+  check(
+    '写入只带已登记的 sessionId，不携带任何 root',
+    writes.every((w) => w.sessionId === 'ws-e2e' && !('root' in w)),
+    writes[0] && writes[0].sessionId
+  );
 
   const diskHtml = await page.evaluate(() => window.__DISK['index.html'] || '');
   check('文件内容真的写进了磁盘', diskHtml.includes('<h1>你好，本地工程</h1>'), diskHtml.length + ' 字节');

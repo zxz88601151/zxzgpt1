@@ -5,9 +5,11 @@
  *   <技能库>/skills/<id>/SKILL.md   多数开源技能仓的组织方式
  * 目录里没有 SKILL.md 的文件夹直接跳过（常见于 refs/、assets/、示例工程），
  * 只有「读了 SKILL.md 但解析失败」才报错——那种才需要用户去改。
+ * 工程边界与其他文件操作一致：目录先由 Rust 登记成会话，之后只认 sessionId，
+ * 这里不自己拼 root 去读（见 fsapi.ts 的 sessionFor）。
  */
 
-import { fsList, fsRead } from "./fsapi";
+import { fsListIn, fsRead, sessionFor } from "./fsapi";
 import { parseSkill, sanitizeSkillId, type Skill } from "./skill";
 
 /** 一个技能库最多认几个技能，防止误选整个 home 目录导致卡死 */
@@ -27,8 +29,14 @@ export async function loadLocalSkills(root: string): Promise<ScanOutcome> {
   const seen = new Set<string>();
 
   let top: { name: string; path: string; dir: boolean }[] = [];
+  let sessionId: string;
   try {
-    top = await fsList(root);
+    sessionId = await sessionFor(root);
+  } catch (e) {
+    return { skills, errors: [{ id: root, error: (e as Error).message }] };
+  }
+  try {
+    top = await fsListIn(sessionId, "");
   } catch (e) {
     return { skills, errors: [{ id: root, error: (e as Error).message }] };
   }
@@ -40,7 +48,7 @@ export async function loadLocalSkills(root: string): Promise<ScanOutcome> {
     // 常见仓库布局：真正技能在 skills/<id>/ 下面
     if (e.name === "skills" || e.name === "plugins") {
       try {
-        const sub = await fsList(e.path);
+        const sub = await fsListIn(sessionId, e.name);
         for (const s of sub) {
           if (s.dir) candidates.push({ id: s.name, rel: `${e.name}/${s.name}/SKILL.md`, dir: s.path });
         }
@@ -54,7 +62,7 @@ export async function loadLocalSkills(root: string): Promise<ScanOutcome> {
   for (const c of candidates.slice(0, MAX_SCAN)) {
     let text: string;
     try {
-      text = await fsRead(root, c.rel);
+      text = await fsRead(sessionId, c.rel);
     } catch {
       continue; // 没有 SKILL.md，不是技能目录
     }

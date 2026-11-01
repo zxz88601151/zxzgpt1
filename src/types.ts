@@ -73,6 +73,9 @@ export type Theme = "dark" | "light";
 
 /** 本地工程目录：选中后模型输出的 file: 代码块可以一键落盘 */
 export interface Workspace {
+  /** Rust 登记的会话号：所有文件/命令操作只认它，root 不再参与任何 IPC */
+  sessionId: string;
+  /** 展示用根目录（Rust canonicalize 后的值），只给人看，不能再传给文件 IPC */
   root: string;
   name: string;
   /** 给模型看的目录树快照（深度 2，忽略依赖与构建产物） */

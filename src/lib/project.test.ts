@@ -21,7 +21,7 @@ describe("项目记忆", () => {
   it("工程记忆进 buildMessages，且在计划指令之前", () => {
     const settings = {
       ...DEFAULT_SETTINGS,
-      workspace: { root: "/tmp/demo", name: "demo", tree: "", memory: "本项目禁止用魔法值", memorySource: "CLAUDE.md" },
+      workspace: { sessionId: "ws-test", root: "/tmp/demo", name: "demo", tree: "", memory: "本项目禁止用魔法值", memorySource: "CLAUDE.md" },
     };
     const msgs = buildMessages({ id: "c", title: "t", messages: [], createdAt: 0, updatedAt: 0 }, settings);
     const joined = msgs.map((m) => m.content).join("\n");

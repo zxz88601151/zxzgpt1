@@ -251,28 +251,56 @@ function check(name, ok, detail) {
     async ([root]) => {
       const inv = window.__TAURI_INTERNALS__;
       const out = {};
+      // 会话是唯一的工程边界入口：root 只在这里出现一次，之后只认 sessionId
+      const s = await inv.invoke('ws_open', { root });
+      out.sessionId = s && s.id ? s.id : null;
       for (const rel of ['../evil.txt', 'C:/Windows/evil.txt', 'a/../../evil.txt']) {
         try {
-          await inv.invoke('fs_write', { root, rel, content: 'x' });
+          await inv.invoke('fs_write', { sessionId: s.id, rel, content: 'x' });
           out[rel] = 'ALLOWED';
         } catch (e) {
           out[rel] = String(e);
         }
       }
       try {
-        const r = await inv.invoke('fs_write', { root, rel: 'proof/ok.txt', content: 'hello' });
+        const r = await inv.invoke('fs_write', { sessionId: s.id, rel: 'proof/ok.txt', content: 'hello' });
         out['proof/ok.txt'] = r && r.created ? 'created' : 'overwrote';
       } catch (e) {
         out['proof/ok.txt'] = String(e);
+      }
+      // 伪造 / 已关闭的会话号一律拒绝
+      try {
+        await inv.invoke('fs_write', { sessionId: 'ws-forged', rel: 'proof/forged.txt', content: 'x' });
+        out['forged'] = 'ALLOWED';
+      } catch (e) {
+        out['forged'] = String(e);
+      }
+      await inv.invoke('ws_close', { sessionId: s.id });
+      try {
+        await inv.invoke('fs_write', { sessionId: s.id, rel: 'proof/closed.txt', content: 'x' });
+        out['closed'] = 'ALLOWED';
+      } catch (e) {
+        out['closed'] = String(e);
+      }
+      // 关掉的会话也不能拿来跑命令
+      try {
+        await inv.invoke('run_allowed', { sessionId: s.id, argv: ['git', 'status'] });
+        out['closed-run'] = 'ALLOWED';
+      } catch (e) {
+        out['closed-run'] = String(e);
       }
       return out;
     },
     [ROOT]
   );
+  check('登记会话拿到 sessionId', /^ws-/.test(escape.sessionId || ''), escape.sessionId);
   check('拦截 ../evil.txt', /不允许/.test(escape['../evil.txt']), escape['../evil.txt']);
   check('拦截盘符路径', /不允许/.test(escape['C:/Windows/evil.txt']), escape['C:/Windows/evil.txt']);
   check('拦截 a/../../evil.txt', /不允许/.test(escape['a/../../evil.txt']), escape['a/../../evil.txt']);
   check('合法路径仍可写入', escape['proof/ok.txt'] === 'created', escape['proof/ok.txt']);
+  check('伪造会话被拒绝', /未登记/.test(escape['forged']), escape['forged']);
+  check('已关闭会话写入被拒绝', /已关闭/.test(escape['closed']), escape['closed']);
+  check('已关闭会话不能跑命令', /已关闭/.test(escape['closed-run']), escape['closed-run']);
   check(
     '越权文件没有落盘',
     !fs.existsSync(path.join(ROOT, '..', 'evil.txt')) && !fs.existsSync('C:/Windows/evil.txt')

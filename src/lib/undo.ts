@@ -4,10 +4,12 @@
  * 列成「什么时候改了什么」，以及把某一版写回去。
  *
  * 恢复本身也是可撤销的：写回之前，当前内容会先被存进一个新的时间戳目录。
+ *
+ * 工程根目录不经过这里：所有读写都只认 Rust 登记的 sessionId（见 fsapi.ts）。
  */
 
 import { UNDO_DIR } from "./files";
-import { fsList, fsRead, fsWrite, type FsEntry } from "./fsapi";
+import { fsListIn, fsRead, fsWrite, type FsEntry } from "./fsapi";
 
 export interface UndoFile {
   /** 工程内相对路径，如 `src/main.js` */
@@ -60,12 +62,14 @@ export function relFromAbs(absPath: string, prefixAbs: string): string {
   return rel.replace(/[\\/]+/g, "/").replace(/^\/+/, "");
 }
 
+/** 快照目录在工程内的相对路径前缀 */
+const UNDO_PREFIX = `${UNDO_DIR}/`;
+
 /** 列出所有快照，新的在前；单个快照里按路径排序 */
-export async function listUndo(root: string): Promise<UndoSnapshot[]> {
-  const base = undoRootOf(root);
+export async function listUndo(sessionId: string): Promise<UndoSnapshot[]> {
   let top: FsEntry[];
   try {
-    top = await fsList(base);
+    top = await fsListIn(sessionId, UNDO_DIR);
   } catch {
     return []; // 还没写过任何文件时目录不存在，正常情况
   }
@@ -73,33 +77,36 @@ export async function listUndo(root: string): Promise<UndoSnapshot[]> {
   const snapshots: UndoSnapshot[] = [];
   for (const dir of top.filter((e) => e.dir)) {
     const files: UndoFile[] = [];
-    await walk(dir.path, dir.path, files, 0);
+    const base = `${UNDO_PREFIX}${dir.name}`;
+    await walk(sessionId, base, base, files, 0);
     snapshots.push({ stamp: dir.name, files: files.sort((x, y) => x.rel.localeCompare(y.rel)) });
   }
   return snapshots.sort((x, y) => y.stamp.localeCompare(x.stamp));
 
-  async function walk(path: string, stampPath: string, out: UndoFile[], depth: number): Promise<void> {
+  /** base 是快照目录（`.zxz/undo/<时间戳>`），out 里的 rel 都是相对它的工程内路径 */
+  async function walk(sid: string, base: string, dirRel: string, out: UndoFile[], depth: number): Promise<void> {
     if (depth > MAX_DEPTH || out.length >= MAX_FILES) return;
     let entries: FsEntry[];
     try {
-      entries = await fsList(path);
+      entries = await fsListIn(sid, dirRel);
     } catch {
       return;
     }
     for (const e of entries) {
       if (out.length >= MAX_FILES) return;
+      const rel = `${dirRel}/${e.name}`;
       if (e.dir) {
-        await walk(e.path, stampPath, out, depth + 1);
+        await walk(sid, base, rel, out, depth + 1);
       } else {
-        out.push({ rel: relFromAbs(e.path, stampPath), bytes: e.size });
+        out.push({ rel: rel.slice(base.length + 1), bytes: e.size });
       }
     }
   }
 }
 
 /** 读某一版备份的正文 */
-export async function readUndoFile(root: string, stamp: string, rel: string): Promise<string> {
-  return fsRead(root, `${UNDO_DIR}/${stamp}/${rel}`);
+export async function readUndoFile(sessionId: string, stamp: string, rel: string): Promise<string> {
+  return fsRead(sessionId, `${UNDO_DIR}/${stamp}/${rel}`);
 }
 
 export interface RestoreResult {
@@ -112,19 +119,19 @@ export interface RestoreResult {
  * 把某个文件的某一版写回去。
  * 写之前先把当前内容再备份一份，所以「恢复」本身也能再恢复。
  */
-export async function restoreUndo(root: string, stamp: string, rel: string): Promise<RestoreResult> {
-  const content = await readUndoFile(root, stamp, rel);
+export async function restoreUndo(sessionId: string, stamp: string, rel: string): Promise<RestoreResult> {
+  const content = await readUndoFile(sessionId, stamp, rel);
 
   let safety: string | null = null;
   try {
-    const current = await fsRead(root, rel);
+    const current = await fsRead(sessionId, rel);
     const now = stampNow();
-    await fsWrite(root, `${UNDO_DIR}/${now}/${rel}`, current);
+    await fsWrite(sessionId, `${UNDO_DIR}/${now}/${rel}`, current);
     safety = now;
   } catch {
     // 当前文件不存在（比如它在别的分支被删了）就没有可备份的东西
   }
 
-  const r = await fsWrite(root, rel, content);
+  const r = await fsWrite(sessionId, rel, content);
   return { safety, bytes: r.bytes };
 }

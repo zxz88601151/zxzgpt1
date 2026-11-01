@@ -59,7 +59,7 @@ export function FileWrites({ blocks, files, workspace, onApply }: FileWritesProp
     let newText = "";
     let note = "";
     try {
-      newText = await fsRead(workspace.root, rel);
+      newText = await fsRead(workspace.sessionId, rel);
     } catch (e) {
       note = "读不到磁盘上的这个文件：" + (e as Error).message;
     }
@@ -78,7 +78,7 @@ export function FileWrites({ blocks, files, workspace, onApply }: FileWritesProp
       return;
     }
     try {
-      const oldText = await fsRead(workspace.root, r.backup);
+      const oldText = await fsRead(workspace.sessionId, r.backup);
       setDiff({ path: rel, oldText, newText, note });
     } catch (e) {
       setDiff({ path: rel, oldText: "", newText, note: "快照读取失败：" + (e as Error).message });

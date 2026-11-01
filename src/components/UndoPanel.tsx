@@ -6,7 +6,8 @@ import { Icon } from "./ui";
 
 interface UndoPanelProps {
   open: boolean;
-  root: string | null;
+  /** Rust 登记的会话号：快照读写只认它，前端不持有工程根目录 */
+  sessionId: string | null;
   onClose: () => void;
   /** 恢复成功后通知外层（刷新目录树 + toast） */
   onRestored: (text: string) => void;
@@ -20,7 +21,7 @@ interface DiffState {
 }
 
 /** 撤销栈：每次模型覆盖文件前的旧内容都在这，看差异 / 恢复某一版 */
-export function UndoPanel({ open, root, onClose, onRestored }: UndoPanelProps) {
+export function UndoPanel({ open, sessionId, onClose, onRestored }: UndoPanelProps) {
   const [snaps, setSnaps] = useState<UndoSnapshot[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -29,11 +30,11 @@ export function UndoPanel({ open, root, onClose, onRestored }: UndoPanelProps) {
   const [busy, setBusy] = useState("");
 
   const load = useCallback(async () => {
-    if (!root) return;
+    if (!sessionId) return;
     setLoading(true);
     setError("");
     try {
-      const list = await listUndo(root);
+      const list = await listUndo(sessionId);
       setSnaps(list);
       setOpened(list[0]?.stamp ?? null);
     } catch (e) {
@@ -41,22 +42,22 @@ export function UndoPanel({ open, root, onClose, onRestored }: UndoPanelProps) {
     } finally {
       setLoading(false);
     }
-  }, [root]);
+  }, [sessionId]);
 
   useEffect(() => {
-    if (!open || !root) return;
+    if (!open || !sessionId) return;
     void load();
-  }, [open, root, load]);
+  }, [open, sessionId, load]);
 
   const showDiff = async (snap: UndoSnapshot, rel: string) => {
-    if (!root) return;
+    if (!sessionId) return;
     setBusy("diff:" + rel);
     try {
-      const oldText = await readUndoFile(root, snap.stamp, rel);
+      const oldText = await readUndoFile(sessionId, snap.stamp, rel);
       let newText = "";
       let note = "";
       try {
-        newText = await fsRead(root, rel);
+        newText = await fsRead(sessionId, rel);
       } catch {
         note = "这个文件现在已经不在磁盘上了，下面只有旧版内容。";
       }
@@ -69,14 +70,14 @@ export function UndoPanel({ open, root, onClose, onRestored }: UndoPanelProps) {
   };
 
   const doRestore = async (snap: UndoSnapshot, rel: string) => {
-    if (!root) return;
+    if (!sessionId) return;
     const ok = window.confirm(
       `把 ${rel} 恢复到 ${stampLabel(snap.stamp)} 这一版？\n\n当前内容会先存进一个新的快照，恢复错了还能再退回来。`
     );
     if (!ok) return;
     setBusy("restore:" + rel);
     try {
-      const r = await restoreUndo(root, snap.stamp, rel);
+      const r = await restoreUndo(sessionId, snap.stamp, rel);
       onRestored(`已恢复 ${rel}（${r.bytes} 字节${r.safety ? "，当前版本已备份" : ""}）`);
       await load();
     } catch (e) {

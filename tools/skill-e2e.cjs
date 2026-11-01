@@ -97,14 +97,38 @@ const SEED = {
       return [];
     };
 
+    // 工作区会话：真实实现里 root 只在这里登记一次，之后读写只认 sessionId。
+    // 会话号 → 它登记的目录（技能库根，或单个技能目录）
+    const sessions = new Map();
+    let sessionSeq = 0;
+    const baseOf = (p) => String(p || '').replace(/\\+$/, '').split(/[\\/]/).filter(Boolean).pop() || String(p || '');
+
     window.__TAURI_INTERNALS__ = {
       invoke: async (cmd, args) => {
         if (cmd === 'proxy_info') return null; // 直连 mock 上游
+        if (cmd === 'ws_open') {
+          const id = 'sk-' + ++sessionSeq;
+          sessions.set(id, String(args.root));
+          return { id, root: String(args.root), name: baseOf(args.root) };
+        }
+        if (cmd === 'ws_info') {
+          if (!sessions.has(String(args.sessionId))) throw new Error('未登记的会话：' + args.sessionId);
+          return { id: String(args.sessionId), root: sessions.get(String(args.sessionId)), name: baseOf(sessions.get(String(args.sessionId))) };
+        }
+        if (cmd === 'ws_close') {
+          sessions.delete(String(args.sessionId));
+          return null;
+        }
         if (cmd === 'fs_roots') return ['F:\\'];
         if (cmd === 'fs_list') return dirsOf(args.path);
-        if (cmd === 'fs_exists') return Object.prototype.hasOwnProperty.call(DISK, toKey(args.root, args.rel));
+        if (cmd === 'fs_list_in') {
+          const base = sessions.get(String(args.sessionId));
+          if (base === undefined) throw new Error('未登记的会话：' + args.sessionId);
+          return dirsOf(String(args.rel || '') === '' ? base : base.replace(/\\+$/, '') + '\\' + String(args.rel).replace(/\//g, '\\'));
+        }
+        if (cmd === 'fs_exists') return Object.prototype.hasOwnProperty.call(DISK, toKey(sessions.get(String(args.sessionId)), args.rel));
         if (cmd === 'fs_read') {
-          const key = toKey(args.root, args.rel);
+          const key = toKey(sessions.get(String(args.sessionId)), args.rel);
           reads.push(key === null ? 'ESCAPE:' + args.rel : key);
           if (key === null || !Object.prototype.hasOwnProperty.call(DISK, key)) {
             throw new Error('NotFound: ' + args.rel);
@@ -112,7 +136,7 @@ const SEED = {
           return DISK[key];
         }
         if (cmd === 'fs_write') {
-          const key = toKey(args.root, args.rel);
+          const key = toKey(sessions.get(String(args.sessionId)), args.rel);
           if (key === null) throw new Error('越权写入：' + args.rel);
           const created = !Object.prototype.hasOwnProperty.call(DISK, key);
           DISK[key] = args.content;

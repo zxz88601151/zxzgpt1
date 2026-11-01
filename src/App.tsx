@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { chatStream, detectTransport, DIRECT } from "./api";
-import { buildTree, fsAvailable, fsExists, fsList, fsRead, fsWrite, runAllowed } from "./lib/fsapi";
+import { buildTree, fsAvailable, fsExists, fsListIn, fsRead, fsWrite, runAllowed, sessionFor, wsClose, wsInfo, wsOpen as openSession } from "./lib/fsapi";
 import { buildMessages, filterConversations, findActive, loadState, newConversation, persist, titleFrom } from "./state";
 import { clamp, copyText, uid } from "./lib/text";
 import { diffLines, diffStats } from "./lib/diff";
@@ -35,8 +35,9 @@ import {
   type ReadOutcome,
 } from "./lib/files";
 import {
+  checkNpmCommandScript,
   isAllowedCommand,
-  isSafeTestScript,
+  npmScriptName,
   MAX_TEST_ROUNDS,
   testLoopDecision,
   TOOL_DEFS,
@@ -235,7 +236,7 @@ export default function App() {
     const ws = stateRef.current.settings.workspace;
     if (!ws) return;
     try {
-      const tree = await buildTree(ws.root);
+      const tree = await buildTree(ws.sessionId);
       update((prev) => ({
         ...prev,
         settings: {
@@ -270,22 +271,22 @@ export default function App() {
         try {
           let oldText = "";
           let backup: string | undefined;
-          if (await fsExists(ws.root, b.path)) {
+          if (await fsExists(ws.sessionId, b.path)) {
             try {
-              oldText = await fsRead(ws.root, b.path);
+              oldText = await fsRead(ws.sessionId, b.path);
               backup = backupRelPath(stamp, b.path);
-              await fsWrite(ws.root, backup, oldText);
+              await fsWrite(ws.sessionId, backup, oldText);
               backedUp += 1;
             } catch {
               /* 备份失败不阻断写入 */
             }
           }
-          const r = await fsWrite(ws.root, b.path, b.content);
+          const r = await fsWrite(ws.sessionId, b.path, b.content);
           // 写完回读校验：Claude Code 那套“改完要验证”在本工具里没有终端可跑，
           // 至少做到写进去的东西和模型给的东西逐字一致，否则不能算“写好了”。
           let verified = true;
           try {
-            verified = (await fsRead(ws.root, b.path)) === b.content;
+            verified = (await fsRead(ws.sessionId, b.path)) === b.content;
           } catch {
             verified = false;
           }
@@ -333,7 +334,7 @@ export default function App() {
       const olds = new Map<string, string>();
       for (const b of blocks) {
         try {
-          if (await fsExists(ws.root, b.path)) olds.set(b.path, await fsRead(ws.root, b.path));
+          if (await fsExists(ws.sessionId, b.path)) olds.set(b.path, await fsRead(ws.sessionId, b.path));
         } catch {
           /* 读不到旧内容就按新建处理，面板里会显示为空 */
         }
@@ -353,10 +354,10 @@ export default function App() {
   );
 
   /** 接入工程时读项目记忆：CLAUDE.md 优先，没有就退到 AGENTS.md，读不到就算没有 */
-  const loadProjectMemory = useCallback(async (root: string): Promise<{ source: string; body: string } | null> => {
+  const loadProjectMemory = useCallback(async (sessionId: string): Promise<{ source: string; body: string } | null> => {
     for (const file of PROJECT_MEMORY_FILES) {
       try {
-        const body = await fsRead(root, file);
+        const body = await fsRead(sessionId, file);
         if (body.trim()) return { source: file, body: truncateProjectMemory(body) };
       } catch {
         /* 这个文件不存在就试下一个 */
@@ -366,7 +367,7 @@ export default function App() {
   }, []);
 
   /** 按模型的要求读真实文件内容 */
-  const readForModel = useCallback(async (root: string, paths: string[]): Promise<ReadOutcome[]> => {
+  const readForModel = useCallback(async (sessionId: string, paths: string[]): Promise<ReadOutcome[]> => {
     const out: ReadOutcome[] = [];
     for (const p of paths) {
       const bad = relPathError(p);
@@ -375,7 +376,7 @@ export default function App() {
         continue;
       }
       try {
-        out.push({ path: p, content: await fsRead(root, p) });
+        out.push({ path: p, content: await fsRead(sessionId, p) });
       } catch (e) {
         out.push({ path: p, error: (e as Error).message });
       }
@@ -402,7 +403,7 @@ export default function App() {
         continue;
       }
       try {
-        out.push({ path: label, content: await fsRead(sk.dir, r.rel) });
+        out.push({ path: label, content: await fsRead(await sessionFor(sk.dir), r.rel) });
       } catch (e) {
         out.push({ path: label, error: (e as Error).message });
       }
@@ -434,13 +435,14 @@ export default function App() {
       }
       try {
         if (call.name === "read_file") {
-          const content = await fsRead(ws.root, args.path as string);
+          const content = await fsRead(ws.sessionId, args.path as string);
           return { ...base, result: truncateToolOutput(content) };
         }
         if (call.name === "list_dir") {
+          // 走 fsListIn（sessionId+rel）而不是 fsList（任意绝对路径）：
+          // 模型给绝对路径或 .. 时 Rust 侧直接拒绝，不能借列目录越出工程根
           const rel = (args.path as string) || "";
-          const dir = rel ? ws.root.replace(/[\\/]+$/, "") + "/" + rel : ws.root;
-          const entries = await fsList(dir);
+          const entries = await fsListIn(ws.sessionId, rel);
           const lines = entries.map((e) => (e.dir ? `${e.name}/` : `${e.name} (${e.size} bytes)`));
           return { ...base, result: lines.length ? lines.join("\n") : "(空目录)" };
         }
@@ -451,10 +453,10 @@ export default function App() {
           let visited = 0;
           const walk = async (rel: string, depth: number): Promise<void> => {
             if (matches.length >= 100 || visited >= 100 || depth > 3) return;
-            const dir = rel ? ws.root.replace(/[\\/]+$/, "") + "/" + rel : ws.root;
             let entries;
             try {
-              entries = await fsList(dir);
+              // 同样走工程内通道：搜索不能借相对路径拼绝对路径逃出去
+              entries = await fsListIn(ws.sessionId, rel);
             } catch {
               return; // 无权限的目录直接跳过
             }
@@ -467,7 +469,7 @@ export default function App() {
               visited += 1;
               let content: string;
               try {
-                content = await fsRead(ws.root, rel ? `${rel}/${e.name}` : e.name);
+                content = await fsRead(ws.sessionId, rel ? `${rel}/${e.name}` : e.name);
               } catch {
                 continue; // 读不到（二进制、超大）就跳过，不阻断搜索
               }
@@ -496,7 +498,17 @@ export default function App() {
           const argv = args.argv as string[];
           const denied = isAllowedCommand(argv);
           if (denied) return { ...base, error: denied };
-          const r = await runAllowed(ws.root, argv);
+          // argv 白名单只审到 argv[0]；npm/npx 真正跑的是 package.json 里的脚本，
+          // 那个文件可能正是模型写的。执行前先看脚本内容（Rust 侧还会再查一次）。
+          if (npmScriptName(argv)) {
+            try {
+              const scriptDenied = checkNpmCommandScript(argv, await fsRead(ws.sessionId, "package.json"));
+              if (scriptDenied) return { ...base, error: scriptDenied };
+            } catch (e) {
+              return { ...base, error: `无法读取 package.json 审计 npm 脚本：${(e as Error).message}` };
+            }
+          }
+          const r = await runAllowed(ws.sessionId, argv);
           const head = `退出码：${r.exit_code === null ? "未知（进程被终止）" : r.exit_code}${r.timed_out ? "（60 秒超时，已终止）" : ""}`;
           const body = [r.stdout, r.stderr ? `--- stderr ---\n${r.stderr}` : ""].filter(Boolean).join("\n");
           return { ...base, result: truncateToolOutput(`${head}\n${body || "(无输出)"}`) };
@@ -711,15 +723,10 @@ export default function App() {
             ws
           ) {
             try {
-              // npm test 会执行 package.json 里写死的脚本，而这文件可能是模型刚写的：
-              // 白名单只审 argv[0]，审不到这层，所以先看脚本是不是受信任的测试运行器。
-              const pkgRaw = await fsRead(ws.root, "package.json");
-              const pkg = JSON.parse(pkgRaw) as { scripts?: Record<string, unknown> };
-              if (!isSafeTestScript(pkg.scripts?.test)) {
-                toast("自动测试未运行：package.json 的 test 脚本不是受信任的测试运行器（只认 vitest / jest / mocha / node --test / tsc）", "error");
-              } else {
-                const r = await runAllowed(ws.root, ["npm", "test"]);
-                testRounds += 1;
+              // 脚本审计已下沉到 Rust 执行层（runx）：npm test 真正跑的脚本不是
+              // 受信任运行器时直接拒绝，这里不再前端预判，拒绝原因走 catch 报出来。
+              const r = await runAllowed(ws.sessionId, ["npm", "test"]);
+              testRounds += 1;
               const combined = [r.stdout, r.stderr ? `--- stderr ---\n${r.stderr}` : ""].filter(Boolean).join("\n");
               const decision = testLoopDecision(r.exit_code, testRounds);
               if (decision === "pass") {
@@ -742,7 +749,6 @@ export default function App() {
                 testGiveUp = true;
                 toast(`测试 ${MAX_TEST_ROUNDS} 轮仍未通过，已停止自动修复，请人工处理`, "error");
               }
-              }
             } catch (e) {
               // 跑测试本身失败（比如不在桌面端、命令被拒）不阻断主流程，只报一声
               toast("自动测试未能运行：" + (e as Error).message, "error");
@@ -763,7 +769,7 @@ export default function App() {
           // 工具调用轮次里测试回路已经把报错回传了，读/附件请求仍按原流程回传，
           // 两类隐藏消息都会进下一轮的上下文，不会互相丢。
 
-          const outcomes = ws ? await readForModel(ws.root, reads) : [];
+          const outcomes = ws ? await readForModel(ws.sessionId, reads) : [];
           const refOutcomes = await readSkillRefs(allSkills, refs);
           const toolMsg: Message = {
             role: "user",
@@ -827,26 +833,38 @@ export default function App() {
 
   /* ------------------------------------------------------------ 本地工程 */
 
-  // 工程目录可能被删掉或移动：启动时校验一次，失效就自动退出该模式，
-  // 否则后续每次写入都会报「工程目录不可用」，用户不知道从哪改。
-  useEffect(() => {
-    if (!ready) return;
+  // 工程目录可能被删掉或移动，Rust 进程重启后旧会话也一定失效：
+  // 启动时按本地存的展示路径重新登记一次会话，登记不上就退出该模式，
+  // 否则后续每次读写都会报「会话已关闭」，用户不知道从哪改。
+  const ensureWorkspaceSession = useCallback(async () => {
     const ws = stateRef.current.settings.workspace;
     if (!ws || !fsAvailable()) return;
-    let alive = true;
-    (async () => {
-      try {
-        await fsList(ws.root);
-      } catch {
-        if (!alive) return;
-        commit({ ...stateRef.current, settings: { ...stateRef.current.settings, workspace: null } });
-        toast("工程目录已不存在，已退出本地工程模式", "error");
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [ready, commit, toast]);
+    try {
+      await wsInfo(ws.sessionId);
+      return; // 会话还活着，直接用
+    } catch {
+      /* 进程重启或会话已失效：走下面重新登记 */
+    }
+    try {
+      // root 只在这一次出现：之后所有操作都只认会话号
+      const s = await openSession(ws.root);
+      commit({
+        ...stateRef.current,
+        settings: {
+          ...stateRef.current.settings,
+          workspace: { ...ws, sessionId: s.id, root: s.root, name: s.name || ws.name },
+        },
+      });
+    } catch {
+      commit({ ...stateRef.current, settings: { ...stateRef.current.settings, workspace: null } });
+      toast("工程目录已不存在，已退出本地工程模式", "error");
+    }
+  }, [commit, toast]);
+
+  useEffect(() => {
+    if (!ready) return;
+    void ensureWorkspaceSession();
+  }, [ready, ensureWorkspaceSession]);
 
 
   const openWorkspace = useCallback(() => {
@@ -859,20 +877,31 @@ export default function App() {
 
   const pickWorkspace = useCallback(
     async (root: string, name: string) => {
+      // 先登记会话：root 只在这一步出现，之后 buildTree / 读写都只认 sessionId
+      let session: { id: string; root: string; name: string };
+      try {
+        session = await openSession(root);
+      } catch (e) {
+        toast(`接入工程失败：${(e as Error).message}`, "error");
+        return;
+      }
       let tree = "";
       try {
-        tree = await buildTree(root);
+        tree = await buildTree(session.id);
       } catch {
         /* 目录树拿不到不影响接入，模型仍能靠 @@read 取内容 */
       }
-      const memory = await loadProjectMemory(root);
+      const memory = await loadProjectMemory(session.id);
+      const prev = stateRef.current.settings.workspace;
+      if (prev?.sessionId && prev.sessionId !== session.id) await wsClose(prev.sessionId);
       commit({
         ...stateRef.current,
         settings: {
           ...stateRef.current.settings,
           workspace: {
-            root,
-            name,
+            sessionId: session.id,
+            root: session.root,
+            name: session.name || name,
             tree,
             memory: memory?.body ?? null,
             memorySource: memory?.source ?? null,
@@ -880,12 +909,14 @@ export default function App() {
         },
       });
       setWsOpen(false);
-      toast(`已接入工程：${name}${memory ? `（已加载项目记忆 ${memory.source}）` : ""}`, "ok");
+      toast(`已接入工程：${session.name || name}${memory ? `（已加载项目记忆 ${memory.source}）` : ""}`, "ok");
     },
     [commit, loadProjectMemory, toast]
   );
 
   const clearWorkspace = useCallback(() => {
+    const prev = stateRef.current.settings.workspace;
+    if (prev?.sessionId) void wsClose(prev.sessionId);
     commit({ ...stateRef.current, settings: { ...stateRef.current.settings, workspace: null } });
     setWsOpen(false);
     toast("已退出本地工程模式", "");
@@ -980,7 +1011,7 @@ export default function App() {
       if (ws && fsAvailable()) {
         const rel = `.zxz/audit/${name}-${stamp}.md`;
         try {
-          const r = await fsWrite(ws.root, rel, md);
+          const r = await fsWrite(ws.sessionId, rel, md);
           await refreshTree();
           return `已写入 ${rel}（${r.bytes} 字节）`;
         } catch (e) {
@@ -1293,7 +1324,7 @@ export default function App() {
 
       <UndoPanel
         open={undoOpen}
-        root={settings.workspace?.root || null}
+        sessionId={settings.workspace?.sessionId || null}
         onClose={() => setUndoOpen(false)}
         onRestored={(text) => {
           toast(text, "ok");

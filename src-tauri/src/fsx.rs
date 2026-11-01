@@ -1,12 +1,17 @@
 // 本机文件读写：给「让模型把代码写到本地磁盘」用。
 //
 // 安全边界（三道）：
-// 1) 相对路径只允许普通段，拒绝 `..`、绝对路径、盘符前缀；
-// 2) 工程根目录必须是绝对路径且真实存在；
-// 3) 真正落盘前对父目录做 canonicalize，确认没借符号链接/软链接逃出工程根目录。
+// 1) 相对路径只允许普通段，拒绝 `..`、绝对路径、盘符前缀、UNC；
+// 2) 工程根目录由 wsx 登记并 canonicalize，这里收到的 root 已经是锁定的真实路径；
+// 3) 逐段解析真实落点：符号链接 / junction 借道、悬空链接一律拒绝，
+//    包含判定按路径组件比较，不做字符串前缀判断。
 //
 // 本模块不依赖 tauri：IPC 壳在 lib.rs 里，这样纯逻辑可以在无窗口环境下直接跑单测。
 // 读文件有 4MB 上限，非 UTF-8 直接报错（这里只服务文本代码，不做二进制搬运）。
+//
+// 关于 root：本模块所有工程内函数只接受 `&Path`，且必须是绝对路径。
+// 唯一有权把「用户选的目录」变成 root 的地方是 `wsx::open()`；
+// 前端永远拿不到、也传不进来第二个 root（见 wsx.rs 与 lib.rs 的 session_id 参数）。
 
 use serde::Serialize;
 use std::fs;
@@ -23,7 +28,7 @@ pub struct FsEntry {
     pub size: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct WriteResult {
     pub path: String,
     pub bytes: usize,
@@ -52,7 +57,65 @@ fn safe_rel(rel: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
-fn canon_root(root: &str) -> Result<PathBuf, String> {
+/// 组件级包含判定：`F:\proj2` 不是 `F:\proj` 的子目录，字符串前缀会把它误判成工程内。
+/// 两侧都要求是 canonicalize 的结果，顺带把大小写、`..`、8.3 短名这些差异归一掉。
+pub fn path_inside(root: &Path, p: &Path) -> bool {
+    p.starts_with(root)
+}
+
+/// Windows 的 junction / 符号链接都是重解析点：Rust 的 `is_symlink()` 认不出 junction，
+/// 所以直接看文件属性位，别让 junction 从这道检查里漏过去。
+#[cfg(windows)]
+fn is_reparse(md: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    md.file_attributes() & 0x400 != 0 // FILE_ATTRIBUTE_REPARSE_POINT
+}
+
+#[cfg(not(windows))]
+fn is_reparse(_md: &fs::Metadata) -> bool {
+    false
+}
+
+/// 把相对路径收敛成工程内绝对路径，并挡掉所有借道写法。
+///
+/// 逐段推进：任何一段只要已经存在（真实目录/文件、符号链接、junction），
+/// 就必须能解析、且解析结果仍在工程根内；解析不出来（悬空链接）直接拒绝——
+/// 等到真正落盘时才发现写到了工程外就晚了（写会顺着链接落到链接指向的地方）。
+///
+/// 这一段还不存在的情况（写入时的新建路径）这里无从判断，跳过；
+/// 由 write 在建完父目录后再 canonicalize 复核一次落点。
+pub fn resolve(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    if !root.is_absolute() {
+        return Err("工程根目录必须是绝对路径".into());
+    }
+    let relp = safe_rel(rel)?;
+    let mut cur = root.to_path_buf();
+    for seg in relp.components() {
+        let Component::Normal(part) = seg else {
+            continue; // safe_rel 已保证只剩普通段
+        };
+        cur.push(part);
+        let Ok(md) = fs::symlink_metadata(&cur) else {
+            continue; // 这一段还不存在，跳过
+        };
+        if is_reparse(&md) || md.file_type().is_symlink() {
+            match fs::canonicalize(&cur) {
+                Ok(real) if path_inside(root, &real) => {}
+                Ok(_) => return Err(format!("{rel} 借符号链接/联接点指向工程目录之外，拒绝访问")),
+                Err(_) => return Err(format!("{rel} 里有悬空的符号链接/联接点，拒绝访问")),
+            }
+        } else {
+            match fs::canonicalize(&cur) {
+                Ok(real) if path_inside(root, &real) => {}
+                Ok(_) => return Err(format!("{rel} 越出了工程目录")),
+                Err(_) => return Err(format!("{rel} 无法解析：{}", cur.to_string_lossy())),
+            }
+        }
+    }
+    Ok(root.join(&relp))
+}
+
+pub fn canon_root(root: &str) -> Result<PathBuf, String> {
     let p = Path::new(root);
     if !p.is_absolute() {
         return Err("工程目录必须是绝对路径".into());
@@ -107,6 +170,27 @@ pub fn list(path: String) -> Result<Vec<FsEntry>, String> {
     }
     out.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
     Ok(out)
+}
+
+/// 工程内列目录：给模型工具（list_dir / search_files）用。
+///
+/// `list` 是文件夹选择器的通道，天然要能浏览任意绝对路径；模型侧不能走它——
+/// 只要拼一个工程外的绝对路径就绕过了全部相对路径规则。这里和 read/write 一样
+/// 收 root+rel，逐段解析后必须仍在工程根内，符号链接/junction 借道也算越界。
+pub fn list_in(root: &Path, rel: &str) -> Result<Vec<FsEntry>, String> {
+    if root.as_os_str().is_empty() {
+        return Err("工程目录为空".into());
+    }
+    let dir = if rel.trim().is_empty() {
+        root.to_path_buf()
+    } else {
+        resolve(root, rel)?
+    };
+    let real = fs::canonicalize(&dir).map_err(|e| format!("目录不可用（{rel}）：{e}"))?;
+    if !path_inside(root, &real) {
+        return Err(format!("{rel} 越出了工程目录"));
+    }
+    list(real.to_string_lossy().to_string())
 }
 
 /// 校验「新建文件夹」的名字：必须是单个普通段，且不含系统不允许的字符。
@@ -164,7 +248,7 @@ fn check_dir_name(name: &str) -> Result<(), String> {
 /// `\\?\F:\proj\new` 这种路径在 Rust 里最安全（绕过 MAX_PATH 与名字解析），
 /// 但它是**内部**表示：回传给界面就变成用户看不懂的一串，前后端再拿它做字符串
 /// 比较也容易对不上。校验继续用 canonicalize 的结果，只把「给人看的那份」还原。
-fn strip_verbatim(p: &Path) -> PathBuf {
+pub fn strip_verbatim(p: &Path) -> PathBuf {
     #[cfg(windows)]
     {
         let s = p.to_string_lossy();
@@ -197,9 +281,9 @@ pub fn mkdir(dir: String, name: String) -> Result<String, String> {
     Ok(strip_verbatim(&parentc).join(&name).to_string_lossy().to_string())
 }
 
-pub fn read(root: String, rel: String) -> Result<String, String> {
-    let rootc = canon_root(&root)?;
-    let target = rootc.join(safe_rel(&rel)?);
+pub fn read(root: &Path, rel: &str) -> Result<String, String> {
+    // 边界全在 resolve 里：符号链接/联接点借道、悬空链接、..、绝对路径都在那一步拒绝
+    let target = resolve(root, rel)?;
     let md = fs::metadata(&target).map_err(|e| format!("读取失败（{rel}）：{e}"))?;
     if md.is_dir() {
         return Err(format!("{rel} 是目录，不是文件"));
@@ -211,31 +295,23 @@ pub fn read(root: String, rel: String) -> Result<String, String> {
 }
 
 /// 目标文件是否已存在（写入前的覆盖提示用；不读内容，超大/二进制也不受影响）
-pub fn exists(root: String, rel: String) -> Result<bool, String> {
-    let rootc = canon_root(&root)?;
-    let target = rootc.join(safe_rel(&rel)?);
+pub fn exists(root: &Path, rel: &str) -> Result<bool, String> {
+    let target = resolve(root, rel)?;
     Ok(target.exists())
 }
 
-pub fn write(root: String, rel: String, content: String) -> Result<WriteResult, String> {
-    let rootc = canon_root(&root)?;
-    let relp = safe_rel(&rel)?;
-    let target = rootc.join(&relp);
+pub fn write(root: &Path, rel: &str, content: String) -> Result<WriteResult, String> {
+    let target = resolve(root, rel)?;
 
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("无法创建目录：{e}"))?;
-        let parentc = fs::canonicalize(parent).map_err(|e| format!("父目录不可用：{e}"))?;
-        if !parentc.starts_with(&rootc) {
-            return Err(format!("{rel} 越出了工程目录"));
+        if !parent.exists() {
+            fs::create_dir_all(parent).map_err(|e| format!("无法创建目录：{e}"))?;
         }
-    }
-
-    // 目标若已存在且是符号链接，要确认它指向的仍在工程内
-    if target.exists() {
-        if let Ok(real) = fs::canonicalize(&target) {
-            if !real.starts_with(&rootc) {
-                return Err(format!("{rel} 指向工程目录之外，拒绝写入"));
-            }
+        // 建完（或本来就存在）再复核一次落点：父目录可能刚被换成链接，
+        // 也可能 create_dir_all 一路顺着链接建到了工程外。
+        let parentc = fs::canonicalize(parent).map_err(|e| format!("父目录不可用：{e}"))?;
+        if !path_inside(root, &parentc) {
+            return Err(format!("{rel} 越出了工程目录"));
         }
     }
 
@@ -282,20 +358,197 @@ mod tests {
         assert!(safe_rel(".").is_err());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn read_rejects_junction_escape() {
+        // 经 junction 把读请求引到工程外：read 必须像 write 一样守住工程根边界
+        let dir = std::env::temp_dir().join(format!("zxz-fsx-readjunction-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("zxz-fsx-readout-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "engineer-outside").unwrap();
+        let link = dir.join("link");
+        fs::create_dir_all(&dir).unwrap();
+        let ok = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", &link.to_string_lossy(), &outside.to_string_lossy()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            let rootc = fs::canonicalize(&dir).unwrap();
+            let err = read(&rootc, "link/secret.txt").unwrap_err();
+            assert!(err.contains("工程目录之外"), "{err}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
     #[test]
     fn exists_reports_presence() {
         let dir = std::env::temp_dir().join(format!("zxz-fsx-exists-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let root = dir.to_string_lossy().to_string();
-        assert_eq!(exists(root.clone(), "a.txt".into()).unwrap(), false);
+        let rootc = fs::canonicalize(&dir).unwrap();
+        assert_eq!(exists(&rootc, "a.txt").unwrap(), false);
         fs::write(dir.join("a.txt"), "x").unwrap();
-        assert_eq!(exists(root, "a.txt".into()).unwrap(), true);
+        assert_eq!(exists(&rootc, "a.txt").unwrap(), true);
     }
 
     #[test]
     fn root_must_be_absolute() {
         assert!(canon_root("relative/dir").is_err());
+    }
+
+    #[test]
+    fn list_in_stays_inside_root() {
+        let dir = std::env::temp_dir().join(format!("zxz-fsx-listin-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src\\lib")).unwrap();
+        fs::write(dir.join("src\\lib\\a.ts"), "x").unwrap();
+        let rootc = fs::canonicalize(&dir).unwrap();
+        // 根目录与合法相对目录能列
+        assert!(list_in(&rootc, "").unwrap().iter().any(|e| e.name == "src"));
+        assert!(list_in(&rootc, "src").unwrap().iter().any(|e| e.name == "lib"));
+        // 绝对路径与 .. 一律拒绝：这条通道的模型只能看工程内
+        assert!(list_in(&rootc, "C:/Windows").is_err());
+        assert!(list_in(&rootc, "../").is_err());
+        assert!(list_in(&rootc, "..").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 建 junction 的辅助：`mklink /J` 不需要管理员权限，符号链接要，所以用例都用它
+    #[cfg(windows)]
+    fn mk_junction(link: &Path, target: &Path) -> bool {
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", &link.to_string_lossy(), &target.to_string_lossy()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn resolve_rejects_traversal_and_absolute() {
+        let dir = std::env::temp_dir().join(format!("zxz-fsx-resolve-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let rootc = fs::canonicalize(&dir).unwrap();
+        for bad in ["../outside.txt", "a/../../b.txt", "/etc/passwd", "./../../x"] {
+            assert!(resolve(&rootc, bad).is_err(), "应拒绝：{bad}");
+        }
+        // 合法路径要放行，包括还没创建的目标
+        let p = resolve(&rootc, "src/lib/a.ts").unwrap();
+        assert!(path_inside(&rootc, &p));
+        assert!(resolve(&rootc, "").is_err(), "空路径不能通过");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_rejects_drive_and_unc() {
+        // 盘符与 UNC 都是 Component::Prefix，不能在工程内相对路径里出现
+        for bad in ["C:\\Windows\\win.ini", "C:relative.txt", r"\\server\share\a.txt"] {
+            assert!(safe_rel(bad).is_err(), "应拒绝：{bad}");
+        }
+    }
+
+    #[test]
+    fn write_creates_missing_target_and_parents() {
+        // 目标与父目录都不存在：要能安全创建，且落点必须还在工程内
+        let dir = std::env::temp_dir().join(format!("zxz-fsx-create-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let rootc = fs::canonicalize(&dir).unwrap();
+        let r = write(&rootc, "a/b/c.txt", "hello".into()).unwrap();
+        assert!(r.created);
+        assert_eq!(fs::read_to_string(dir.join("a/b/c.txt")).unwrap(), "hello");
+        assert!(!dir.parent().unwrap().join("c.txt").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_rejects_junction_escape() {
+        // 工程内的 junction 指向工程外：不管读还是写，逐段解析时必须被挡住
+        let base = std::env::temp_dir().join(format!("zxz-fsx-resj-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("root")).unwrap();
+        let outside = base.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "outside").unwrap();
+        let rootc = fs::canonicalize(base.join("root")).unwrap();
+        // 建不出来就别假装通过：这条用例必须有真的 junction 才算数
+        assert!(mk_junction(&rootc.join("jl"), &outside), "junction 创建失败，用例没有真正验证");
+        {
+            let e = resolve(&rootc, "jl/secret.txt").unwrap_err();
+            assert!(e.contains("工程目录之外"), "{e}");
+            assert!(resolve(&rootc, "jl").is_err(), "junction 本身也要拒绝");
+            // 写入同样不能借它落到工程外
+            assert!(write(&rootc, "jl/x.txt", "x".into()).is_err());
+            assert!(!outside.join("x.txt").exists(), "不该写到工程外");
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_rejects_dangling_junction() {
+        // 悬空 junction：symlink_metadata 认得出它是重解析点，但 canonicalize 会失败。
+        // 旧实现把它当成“不存在”放过去了，写入就会顺着链接落到链接指向的地方。
+        let base = std::env::temp_dir().join(format!("zxz-fsx-dangj-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("root")).unwrap();
+        let outside = base.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let rootc = fs::canonicalize(base.join("root")).unwrap();
+        assert!(mk_junction(&rootc.join("jl"), &outside), "junction 创建失败，用例没有真正验证");
+        {
+            // 删掉目标 → junction 变悬空：symlink_metadata 仍成功，canonicalize 失败
+            fs::remove_dir_all(&outside).unwrap();
+            assert!(fs::symlink_metadata(rootc.join("jl")).is_ok(), "悬空 junction 必须还能被 symlink_metadata 认出来");
+            assert!(fs::canonicalize(rootc.join("jl")).is_err(), "悬空 junction 解析不了");
+            let e = resolve(&rootc, "jl/secret.txt").unwrap_err();
+            assert!(e.contains("悬空"), "{e}");
+            let e2 = write(&rootc, "jl", "x".into()).unwrap_err();
+            assert!(e2.contains("悬空"), "{e2}");
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn list_in_rejects_junction_escape() {
+        // Windows 用 mklink /J 建 junction（不需要管理员权限），指向工程外
+        let dir = std::env::temp_dir().join(format!("zxz-fsx-listjunction-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("zxz-fsx-listout-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(dir.join("link")).unwrap();
+        fs::remove_dir(dir.join("link")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let outside_src = outside.join("src");
+        fs::create_dir_all(&outside_src).unwrap();
+        fs::write(outside_src.join("topsecret.txt"), "x").unwrap();
+        let target = outside_src.to_string_lossy().to_string();
+        let link = dir.join("link").to_string_lossy().to_string();
+        let ok = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", &link, &target])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            let rootc = fs::canonicalize(&dir).unwrap();
+            // junction canonicalize 后落到工程外 → 必须拒绝
+            assert!(list_in(&rootc, "link").is_err());
+        }
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
