@@ -281,9 +281,11 @@ export async function testConnection(settings: Settings, transport: Transport): 
 
 export async function fetchModels(settings: Settings, transport: Transport): Promise<ModelListResult> {
   if (transport.mode === "proxy") {
-    const qs = new URLSearchParams({ base_url: normalizeBase(settings.baseUrl), api_key: settings.apiKey });
-    const res = await fetch(`http://127.0.0.1:${transport.port}/models?${qs}`, {
-      headers: { "x-zxz-token": transport.token },
+    // base_url / api_key 走请求体，不再拼进 URL：明文 Key 不进请求行/日志。
+    const res = await fetch(`http://127.0.0.1:${transport.port}/models`, {
+      method: "POST",
+      headers: { "x-zxz-token": transport.token, "Content-Type": "application/json" },
+      body: JSON.stringify({ base_url: normalizeBase(settings.baseUrl), api_key: settings.apiKey }),
     });
     return (await res.json()) as ModelListResult;
   }

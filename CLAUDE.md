@@ -17,9 +17,16 @@
   - 普通代码块只展示，永远不落盘。
 - 受控执行（0.3.0 起，第一次改掉“不执行命令”的旧定位）：`run_command` 只允许
   测试、构建、只读 Git，白名单在 `src/lib/tools.ts` 与 `src-tauri/src/runx.rs`
-  各有一份且必须一致；不走 shell，工作目录只限工程根，超时 60 秒，输出各截断
-  20000 字符；Rust 侧每次重新校验，绝不信任前端 argv。写完文件后自动跑
-  `npm test`，失败回传报错再改，最多 3 轮，3 轮不过停下报人。
+  各有一份且必须一致；argv 白名单之外还有第二层：npm/npx 真正执行的
+  package.json 脚本必须逐段落在受信任运行器清单里（vitest / jest / mocha /
+  node --test / tsc / vite / eslint），审计在 Rust `runx::check_npm_script`
+  权威执行，前端 `checkNpmCommandScript` 只是提前拦截。不走 shell，工作目录
+  只限工程根，超时 60 秒，输出各截断 20000 字符；Rust 侧每次重新校验，绝不信任
+  前端 argv。写完文件后自动跑 `npm test`，失败回传报错再改，最多 3 轮，3 轮不过
+  停下报人。
+- 列目录有两条通道，不许混用：`fs_list`（任意绝对路径）只服务文件夹选择器；
+  模型工具 `list_dir` / `search_files` 必须走 `fs_list_in`（root+rel，canonicalize
+  后仍在工程根内，符号链接借道也算越界）。
 - 写入默认自动落盘，但有两道人工门禁：设置里的“计划模式”（只出方案不落盘）、
   “写入前确认”（先看差异再批）。不要把默认改回“悄悄写”而不更新 README 第 10 节。
 - 覆盖已有文件前，旧内容必须先备份到工程内 `.zxz/undo/<时间戳>/`；落盘后要回读校验，
@@ -35,6 +42,15 @@
 - 读文件上限 4MB、只接受 UTF-8 文本；目录树深度 2，忽略 `node_modules / .git / target / dist / .zxz`。
 - API Key 只存本机 `localStorage`（键 `zxz.state.v1`），明文存放、不外发；不要把它写进
   任何导出的审计清单、扫描结果或日志里。
+- 本机代理 `src-tauri/src/proxy.rs` 只监听 127.0.0.1、每次请求要带一次性 token
+  （令牌用 OS 熵初始化的 `RandomState` 生成 256 位，别退回「时间 ^ pid」那种可预测写法）；
+  进入后还要校验 Host 是回环名（`127.0.0.1`/`localhost`），挡 DNS rebinding。
+  `/models` 的 `base_url`/`api_key` 走 POST 请求体，不再拼进 URL（Key 不进请求行/日志）；
+  `read_request` 在读 body 前用 `MAX_BODY_BYTES`（32MB）卡 Content-Length，超大直接 400，
+  防本机进程用超大长度把内存打满。跑代理契约用 `node tools/proxy-e2e.cjs <harness exe>`（需先起 mock）。
+- WebView CSP 在 `tauri.conf.json` 的 `csp`（生产，`script-src 'self'`，Tauri 会给自有脚本注入
+  nonce/hash）与 `devCsp`（开发，额外放 `unsafe-inline` 给 Vite react-refresh/HMR）。CSP 只在真实
+  `tauri dev`/打包运行时注入，headless 测不到——改了 CSP 必须在真机 DevTools 看有无 CSP 报错再算完成。
 - 扫描技能时只给行号与语境（代码块 / 劝阻 / 正文），不给危险分：同一条命令写在
   拦截规则表里是防护，写在卸载脚本里才是风险。
 

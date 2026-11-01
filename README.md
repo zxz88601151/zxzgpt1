@@ -83,7 +83,7 @@ zxz/
 ```
 
 - **为什么要绕一层本机代理**：浏览器有 CORS/CSP 限制，且各家对浏览器 Origin 的支持不一致。请求交给 Rust 发，就能接任何 OpenAI 兼容端点。
-- **通道安全**：只监听 `127.0.0.1`，每次启动生成一次性 token，前端通过 IPC 拿端口和 token，请求必须带 `x-zxz-token` 头，本机其它进程无法调用。
+- **通道安全**：只监听 `127.0.0.1`，每次启动用 OS 熵生成 256 位一次性 token，前端通过 IPC 拿端口和 token，请求必须带 `x-zxz-token` 头，并校验 Host 是回环名（挡 DNS rebinding），本机其它进程无法调用。
 - **端口策略**：从 `19527` 起向后探测空闲端口（最多 64 个），被占用自动顺延。
 - **双通道降级**：没有 IPC 时（比如用静态服务器直接打开 `dist/`），前端自动切到"浏览器直连"模式，界面功能不变，区别只是请求由浏览器发出。左下角会显示当前通道。
 
@@ -240,9 +240,10 @@ cargo run --example smoke
 curl -H "x-zxz-token: $TOKEN" http://127.0.0.1:$PORT/health
 # → {"status":"ok","service":"zxz"}
 
-# 2 拉模型列表
-curl -H "x-zxz-token: $TOKEN" \
-  "http://127.0.0.1:$PORT/models?base_url=https://api.openai.com/v1&api_key=$KEY"
+# 2 拉模型列表（base_url / api_key 走请求体，不进 URL）
+curl -X POST -H "Content-Type: application/json" -H "x-zxz-token: $TOKEN" \
+  -d '{"base_url":"https://api.openai.com/v1","api_key":"'$KEY'"}' \
+  http://127.0.0.1:$PORT/models
 
 # 3 流式对话（真实返回 SSE）
 curl -N -H "Content-Type: application/json" -H "x-zxz-token: $TOKEN" \
@@ -361,7 +362,7 @@ node tools/desktop-skill-e2e.cjs    # 17 项（同样需要先开 CDP 端口编�
 
 ### 9.6 覆盖范围
 
-前端直连 24 项、真实代理 8 项接口断言 + 24 项前端、工程模式 34 项、真机读写 25 项、技能库 47 项、真机技能 17 项、Rust 文件层 13 条、纯逻辑单测 150 条。覆盖：通道探测、设置抽屉、拉取模型、测试连接、流式逐字输出、Markdown（标题/列表/嵌套/表格/引用/行内代码/加粗/删除线/外链）、代码高亮与复制按钮、长文本完整渲染、usage 回显、思维链折叠、停止生成、重新生成不重复追加用户消息、上下文轮数窗口、多会话/搜索/主题、刷新后持久化、上游 401/404 错误提示、无 JS 运行时错误；技能库另含 frontmatter 解析、分类分组、触发词自动匹配、3 个上限、外部目录扫描与坏技能报错、29 条来源清单与审计清单导出（无工程时下载、有工程时写进 `.zxz/audit/`）。
+前端直连 24 项、真实代理 10 项接口断言 + 24 项前端、工程模式 34 项、真机读写 25 项、技能库 47 项、真机技能 17 项、Rust 单测 34 条、纯逻辑单测 246 条。覆盖：通道探测、设置抽屉、拉取模型、测试连接、流式逐字输出、Markdown（标题/列表/嵌套/表格/引用/行内代码/加粗/删除线/外链）、代码高亮与复制按钮、长文本完整渲染、usage 回显、思维链折叠、停止生成、重新生成不重复追加用户消息、上下文轮数窗口、多会话/搜索/主题、刷新后持久化、上游 401/404 错误提示、无 JS 运行时错误；技能库另含 frontmatter 解析、分类分组、触发词自动匹配、3 个上限、外部目录扫描与坏技能报错、29 条来源清单与审计清单导出（无工程时下载、有工程时写进 `.zxz/audit/`）。
 
 ## 10. 本地工程模式（让模型直接在你电脑上读写代码）
 
@@ -408,6 +409,8 @@ node tools/desktop-skill-e2e.cjs    # 17 项（同样需要先开 CDP 端口编�
 3. 真正落盘前对父目录做 `canonicalize`，确认没有借符号链接逃出根目录。
 
 另外：读文件上限 4MB 且只接受 UTF-8 文本；工程目录被删或移动时，启动会自动退出该模式（不然每次写入都只会报「目录不可用」）。
+
+WebView 侧配了 CSP（`tauri.conf.json` 的 `csp` / `devCsp`）：生产 `script-src 'self'`（Tauri 打包时会给自有脚本自动注入 nonce/hash），开发额外放 `unsafe-inline` 给 Vite 的 react-refresh 与 HMR。Markdown 渲染本身已 `escapeHtml` 并拒绝 `javascript:` / `data:` 链接，CSP 是第二层。注意 CSP 只在真实 `tauri dev`/打包运行时注入，headless 测不到——改完要在 DevTools 看有无 CSP 报错。
 
 浏览器直开（`dist/` 静态托管）时没有磁盘访问：点「选文件夹」会提示需要桌面端运行，
 此时模型给的 `file:` 块只作为普通代码块展示，不会落盘。

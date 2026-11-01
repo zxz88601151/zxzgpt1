@@ -6,6 +6,8 @@
 * 对每一次调用重新校验一次。两边的白名单必须保持一致，改一边就要改另一边。
 * 2) 白名单只放“测试、构建、只读 Git”三类。安装、发布、推送、删除、
 * 强制改写历史一律不在里面，模型要这些操作时程序直接拒绝，不弹确认。
+* 而且 argv 白名单只是第一层：npm test / npm run 真正执行的是 package.json 里的脚本，
+* 脚本内容还要过 `checkNpmCommandScript`（Rust runx 里有权威版本，必然重查）。
 * 3) 不走 shell：命令以 argv 数组直接交给子进程，不拼字符串、不解释
 * `;`、`|`、`&`、`$`、反引号这类 shell 元字符，带这些字符的参数直接拒绝。
 */
@@ -86,7 +88,7 @@ additionalProperties: false,
 type: "function",
 function: {
 name: "run_command",
-description: "在工程根目录运行一条白名单命令。只允许测试、构建和只读 Git，超时 60 秒，输出会被截断。不要用它安装、发布、推送、删除或改写历史，那些命令会被直接拒绝。",
+description: "在工程根目录运行一条白名单命令。只允许测试、构建和只读 Git，且 npm/npx 将要执行的 package.json 脚本必须在受信任运行器清单里（vitest / jest / mocha / node --test / tsc / vite / eslint），否则程序拒绝。超时 60 秒，输出会被截断。不要用它安装、发布、推送、删除或改写历史，那些命令会被直接拒绝。",
 parameters: {
 type: "object",
 properties: {
@@ -265,18 +267,68 @@ return text.slice(0, MAX_TOOL_OUTPUT_CHARS) + `\n\n/* 工具输出已截断：�
 }
 
 /**
- * 自动测试回路能不能跑：只看工程 package.json 里 test 脚本的内容。
+ * npm 脚本白名单。
  *
- * 为什么需要这一道：`run_command` 的白名单审的是 argv[0]，但 `npm test` 真正执行的是
- * package.json 里写死的那个脚本（npm 自己会起 shell 跑它）。这个文件可能正是模型刚写
- * 进去的，也可能被模型读到的内容引导改写——等于把受控执行变成了任意命令执行。
- * 所以自动回路只认这些已知的测试运行器；不认识的脚本不自动跑，想跑就在界面上自己开开关。
+ * 为什么需要这一道：`run_command` 的白名单审的是 argv[0]，但 `npm test` /
+ * `npm run <script>` 真正执行的是 package.json 里写死的脚本（npm 自己会起 shell
+ * 跑它）。这个文件可能正是模型刚写进去的，也可能被模型读到的内容引导改写——
+ * 等于把受控执行变成了任意命令执行。所以凡是会执行 npm 脚本的命令，先逐段
+ * 审计脚本内容：按 && / || / ; 切段后，每段首词必须是已知测试/构建运行器。
+ * 同一条规则在 Rust `runx.rs` 里有一份权威实现，执行时必然重查，这里只是
+ * 提前拦截、给用户和模型一句人能看懂的拒绝原因。
  */
-const SAFE_TEST_RUNNERS = /^\s*(vitest|jest|mocha|node\s+--test|tsc)\b/i;
+const SAFE_SCRIPT_SEGMENT = /^\s*(vitest|jest|mocha|node\s+--test\b|tsc|vite|eslint)(\s|$)/;
 
-export function isSafeTestScript(script: unknown): boolean {
+/** 脚本内容按 npm 的 shell 语义切段后，每段首词都在白名单里才算安全 */
+export function isSafeNpmScript(script: unknown): boolean {
   if (typeof script !== "string" || !script.trim()) return false;
-  return SAFE_TEST_RUNNERS.test(script.trim());
+  return script
+    .split(/&&|\|\|[;]/)
+    .every((seg) => SAFE_SCRIPT_SEGMENT.test(seg));
+}
+
+/** 给定 argv，算出它实际要执行的 package.json 脚本名；不执行脚本的命令返回 null。
+ * 只有 `npm test` / `npm run build|lint` 会 shell 出 package.json 脚本；
+ * `npx vitest run` 直接跑本地二进制、不读 scripts，由 argv 白名单单独约束。
+ * 与 Rust `runx.rs` 的 npm_script_name 保持一致。*/
+export function npmScriptName(argv: string[]): string | null {
+  const cmd = stripExecExt(argv[0] ?? "").toLowerCase();
+  if (cmd === "npm") {
+    const sub = argv[1] ?? "";
+    if (sub === "test") return "test";
+    if (sub === "run" && (argv[2] === "build" || argv[2] === "lint")) return argv[2];
+    return null;
+  }
+  return null;
+}
+
+/**
+ * run_command 执行前的脚本审计：argv 过了 argv 白名单，还不够——
+ * 还要看它将要执行的 package.json 脚本内容。返回 null 表示放行，
+ * 否则返回中文拒绝原因。pkgRaw 是 package.json 原文（调用方负责读）。
+ */
+export function checkNpmCommandScript(argv: string[], pkgRaw: string): string | null {
+  const name = npmScriptName(argv);
+  if (!name) return null;
+  let pkg: { scripts?: Record<string, unknown> };
+  try {
+    pkg = JSON.parse(pkgRaw);
+  } catch {
+    return "package.json 解析失败，无法审计 npm 将要执行的脚本，命令已拒绝";
+  }
+  const script = pkg?.scripts?.[name];
+  if (typeof script !== "string" || !script.trim()) {
+    return `package.json 里没有可审计的 scripts.${name}，命令已拒绝`;
+  }
+  if (!isSafeNpmScript(script)) {
+    return `npm 将要执行的 scripts.${name} 不在受信任运行器清单里（只认 vitest / jest / mocha / node --test / tsc / vite / eslint），命令已拒绝`;
+  }
+  return null;
+}
+
+/** 兼容旧入口：自动测试回路用它判断 test 脚本是否受信任 */
+export function isSafeTestScript(script: unknown): boolean {
+  return isSafeNpmScript(script);
 }
 
 /** 测试回路决策：completedRounds 是已经跑完的轮数（含本轮） */
@@ -292,7 +344,7 @@ const lines = [
 "",
 "优先用工具，不要再用 ```file: 代码块和 @@read: 行写文件、读文件——工具调用才是本轮的正式通道，旧的文本协议只作不支持工具的兼容端回退。",
 "工具：read_file（读文件）、list_dir（列一层目录）、search_files（字面子串搜索）、write_file（整文件写入，覆盖前自动备份）、run_command（白名单命令）。",
-"run_command 只允许：npm test、npm run build、npm run lint、npx vitest run、git status、git diff、git diff --stat、以及 --version 类查询；安装、发布、推送、删除、改写历史一律会被程序拒绝，不要尝试。",
+"run_command 只允许：npm test、npm run build、npm run lint、npx vitest run、git status、git diff、git diff --stat、以及 --version 类查询；安装、发布、推送、删除、改写历史一律会被程序拒绝，不要尝试。npm/npx 还会审计 package.json 里对应脚本的内容，不是受信任运行器（vitest / jest / mocha / node --test / tsc / vite / eslint）会被拒。",
 "写完文件后程序会自动跑一次 npm test，把结果回传给你；测试失败时先看报错、改代码、再等下一轮测试，不要在测试还没通过时宣称完成；3 轮测试不过程序会停下并报给人。",
 ];
 if (planMode) lines.push("计划模式：本轮只出方案，write_file 和 run_command 会被程序拦截，不要调用它们；read_file、list_dir、search_files 仍可用。");

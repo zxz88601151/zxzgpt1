@@ -31,7 +31,8 @@ function check(name, ok, detail) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* 一个有 bug 的迷你工程：check.js 是测试，math.js 里 sub 写成了加法。
- * test 脚本故意用 node 直接跑，不依赖任何包，避免 npm install 这一步。 */
+ * test 脚本用 `node --test` 直接跑，不依赖任何包；注意不能写成 `node check.js`——
+ * run_command 的脚本门禁（runx）只认受信任运行器，裸 node 会被拒。 */
 const PROJECT = {
   'package.json': `${JSON.stringify(
     {
@@ -39,13 +40,13 @@ const PROJECT = {
       version: '1.0.0',
       private: true,
       description: '给工具回路做验证用的迷你工程',
-      scripts: { test: 'node check.js' },
+      scripts: { test: 'node --test check.js' },
     },
     null,
     2
   )}\n`,
   'math.js': `'use strict';\n\nfunction sub(a, b) {\n  return a + b;\n}\n\nmodule.exports = { sub };\n`,
-  'check.js': `'use strict';\n\nconst { sub } = require('./math.js');\n\nif (sub(5, 3) !== 2) {\n  console.error('sub(5,3) 期望 2，实际 ' + sub(5, 3));\n  process.exit(1);\n}\nconsole.log('ok: 所有断言通过');\n`,
+  'check.js': `'use strict';\n\nconst test = require('node:test');\nconst assert = require('node:assert');\nconst { sub } = require('./math.js');\n\ntest('sub(5,3) 应等于 2', function () {\n  assert.strictEqual(sub(5, 3), 2);\n});\n`,
 };
 
 const PROMPT = [

@@ -106,15 +106,33 @@ function req(port, method, p, headers = {}, body) {
   const notFound = await req(info.port, 'GET', '/nope', { 'x-zxz-token': info.token });
   check('未知路由返回 404', notFound.status === 404);
 
-  // 6 模型列表转发
+  // 5b 非回环 Host 被拒（DNS rebinding 加固）
+  const badHost = await req(info.port, 'GET', '/health', { 'x-zxz-token': info.token, Host: 'evil.example.com' });
+  check('非回环 Host 被拒（403）', badHost.status === 403, `status=${badHost.status}`);
+
+  // 6 模型列表转发（base_url / api_key 走请求体，不再进 URL）
+  const modelsBody = JSON.stringify({
+    base_url: 'http://127.0.0.1:19888/v1',
+    api_key: 'mock-key',
+  });
   const models = await req(
     info.port,
-    'GET',
-    '/models?base_url=http%3A%2F%2F127.0.0.1%3A19888%2Fv1&api_key=mock-key',
-    { 'x-zxz-token': info.token }
+    'POST',
+    '/models',
+    { 'Content-Type': 'application/json', 'x-zxz-token': info.token },
+    modelsBody
   );
   const modelJson = JSON.parse(models.body || '{}');
   check('代理转发 /models', modelJson.ok === true && (modelJson.models || []).length === 4, models.body.slice(0, 80));
+
+  // 6b 超大请求体在读 body 前就被 Content-Length 上限拒绝（400）
+  // 故意声明一个远超 32MB 的长度但不真发数据：代理应在解析头阶段直接拒绝。
+  const huge = await req(info.port, 'POST', '/chat', {
+    'Content-Type': 'application/json',
+    'x-zxz-token': info.token,
+    'Content-Length': String(64 * 1024 * 1024),
+  }, undefined);
+  check('超大请求体被拒（400）', huge.status === 400, `status=${huge.status}`);
 
   // 7 非流式对话转发（含 usage）
   const chatBody = JSON.stringify({

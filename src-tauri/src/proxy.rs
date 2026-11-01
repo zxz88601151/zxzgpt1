@@ -4,9 +4,12 @@
 // - Tauri 的 CSP/CORS 对跨源请求有限制，各家模型厂商对浏览器 Origin 的支持也不一致；
 // - 由 Rust 统一转发后，任何 OpenAI 兼容端点都能接，且不用把 Key 暴露给 WebView 的网络栈之外的任何东西。
 //
-// 仅监听 127.0.0.1，并要求每次请求携带启动时生成的一次性 token，避免本机其它进程误用。
+// 仅监听 127.0.0.1，并要求每次请求携带启动时生成的一次性令牌，避免本机其它进程误用；
+// 另校验 Host 必须是回环名，挡住把外部域名解析到 127.0.0.1 的 DNS rebinding。
 
+use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
+use std::hash::{BuildHasher, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::async_runtime;
@@ -21,25 +24,35 @@ const BASE_PORT: u16 = 19527;
 const MAX_TRIES: u16 = 64;
 /// 单次请求头上限，防止恶意超长头打满内存。
 const MAX_HEAD_BYTES: usize = 64 * 1024;
+/// 单次请求体上限：对话消息里会夹带文件内容，给到 32MB 足够，
+/// 再大就拒绝——否则本机任意进程可用一个超大 Content-Length 把内存打满。
+const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 pub struct ProxyInfo {
     pub port: u16,
     pub token: String,
 }
 
-/// 生成一个仅本次运行有效的访问令牌（时间 + pid 混合哈希，不引入 rand 依赖）。
+/// 生成一个仅本次运行有效的访问令牌。
+///
+/// 只靠「时间 ^ pid」是可预测的：本机进程能看到进程启动的大致时刻与 pid，
+/// 就能把令牌算出来。这里改用 `RandomState` 的哈希键——它由操作系统熵初始化
+/// （不必引入 rand 依赖），再混入时钟与 pid 拉开不同实例，拼出 256 位令牌。
 fn gen_token() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let pid = std::process::id() as u128;
-    let mut x = nanos ^ (pid.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    // xorshift 打散，避免低位的规律性
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xFF51_AF7B);
-    x ^= x >> 33;
-    format!("{:016x}", x)
+    let pid = std::process::id();
+    let mut out = String::with_capacity(64);
+    for i in 0u64..4 {
+        let mut h = RandomState::new().build_hasher();
+        h.write_u128(nanos);
+        h.write_u32(pid);
+        h.write_u64(i);
+        out.push_str(&format!("{:016x}", h.finish()));
+    }
+    out
 }
 
 /// 探测一个可用端口（先同步 bind 试占用，成功后立即释放）。
@@ -98,6 +111,26 @@ struct Request {
     body: Vec<u8>,
 }
 
+/// `/models` 请求体：只带 base_url 与 api_key，走 body 不进 URL。
+#[derive(serde::Deserialize)]
+struct ModelsRequest {
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    api_key: String,
+}
+
+/// 只接受指向本机回环的 Host：挡住 DNS rebinding——外部页面把某域名解析到
+/// 127.0.0.1 后，浏览器仍会带上原站点的 Host，据此可拒。一次性 token 才是主门槛，
+/// 这层是加固。
+fn host_is_loopback(headers: &HashMap<String, String>) -> bool {
+    let Some(host) = headers.get("host") else {
+        return false;
+    };
+    let name = host.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+    name == "127.0.0.1" || name == "localhost"
+}
+
 async fn handle_conn(mut socket: TcpStream, token: std::sync::Arc<String>) -> Result<(), String> {
     let req = match read_request(&mut socket).await {
         Ok(Some(r)) => r,
@@ -107,6 +140,17 @@ async fn handle_conn(mut socket: TcpStream, token: std::sync::Arc<String>) -> Re
             return Ok(());
         }
     };
+
+    // Host 校验先于预检与令牌：非回环 Host 一律不服务。
+    if !host_is_loopback(&req.headers) {
+        write_json(
+            &mut socket,
+            403,
+            &serde_json::json!({ "error": "只接受本机回环 Host" }),
+        )
+        .await?;
+        return Ok(());
+    }
 
     // 预检请求
     if req.method == "OPTIONS" {
@@ -129,7 +173,6 @@ async fn handle_conn(mut socket: TcpStream, token: std::sync::Arc<String>) -> Re
     }
 
     let path = req.path.split('?').next().unwrap_or("/").to_string();
-    let query = parse_query(&req.path);
 
     match (req.method.as_str(), path.as_str()) {
         ("GET", "/health") => {
@@ -174,10 +217,22 @@ async fn handle_conn(mut socket: TcpStream, token: std::sync::Arc<String>) -> Re
             write_json(&mut socket, 200, &res).await?;
         }
 
-        ("GET", "/models") => {
-            let base_url = query.get("base_url").cloned().unwrap_or_default();
-            let api_key = query.get("api_key").cloned().unwrap_or_default();
-            let res = api::list_models(base_url, api_key).await;
+        ("POST", "/models") => {
+            // base_url / api_key 走请求体而不是 URL：一次性令牌请求行/访问日志里
+            // 不该留明文 Key，本机其它进程若能读网络连接也不该看到它。
+            let payload: ModelsRequest = match serde_json::from_slice(&req.body) {
+                Ok(v) => v,
+                Err(e) => {
+                    write_json(
+                        &mut socket,
+                        400,
+                        &serde_json::json!({ "error": format!("请求体不是合法 JSON：{}", e) }),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            let res = api::list_models(payload.base_url, payload.api_key).await;
             write_json(&mut socket, 200, &res).await?;
         }
 
@@ -255,6 +310,7 @@ async fn write_cors(socket: &mut TcpStream, status: u16, content_type: &str, bod
         204 => "No Content",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         500 => "Internal Server Error",
         _ => "OK",
@@ -316,8 +372,16 @@ async fn read_request(socket: &mut TcpStream) -> Result<Option<Request>, String>
         }
     }
 
-    let mut body = rest;
+    // 先把 Content-Length 卡在上限内：读 body 之前就拒绝，避免按一个超大
+    // 声明长度预留/累积内存，把本机内存打满。
     if let Some(len) = headers.get("content-length").and_then(|v| v.parse::<usize>().ok()) {
+        if len > MAX_BODY_BYTES {
+            return Err(format!(
+                "请求体 {} 字节超过上限 {}，已拒绝",
+                len, MAX_BODY_BYTES
+            ));
+        }
+        let mut body = rest;
         while body.len() < len {
             let mut chunk = vec![0u8; 8192];
             let n = socket.read(&mut chunk).await.map_err(|e| e.to_string())?;
@@ -325,73 +389,27 @@ async fn read_request(socket: &mut TcpStream) -> Result<Option<Request>, String>
                 break;
             }
             body.extend_from_slice(&chunk[..n]);
+            if body.len() > MAX_BODY_BYTES {
+                return Err("请求体超过上限，已拒绝".into());
+            }
         }
         body.truncate(len);
+        return Ok(Some(Request {
+            method,
+            path,
+            headers,
+            body,
+        }));
     }
 
     Ok(Some(Request {
         method,
         path,
         headers,
-        body,
+        body: rest,
     }))
 }
 
 fn find_head_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
-}
-
-fn parse_query(path: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    if let Some((_, q)) = path.split_once('?') {
-        for pair in q.split('&') {
-            if pair.is_empty() {
-                continue;
-            }
-            if let Some((k, v)) = pair.split_once('=') {
-                map.insert(k.to_string(), url_decode(v));
-            } else {
-                map.insert(pair.to_string(), String::new());
-            }
-        }
-    }
-    map
-}
-
-/// 极简 percent-decoding，够用于 base_url / api_key 这类参数。
-fn url_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(input.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                    out.push(h * 16 + l);
-                    i += 3;
-                } else {
-                    out.push(bytes[i]);
-                    i += 1;
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            other => {
-                out.push(other);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).to_string()
-}
-
-fn hex_val(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
 }
