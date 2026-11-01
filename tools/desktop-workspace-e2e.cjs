@@ -123,6 +123,12 @@ function check(name, ok, detail) {
   const made = path.join(ROOT, 'made-by-ui');
   check('真机上新建的文件夹真的出现在磁盘', fs.existsSync(made) && fs.statSync(made).isDirectory(), made);
 
+  // 给人看的路径必须干净：Windows canonicalize 会加 \\?\ 前缀，内部可以继续用，
+  // 但不能原样显示在界面上、更不能写进状态里被后续当作工程根目录
+  const shownTarget = ((await page.textContent('.fp-target')) || '').trim();
+  check('新建后自动进入该目录', shownTarget === made, shownTarget);
+  check('展示路径不带 \\\\?\\ 前缀', !shownTarget.includes('\\\\?\\'), shownTarget);
+
   // 建完会自动进入新目录，重名要在它的上级目录里试
   await page.click('.fp-path button[title="上一级"]');
   await page.waitForFunction(() => (document.querySelector('.fp-target')?.textContent || '').endsWith('.tmp-ws'), null, {

@@ -159,6 +159,25 @@ fn check_dir_name(name: &str) -> Result<(), String> {
 ///
 /// 只建一层：不做 `create_dir_all`，这样「新建工作区」永远只产生用户看到的那个目录。
 /// 已存在时直接报错，不静默复用——否则用户会以为新建成功，实际选中的是旧目录。
+/// 去掉 Windows `canonicalize` 加上的 verbatim 前缀。
+///
+/// `\\?\F:\proj\new` 这种路径在 Rust 里最安全（绕过 MAX_PATH 与名字解析），
+/// 但它是**内部**表示：回传给界面就变成用户看不懂的一串，前后端再拿它做字符串
+/// 比较也容易对不上。校验继续用 canonicalize 的结果，只把「给人看的那份」还原。
+fn strip_verbatim(p: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let s = p.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    p.to_path_buf()
+}
+
 pub fn mkdir(dir: String, name: String) -> Result<String, String> {
     let parent = Path::new(&dir);
     if !parent.is_absolute() {
@@ -175,7 +194,7 @@ pub fn mkdir(dir: String, name: String) -> Result<String, String> {
         return Err(format!("「{name}」已存在，换个名字或直接点进去"));
     }
     fs::create_dir(&target).map_err(|e| format!("新建文件夹失败（{name}）：{e}"))?;
-    Ok(target.to_string_lossy().to_string())
+    Ok(strip_verbatim(&parentc).join(&name).to_string_lossy().to_string())
 }
 
 pub fn read(root: String, rel: String) -> Result<String, String> {
@@ -287,8 +306,11 @@ mod tests {
         let p = mkdir(base.to_string_lossy().to_string(), "workspace".into()).unwrap();
         assert!(Path::new(&p).is_dir());
         assert_eq!(Path::new(&p).file_name().unwrap(), "workspace");
-        // 落点必须是上级目录的直接子项
-        assert_eq!(Path::new(&p).parent().unwrap(), fs::canonicalize(&base).unwrap());
+        // 落点必须是上级目录的直接子项（回传值已去掉 verbatim 前缀，比较前先归一化）
+        assert_eq!(
+            fs::canonicalize(Path::new(&p).parent().unwrap()).unwrap(),
+            fs::canonicalize(&base).unwrap()
+        );
     }
 
     #[test]
@@ -324,5 +346,32 @@ mod tests {
         let missing = base.join("nope").to_string_lossy().to_string();
         assert!(mkdir(missing, "x".into()).is_err());
         assert!(mkdir("relative".into(), "x".into()).is_err());
+    }
+
+    /// 回传给界面的路径不能再带 `\\?\`：用户看不懂，前端拿它做字符串比较也会对不上。
+    #[test]
+    fn mkdir_returns_plain_path() {
+        let base = std::env::temp_dir().join(format!("zxz-fsx-mkdir-plain-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let made = mkdir(base.to_string_lossy().to_string(), "visible".into()).unwrap();
+        assert!(!made.contains(r"\\?\"), "{}", made);
+        assert!(made.ends_with("visible"), "{}", made);
+        assert!(Path::new(&made).is_dir(), "{}", made);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn verbatim_prefix_is_stripped() {
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\F:\zhuomian\zxz")),
+            PathBuf::from(r"F:\zhuomian\zxz")
+        );
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\UNC\server\share")),
+            PathBuf::from(r"\\server\share")
+        );
+        let plain = Path::new(r"F:\zhuomian\zxz");
+        assert_eq!(strip_verbatim(plain), plain);
     }
 }

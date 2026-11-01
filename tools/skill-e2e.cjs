@@ -133,6 +133,11 @@ const SEED = {
   await page.click('#btnSkills');
   await page.waitForSelector('#skillPanel');
 
+  // 外部技能是挂载后异步扫出来的，不等就会出现「列表还没到齐就已经断言」的偶发失败
+  await page
+    .waitForSelector('#skillList .skill-item[data-id="ext-skill"]', { timeout: 15000 })
+    .catch(() => {});
+
   const items = await page.$$eval('#skillList .skill-item', (els) => els.map((e) => e.dataset.id));
   const builtinIds = ['code-style', 'react-ts', 'node-api', 'python-service', 'sql-schema', 'test-cases', 'code-review', 'security-check', 'dangerous-ops', 'module-boundaries', 'debug-first', 'verify-before-done'];
   check('内建 12 个技能全部列出', builtinIds.every((id) => items.includes(id)), items.length + ' 项');
