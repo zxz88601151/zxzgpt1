@@ -17,6 +17,7 @@ desktop.ini
 .tmp-live/
 # 全流程测试时模型新建的工程目录
 skilltest-*/
+webtest-*/
 
 # 测试证据截图（体积大且可随时重跑）
 tools/shots/
