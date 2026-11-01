@@ -1,0 +1,11 @@
+[package]
+name = "tauri"
+version = "0.0.0-shim"
+edition = "2021"
+publish = false
+
+# 仅为 tools/proxy-harness 提供 tauri::async_runtime::spawn 的最小替身。
+# 真实项目用的是 tauri 2 官方 crate；这里只是为了在没有窗口的环境里跑通代理自检。
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread"] }

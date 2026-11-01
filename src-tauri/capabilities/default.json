@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "zxz 默认权限：仅使用 Tauri 核心 IPC 能力，网络请求全部由 Rust 侧完成。",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -1,0 +1,17 @@
+[package]
+name = "proxy-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# 只用于本地自检：不依赖 tauri，避免在缺少 MSVC 工具链的机器上跑不起来。
+# proxy.rs / api.rs 通过 #[path] 逐字复用 ../../src-tauri/src 下的原文。
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# 提供 tauri::async_runtime::spawn 的最小替身，让 proxy.rs 原文可直接复用
+tauri = { path = "shim-tauri" }

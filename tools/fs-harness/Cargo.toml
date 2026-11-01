@@ -1,0 +1,15 @@
+[package]
+name = "fs-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# fsx.rs 原样引用（#[path]），不依赖 tauri，因此在没有 MSVC / 无法加载
+# WebView2 导入库的机器上也能真正跑起来，验证路径校验与真实落盘行为。
+
+[[bin]]
+name = "fs-harness"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

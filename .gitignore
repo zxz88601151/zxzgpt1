@@ -1,0 +1,28 @@
+# 依赖与构建产物
+node_modules/
+dist/
+target/
+target-gnu/
+gen/
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 运行时与本地状态（含备份 exe、审计克隆、临时服务脚本）
+.zxz/
+.tmp-ws/
+.tmp-live/
+
+# 测试证据截图（体积大且可随时重跑）
+tools/shots/
+
+# 助手工作区记忆（本地保留，不入库；如需共享 AI 上下文可删掉这行）
+.workbuddy/
+
+# 凭据
+.env
+.env.*
+!.env.example
