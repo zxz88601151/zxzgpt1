@@ -6,7 +6,8 @@
 // 2) 白名单只放测试、构建、只读 Git：npm test / npm run build / npm run lint、
 //    npx vitest run、git status / git diff / git diff --stat，以及 --version 查询。
 //    安装、发布、推送、提交、删除、改写历史一律拒绝，不弹确认、直接报错。
-// 3) 超时 60 秒：超时杀掉子进程并返回 timed_out，输出不会无限等。
+// 3) 超时 60 秒：超时连进程树一起杀掉（npm 这种 cmd 包装只杀外层没用）并返回
+//    timed_out，输出不会无限等；管道 EOF 另有 5 秒宽限，兜住攥着句柄的孙进程。
 // 4) 输出上限：stdout + stderr 各截断到 20000 字符，超了标 truncated，不把
 //    整个测试日志塞回模型上下文。
 //
@@ -23,6 +24,8 @@ use std::time::{Duration, Instant};
 
 pub const RUN_TIMEOUT_SECS: u64 = 60;
 const MAX_OUTPUT_CHARS: usize = 20000;
+/// 子进程退出后等管道 EOF 的宽限上限：超时了就拿已收到的部分收尾，不再傻等
+const PIPE_DRAIN_GRACE_SECS: u64 = 5;
 
 #[derive(Serialize)]
 pub struct RunResult {
@@ -238,10 +241,13 @@ pub fn run_allowed(root: &str, argv: &[String]) -> Result<RunResult, String> {
     // 两个读线程并发排空管道，否则输出一多就会把子进程堵死在管道缓冲区里。
     let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let mut readers = Vec::new();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let mut drain_signals = 0usize;
     if let Some(mut out) = child.stdout.take() {
         let buf = stdout_buf.clone();
-        readers.push(thread::spawn(move || {
+        let tx = done_tx.clone();
+        drain_signals += 1;
+        thread::spawn(move || {
             let mut chunk = [0u8; 8192];
             loop {
                 match out.read(&mut chunk) {
@@ -250,11 +256,14 @@ pub fn run_allowed(root: &str, argv: &[String]) -> Result<RunResult, String> {
                     Err(_) => break,
                 }
             }
-        }));
+            let _ = tx.send(());
+        });
     }
     if let Some(mut err) = child.stderr.take() {
         let buf = stderr_buf.clone();
-        readers.push(thread::spawn(move || {
+        let tx = done_tx.clone();
+        drain_signals += 1;
+        thread::spawn(move || {
             let mut chunk = [0u8; 8192];
             loop {
                 match out_read(&mut err, &mut chunk) {
@@ -263,13 +272,22 @@ pub fn run_allowed(root: &str, argv: &[String]) -> Result<RunResult, String> {
                     Err(_) => break,
                 }
             }
-        }));
+            let _ = tx.send(());
+        });
     }
+    drop(done_tx);
 
     let timed_out = self::run_timeout_watch(&mut child)?;
 
-    for r in readers {
-        let _ = r.join();
+    // 读线程等 EOF：正常情况下子进程一死管道就关，线程随即结束。但万一有孙进程攥着
+    // 句柄（这条路径 manchmal 也会遇到），join 会一直挂住，把超时保护整个拖垮，
+    // 所以给它一个宽限期，过了就拿已经收到的部分继续走。
+    let mut finished = 0;
+    while finished < drain_signals {
+        match done_rx.recv_timeout(Duration::from_secs(PIPE_DRAIN_GRACE_SECS)) {
+            Ok(()) => finished += 1,
+            Err(_) => break,
+        }
     }
 
     let status = child.wait().ok();
@@ -296,13 +314,39 @@ fn run_timeout_watch(child: &mut Child) -> Result<bool, String> {
             Some(_) => return Ok(false),
             None => {
                 if start.elapsed() >= Duration::from_secs(RUN_TIMEOUT_SECS) {
-                    let _ = child.kill();
+                    kill_tree(child);
                     return Ok(true);
                 }
                 thread::sleep(Duration::from_millis(50));
             }
         }
     }
+}
+
+/// 连进程树一起杀：Windows 上的 npm / npx 是 cmd 包装出来的，`kill()` 只杀得掉
+/// 外面那层 cmd，真正干活的子进程（node）会继续活着，还攥着管道句柄不放，
+/// 结果就是“超时已到”但调用方还得等它自然结束。所以补一道 taskkill /T 收干净。
+/// 这里给的参数全是数字 pid，没有任何外部输入，不涉及 shell 注入面。
+fn kill_tree(child: &mut Child) {
+    let pid = child.id();
+    // 顺序很重要：taskkill /T 靠父子链找后代，先把父进程 kill 掉，这条链就断了，
+    // 后面的 /T 什么都收不到。所以先收树，再补一刀 kill 兜底。
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        // Unix 侧目前没有进程组的处理：白名单里的命令都是短命的测试/构建命令，
+        // 真要长期 *nix 支持，这里要换成 setpgid + kill(-pgid)。
+        let _ = pid;
+    }
+    let _ = child.kill();
 }
 
 fn out_read<R: Read>(r: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {

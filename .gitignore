@@ -19,6 +19,7 @@ desktop.ini
 skilltest-*/
 webtest-*/
 tooltest-*/
+edgetest-*/
 
 # 测试证据截图（体积大且可随时重跑）
 tools/shots/
