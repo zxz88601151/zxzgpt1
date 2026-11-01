@@ -60,6 +60,23 @@ const MessageRow = memo(function MessageRow({
             {blocks.length ? (
               <FileWrites blocks={blocks} files={msg.files} workspace={workspace} onApply={onApply} />
             ) : null}
+            {msg.toolCalls?.length ? (
+              <details className="tool-calls">
+                <summary>工具调用 {msg.toolCalls.length} 次</summary>
+                <ul>
+                  {msg.toolCalls.map((tc) => (
+                    <li key={tc.id}>
+                      <code>{tc.name}</code>
+                      {tc.error ? (
+                        <span className="tool-error">失败：{tc.error}</span>
+                      ) : (
+                        <span className="tool-result">{(tc.result || "(无输出)").slice(0, 500)}</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
             {msg.error ? (
               <div className="md">
                 <blockquote style={{ borderColor: "var(--danger)", color: "var(--danger)" }}>{msg.error}</blockquote>

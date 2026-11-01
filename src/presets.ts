@@ -77,6 +77,10 @@ export const DEFAULT_SETTINGS: Settings = {
   skills: [],
   skillAuto: true,
   skillsDir: null,
+  planMode: false,
+  confirmWrites: false,
+  toolCalls: true,
+  autoTest: true,
 };
 
 /** 空会话时的引导卡片 */

@@ -2,9 +2,24 @@
 
 export type Role = "user" | "assistant";
 
+/** 一次工具调用及其执行结果：挂在助手消息上，渲染成工具日志；
+ *  下一轮发给上游时由 buildMessages 展开成 assistant tool_calls + tool 消息 */
+export interface ToolCallRecord {
+  id: string;
+  name: string;
+  /** 原始 JSON 参数串（发给上游时原样回填，不重新序列化，避免改动模型给的格式） */
+  arguments: string;
+  /** 执行成功时的结果文本（已截断） */
+  result?: string;
+  /** 执行失败时的错误文案 */
+  error?: string;
+}
+
 export interface Message {
   role: Role;
   content: string;
+  /** 本条助手消息发起的工具调用（含结果），没有表示本轮没调工具 */
+  toolCalls?: ToolCallRecord[];
   /** 思维链（DeepSeek-reasoner / o 系列等） */
   reasoning?: string;
   model?: string;
@@ -31,6 +46,8 @@ export interface FileWriteResult {
   error?: string;
   /** 覆盖前的旧内容备份在工程内的相对路径（新建文件没有） */
   backup?: string;
+  /** 落盘后回读校验：true = 回读内容与写入内容一致，false = 不一致或回读失败 */
+  verified?: boolean;
   /** 相比旧版的增删行数，用于回执上显示 +N −N */
   add?: number;
   del?: number;
@@ -60,6 +77,10 @@ export interface Workspace {
   name: string;
   /** 给模型看的目录树快照（深度 2，忽略依赖与构建产物） */
   tree: string;
+  /** 接入时从工程根读到的项目记忆（CLAUDE.md / AGENTS.md），没有为 null */
+  memory?: string | null;
+  /** 项目记忆来自哪个文件 */
+  memorySource?: string | null;
 }
 
 export interface Settings {
@@ -81,6 +102,14 @@ export interface Settings {
   skillAuto: boolean;
   /** 外部技能库目录；未接入为 null */
   skillsDir: string | null;
+  /** 计划模式：只出方案，程序跳过 file: 块不落盘（默认关，老设置缺字段时按关处理） */
+  planMode?: boolean;
+  /** 写入前确认：file: 块先弹差异面板，批了才写盘（默认关，保持老版自动落盘约定） */
+  confirmWrites?: boolean;
+  /** 工具调用：模型可用 read/list/search/write/run 五个工具（默认开；关了回到纯文本 file:/@@read 协议） */
+  toolCalls?: boolean;
+  /** 自动测试回路：写完文件后自动跑一次 npm test，失败把报错回传给模型再改，最多 3 轮（默认开；仅桌面端、仅工具调用开启时生效） */
+  autoTest?: boolean;
 }
 
 export interface AppState {
@@ -89,10 +118,13 @@ export interface AppState {
   activeId: string | null;
 }
 
-/** 发给上游的一条消息 */
+/** 发给上游的一条消息：tool_calls / tool_call_id 只在工具调用轮次出现，
+ *  普通消息不带这两个字段，上游按普通 chat 处理 */
 export interface WireMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[];
+  tool_call_id?: string;
 }
 
 /** 统一事件：Rust 代理与浏览器直连都归一到这个形状 */
@@ -101,7 +133,11 @@ export type StreamEvent =
   | { type: "reasoning"; text: string }
   | { type: "usage"; usage: Usage }
   | { type: "error"; message: string }
-  | { type: "done" };
+  | { type: "done" }
+  /** 流式 tool_calls 的一个增量片：前端按 index 累计，流结束时再合成完整调用 */
+  | { type: "tool_call_delta"; index: number; id?: string; name?: string; arguments?: string }
+  /** 非流式一次返回的完整工具调用列表 */
+  | { type: "tool_calls"; calls: { id: string; name: string; arguments: string }[] };
 
 export type TransportMode = "proxy" | "direct";
 

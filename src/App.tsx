@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { chatStream, detectTransport, DIRECT } from "./api";
-import { buildTree, fsAvailable, fsExists, fsList, fsRead, fsWrite } from "./lib/fsapi";
+import { buildTree, fsAvailable, fsExists, fsList, fsRead, fsWrite, runAllowed } from "./lib/fsapi";
 import { buildMessages, filterConversations, findActive, loadState, newConversation, persist, titleFrom } from "./state";
 import { clamp, copyText, uid } from "./lib/text";
 import { diffLines, diffStats } from "./lib/diff";
@@ -20,6 +20,8 @@ import {
   type Skill,
   type SkillRef,
 } from "./lib/skill";
+import { PROJECT_MEMORY_FILES, truncateProjectMemory } from "./lib/project";
+import { buildPendingWrites, type PendingWrite } from "./lib/pending";
 import { loadLocalSkills, mergeSkills, pickSkills } from "./lib/skillstore";
 import {
   backupRelPath,
@@ -27,11 +29,20 @@ import {
   parseFileBlocks,
   parseReadRequests,
   relPathError,
+  shouldSkipDir,
   UNDO_DIR,
   type FileBlock,
   type ReadOutcome,
 } from "./lib/files";
-import type { AppState, Conversation, FileWriteResult, Message, Settings, Theme, Transport, Usage } from "./types";
+import {
+  isAllowedCommand,
+  MAX_TEST_ROUNDS,
+  testLoopDecision,
+  TOOL_DEFS,
+  truncateToolOutput,
+  validateToolArgs,
+} from "./lib/tools";
+import type { AppState, Conversation, FileWriteResult, Message, Settings, Theme, ToolCallRecord, Transport, Usage } from "./types";
 import type { ToastKind } from "./components/ui";
 
 import { Sidebar } from "./components/Sidebar";
@@ -42,6 +53,7 @@ import { SettingsDrawer } from "./components/SettingsDrawer";
 import { Welcome } from "./components/Welcome";
 import { FolderPicker } from "./components/FolderPicker";
 import { UndoPanel } from "./components/UndoPanel";
+import { PendingWrites } from "./components/PendingWrites";
 import { SkillPanel } from "./components/SkillPanel";
 import { SkillChips } from "./components/SkillChips";
 import { ToastContext, Toasts, type ToastItem } from "./components/ui";
@@ -74,6 +86,9 @@ export default function App() {
   const [skillErrors, setSkillErrors] = useState<{ id: string; error: string }[]>([]);
   const [skillLoading, setSkillLoading] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  /** 写入前确认：非 null 时发送流程挂起，等人在面板里批复这一批 */
+  const [pending, setPending] = useState<PendingWrite[] | null>(null);
+  const pendingResolveRef = useRef<((approved: PendingWrite[] | null) => void) | null>(null);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
@@ -265,6 +280,14 @@ export default function App() {
             }
           }
           const r = await fsWrite(ws.root, b.path, b.content);
+          // 写完回读校验：Claude Code 那套“改完要验证”在本工具里没有终端可跑，
+          // 至少做到写进去的东西和模型给的东西逐字一致，否则不能算“写好了”。
+          let verified = true;
+          try {
+            verified = (await fsRead(ws.root, b.path)) === b.content;
+          } catch {
+            verified = false;
+          }
           const stats = diffStats(diffLines(oldText, b.content));
           results.push({
             path: b.path,
@@ -274,6 +297,7 @@ export default function App() {
             ...(backup ? { backup } : {}),
             add: stats.add,
             del: stats.del,
+            verified,
           });
         } catch (e) {
           results.push({ path: b.path, ok: false, error: (e as Error).message });
@@ -282,14 +306,63 @@ export default function App() {
 
       const ok = results.filter((r) => r.ok).length;
       const fail = results.length - ok;
+      const unverified = results.filter((r) => r.ok && r.verified === false).length;
       const backupNote = backedUp ? `，${backedUp} 个覆盖前已备份到 ${UNDO_DIR}` : "";
-      toast(`已写入 ${ok} 个文件${backupNote}${fail ? `，${fail} 个失败` : ""}`, fail ? "error" : "ok");
+      toast(
+        `已写入 ${ok} 个文件${backupNote}${fail ? `，${fail} 个失败` : ""}${unverified ? `，${unverified} 个回读不一致` : ""}`,
+        fail || unverified ? "error" : "ok"
+      );
 
       await refreshTree();
       return results;
     },
     [refreshTree, toast]
   );
+
+  /**
+   * 写入的统一入口：默认走原来的自动落盘；开了“写入前确认”就先把这一批
+   * 挂到面板上，人批了才调 applyFiles。计划模式不走这里，发送循环里直接跳过。
+   */
+  const requestApplyFiles = useCallback(
+    async (blocks: FileBlock[]): Promise<FileWriteResult[]> => {
+      const ws = stateRef.current.settings.workspace;
+      if (!ws || !blocks.length) return [];
+      if (!stateRef.current.settings.confirmWrites) return applyFiles(blocks);
+
+      const olds = new Map<string, string>();
+      for (const b of blocks) {
+        try {
+          if (await fsExists(ws.root, b.path)) olds.set(b.path, await fsRead(ws.root, b.path));
+        } catch {
+          /* 读不到旧内容就按新建处理，面板里会显示为空 */
+        }
+      }
+      const items = buildPendingWrites(blocks, olds);
+      const approved = await new Promise<PendingWrite[] | null>((resolve) => {
+        pendingResolveRef.current = resolve;
+        setPending(items);
+      });
+      if (!approved || !approved.length) {
+        toast("已放弃本轮写入，磁盘没有改动", "");
+        return [];
+      }
+      return applyFiles(approved.map((a) => ({ path: a.path, content: a.content })));
+    },
+    [applyFiles, toast]
+  );
+
+  /** 接入工程时读项目记忆：CLAUDE.md 优先，没有就退到 AGENTS.md，读不到就算没有 */
+  const loadProjectMemory = useCallback(async (root: string): Promise<{ source: string; body: string } | null> => {
+    for (const file of PROJECT_MEMORY_FILES) {
+      try {
+        const body = await fsRead(root, file);
+        if (body.trim()) return { source: file, body: truncateProjectMemory(body) };
+      } catch {
+        /* 这个文件不存在就试下一个 */
+      }
+    }
+    return null;
+  }, []);
 
   /** 按模型的要求读真实文件内容 */
   const readForModel = useCallback(async (root: string, paths: string[]): Promise<ReadOutcome[]> => {
@@ -335,6 +408,105 @@ export default function App() {
     }
     return out;
   }, []);
+
+  /**
+   * 执行一次模型发起的工具调用。顺序执行、不并行，避免两个写操作互相覆盖。
+   * 计划模式只放行读、列目录、搜索；写文件和跑命令在计划模式下直接拦截，
+   * 不走到磁盘和子进程。写文件复用 requestApplyFiles，所以确认开关同样生效。
+   */
+  const executeTool = useCallback(
+    async (call: { id: string; name: string; arguments: string }): Promise<ToolCallRecord> => {
+      const base: ToolCallRecord = { id: call.id, name: call.name, arguments: call.arguments };
+      const ws = stateRef.current.settings.workspace;
+      if (!ws) return { ...base, error: "未接入工程目录，工具不可用" };
+      let args: Record<string, unknown>;
+      try {
+        args = JSON.parse(call.arguments || "{}") as Record<string, unknown>;
+      } catch {
+        return { ...base, error: "工具参数不是合法 JSON" };
+      }
+      const bad = validateToolArgs(call.name, args);
+      if (bad) return { ...base, error: bad };
+      const planMode = Boolean(stateRef.current.settings.planMode);
+      if (planMode && (call.name === "write_file" || call.name === "run_command")) {
+        return { ...base, error: "计划模式已拦截：本轮只出方案，不写文件、不跑命令" };
+      }
+      try {
+        if (call.name === "read_file") {
+          const content = await fsRead(ws.root, args.path as string);
+          return { ...base, result: truncateToolOutput(content) };
+        }
+        if (call.name === "list_dir") {
+          const rel = (args.path as string) || "";
+          const dir = rel ? ws.root.replace(/[\\/]+$/, "") + "/" + rel : ws.root;
+          const entries = await fsList(dir);
+          const lines = entries.map((e) => (e.dir ? `${e.name}/` : `${e.name} (${e.size} bytes)`));
+          return { ...base, result: lines.length ? lines.join("\n") : "(空目录)" };
+        }
+        if (call.name === "search_files") {
+          const query = (args.query as string).toLowerCase();
+          const startRel = (args.path as string) || "";
+          const matches: string[] = [];
+          let visited = 0;
+          const walk = async (rel: string, depth: number): Promise<void> => {
+            if (matches.length >= 100 || visited >= 100 || depth > 3) return;
+            const dir = rel ? ws.root.replace(/[\\/]+$/, "") + "/" + rel : ws.root;
+            let entries;
+            try {
+              entries = await fsList(dir);
+            } catch {
+              return; // 无权限的目录直接跳过
+            }
+            for (const e of entries) {
+              if (matches.length >= 100 || visited >= 100) return;
+              if (e.dir) {
+                if (!shouldSkipDir(e.name)) await walk(rel ? `${rel}/${e.name}` : e.name, depth + 1);
+                continue;
+              }
+              visited += 1;
+              let content: string;
+              try {
+                content = await fsRead(ws.root, rel ? `${rel}/${e.name}` : e.name);
+              } catch {
+                continue; // 读不到（二进制、超大）就跳过，不阻断搜索
+              }
+              content.split("\n").forEach((line, i) => {
+                if (matches.length < 100 && line.toLowerCase().includes(query)) {
+                  matches.push(`${rel ? `${rel}/` : ""}${e.name}:${i + 1}: ${line.trim().slice(0, 200)}`);
+                }
+              });
+            }
+          };
+          await walk(startRel, 0);
+          return { ...base, result: matches.length ? matches.join("\n") : "(没有命中)" };
+        }
+        if (call.name === "write_file") {
+          const results = await requestApplyFiles([{ path: args.path as string, content: args.content as string }]);
+          if (!results.length) return { ...base, error: "用户放弃写入，磁盘没有改动" };
+          const r = results[0];
+          if (!r.ok) return { ...base, error: r.error || "写入失败" };
+          return {
+            ...base,
+            result: `已写入 ${r.path}（${r.bytes ?? 0} bytes，${r.created ? "新建" : "覆盖"}，回读校验 ${r.verified ? "通过" : "不一致"}${r.backup ? `，旧版备份在 ${r.backup}` : ""}）`,
+          };
+        }
+        if (call.name === "run_command") {
+          if (!fsAvailable()) return { ...base, error: "跑命令只在桌面端可用，浏览器直开时不可用" };
+          const argv = args.argv as string[];
+          const denied = isAllowedCommand(argv);
+          if (denied) return { ...base, error: denied };
+          const r = await runAllowed(ws.root, argv);
+          const head = `退出码：${r.exit_code === null ? "未知（进程被终止）" : r.exit_code}${r.timed_out ? "（60 秒超时，已终止）" : ""}`;
+          const body = [r.stdout, r.stderr ? `--- stderr ---\n${r.stderr}` : ""].filter(Boolean).join("\n");
+          return { ...base, result: truncateToolOutput(`${head}\n${body || "(无输出)"}`) };
+        }
+        return { ...base, error: `未知工具：${call.name}` };
+      } catch (e) {
+        return { ...base, error: (e as Error).message };
+      }
+    },
+    [requestApplyFiles]
+  );
 
   /* ------------------------------------------------------------ 发送 */
 
@@ -408,6 +580,9 @@ export default function App() {
       const controller = new AbortController();
       abortRef.current = controller;
 
+      // 测试回路计数：本次发送里已经跑完的 npm test 轮数，上限 MAX_TEST_ROUNDS
+      let testRounds = 0;
+
       try {
         // 一轮 = 一条助手消息。模型读文件后程序自动再请求一轮，最多 MAX_ROUNDS 轮
         for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -445,13 +620,16 @@ export default function App() {
 
           let aborted = false;
           let failed = "";
+          let roundToolCalls: { id: string; name: string; arguments: string }[] = [];
 
           try {
+            const toolModeOn = s.toolCalls !== false && Boolean(stateRef.current.settings.workspace);
             await chatStream({
               settings: s,
               transport,
               messages: buildMessages({ ...target, messages }, s, skillPrompt),
               signal: controller.signal,
+              tools: toolModeOn ? TOOL_DEFS : undefined,
               onEvent: (evt) => {
                 if (evt.type === "delta") {
                   acc.content += evt.text;
@@ -465,6 +643,8 @@ export default function App() {
                 } else if (evt.type === "error") {
                   failed = evt.message;
                   toast(evt.message, "error");
+                } else if (evt.type === "tool_calls") {
+                  roundToolCalls = evt.calls;
                 }
               },
             });
@@ -481,10 +661,24 @@ export default function App() {
             if (raf) cancelAnimationFrame(raf);
           }
 
-          // 真实落盘：回复里出现 file: 块就直接写进工程目录
+          // 真实落盘：回复里出现 file: 块就写进工程目录；计划模式只出方案，直接跳过
           const ws = stateRef.current.settings.workspace;
           const blocks = aborted || failed ? [] : parseFileBlocks(acc.content);
-          const files = ws && blocks.length ? await applyFiles(blocks) : undefined;
+          const planMode = Boolean(s.planMode);
+          if (planMode && blocks.length) toast("计划模式：本轮 file: 块未落盘，只保留方案", "");
+          const files = ws && blocks.length && !planMode ? await requestApplyFiles(blocks) : undefined;
+
+          // 工具调用：按顺序执行，结果挂在助手消息上，下一轮 buildMessages
+          // 会把它展开成原生 tool_calls + tool 消息发给上游，模型才能对上号。
+          // 工具模式下即使没有 file: 块，写文件也是通过 write_file 工具发生的。
+          let toolRecords: ToolCallRecord[] = [];
+          if (!aborted && !failed && roundToolCalls.length) {
+            for (const call of roundToolCalls) {
+              toolRecords.push(await executeTool(call));
+            }
+          }
+          const wroteSomething =
+            Boolean(files?.some((f) => f.ok)) || toolRecords.some((r) => r.name === "write_file" && !r.error);
 
           const finalMsg: Message = {
             ...assist,
@@ -493,6 +687,7 @@ export default function App() {
             usage: acc.usage,
             streaming: false,
             ...(files ? { files } : {}),
+            ...(toolRecords.length ? { toolCalls: toolRecords } : {}),
             ...(usedIds.length ? { skills: usedIds } : {}),
             ...(failed ? { error: failed } : {}),
           };
@@ -501,14 +696,62 @@ export default function App() {
 
           if (aborted || failed) break;
 
+          // 测试回路：本轮写了文件、且自动测试开启、且在桌面端，才自动跑测试。
+          // 通过就停在本轮；失败把报错当成隐藏消息回传，模型下一轮再改；
+          // 3 轮不过就停下，把失败原样报给人，不许模型宣称已修好。
+          let testGiveUp = false;
+          if (
+            wroteSomething &&
+            s.autoTest !== false &&
+            s.toolCalls !== false &&
+            !planMode &&
+            fsAvailable() &&
+            ws
+          ) {
+            try {
+              const r = await runAllowed(ws.root, ["npm", "test"]);
+              testRounds += 1;
+              const combined = [r.stdout, r.stderr ? `--- stderr ---\n${r.stderr}` : ""].filter(Boolean).join("\n");
+              const decision = testLoopDecision(r.exit_code, testRounds);
+              if (decision === "pass") {
+                toast("测试通过", "ok");
+              } else if (decision === "retry") {
+                const testMsg: Message = {
+                  role: "user",
+                  content: `[测试回路] 第 ${testRounds}/${MAX_TEST_ROUNDS} 轮 npm test 未通过，退出码：${r.exit_code === null ? "未知" : r.exit_code}${r.timed_out ? "（60 秒超时，已终止）" : ""}\n${truncateToolOutput(combined || "(无输出)")}\n请根据上面报错改代码，不要在测试通过前宣称完成。`,
+                  createdAt: Date.now(),
+                  hidden: true,
+                };
+                baseMessages = [...baseMessages, testMsg];
+                update((prev) => ({
+                  ...prev,
+                  conversations: prev.conversations.map((c) =>
+                    c.id === convId ? { ...c, messages: baseMessages, updatedAt: Date.now() } : c
+                  ),
+                }));
+              } else {
+                testGiveUp = true;
+                toast(`测试 ${MAX_TEST_ROUNDS} 轮仍未通过，已停止自动修复，请人工处理`, "error");
+              }
+            } catch (e) {
+              // 跑测试本身失败（比如不在桌面端、命令被拒）不阻断主流程，只报一声
+              toast("自动测试未能运行：" + (e as Error).message, "error");
+            }
+          }
+          if (testGiveUp) break;
+
           // 模型要文件 / 技能附件：程序回传真实内容后继续下一轮
           const reads = ws ? parseReadRequests(acc.content) : [];
           const refs = allSkills.length ? parseSkillRefs(acc.content) : [];
-          if (!reads.length && !refs.length) break;
+          // 有工具调用时必须继续下一轮，模型要看到工具结果才能回应；
+          // 只有既没工具调用、又没读/附件请求时，才是本轮真正结束。
+          if (!toolRecords.length && !reads.length && !refs.length) break;
           if (round === MAX_ROUNDS - 1) {
             toast(`已达到本次最多 ${MAX_ROUNDS} 轮读写，继续请再发一条消息`, "error");
             break;
           }
+          // 工具调用轮次里测试回路已经把报错回传了，读/附件请求仍按原流程回传，
+          // 两类隐藏消息都会进下一轮的上下文，不会互相丢。
 
           const outcomes = ws ? await readForModel(ws.root, reads) : [];
           const refOutcomes = await readSkillRefs(allSkills, refs);
@@ -533,11 +776,17 @@ export default function App() {
         setScrollSignal((n) => n + 1);
       }
     },
-    [applyFiles, createConv, input, patchMessage, readForModel, readSkillRefs, toast, transport, update]
+    [createConv, executeTool, input, patchMessage, readForModel, readSkillRefs, requestApplyFiles, toast, transport, update]
   );
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
+    // 正在等写入批复时点停止：直接按“放弃”处理，否则发送流程会一直挂在面板上
+    if (pendingResolveRef.current) {
+      setPending(null);
+      pendingResolveRef.current(null);
+      pendingResolveRef.current = null;
+    }
   }, []);
 
   const regenerate = useCallback(async () => {
@@ -606,14 +855,24 @@ export default function App() {
       } catch {
         /* 目录树拿不到不影响接入，模型仍能靠 @@read 取内容 */
       }
+      const memory = await loadProjectMemory(root);
       commit({
         ...stateRef.current,
-        settings: { ...stateRef.current.settings, workspace: { root, name, tree } },
+        settings: {
+          ...stateRef.current.settings,
+          workspace: {
+            root,
+            name,
+            tree,
+            memory: memory?.body ?? null,
+            memorySource: memory?.source ?? null,
+          },
+        },
       });
       setWsOpen(false);
-      toast(`已接入工程：${name}`, "ok");
+      toast(`已接入工程：${name}${memory ? `（已加载项目记忆 ${memory.source}）` : ""}`, "ok");
     },
-    [commit, toast]
+    [commit, loadProjectMemory, toast]
   );
 
   const clearWorkspace = useCallback(() => {
@@ -932,7 +1191,7 @@ export default function App() {
               activeId={state.activeId}
               onCopy={handleCopy}
               workspace={settings.workspace}
-              onApply={applyFiles}
+              onApply={requestApplyFiles}
               scrollSignal={scrollSignal}
             />
           ) : (
@@ -1029,6 +1288,20 @@ export default function App() {
         onRestored={(text) => {
           toast(text, "ok");
           void refreshTree();
+        }}
+      />
+
+      <PendingWrites
+        items={pending}
+        onApprove={(approved) => {
+          setPending(null);
+          pendingResolveRef.current?.(approved);
+          pendingResolveRef.current = null;
+        }}
+        onDiscard={() => {
+          setPending(null);
+          pendingResolveRef.current?.(null);
+          pendingResolveRef.current = null;
         }}
       />
 

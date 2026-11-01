@@ -7,6 +7,7 @@
 mod api;
 mod fsx;
 mod proxy;
+mod runx;
 
 use crate::proxy::ProxyInfo;
 use std::sync::OnceLock;
@@ -65,6 +66,15 @@ mod fs_cmds {
     }
 }
 
+/// 受控命令执行 IPC 壳：白名单、超时、输出上限都在 runx 里，壳只做参数转发。
+/// 前端在调用前也会先校验一次，但 Rust 侧必须重新校验，绝不信任前端 argv。
+mod run_cmds {
+    #[tauri::command]
+    pub fn run_allowed(root: String, argv: Vec<String>) -> Result<crate::runx::RunResult, String> {
+        crate::runx::run_allowed(&root, &argv)
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -74,7 +84,8 @@ pub fn run() {
             fs_cmds::fs_mkdir,
             fs_cmds::fs_read,
             fs_cmds::fs_exists,
-            fs_cmds::fs_write
+            fs_cmds::fs_write,
+            run_cmds::run_allowed
         ])
         .setup(|_app| {
             let _ = PROXY.set(proxy::spawn());

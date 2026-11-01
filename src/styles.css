@@ -1259,6 +1259,22 @@ body:not(.collapsed) #btnOpenSidebar { display: none; }
 .diff-legend .lg.del { background: var(--danger); opacity: 0.5; }
 .diff-legend .lg.add { background: var(--ok); opacity: 0.5; }
 
+/* ---------------- 写入前确认 ---------------- */
+
+.pending-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font, inherit);
+  font-size: 13px;
+  cursor: pointer;
+}
+.pending-row:last-child { border-bottom: none; }
+.pending-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.pending-meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
+
 /* ---------------- 写入历史 ---------------- */
 
 .undo-modal { width: min(720px, 100%); }
@@ -1868,3 +1884,11 @@ body:not(.collapsed) #btnOpenSidebar { display: none; }
   color: var(--muted);
   letter-spacing: 0.3px;
 }
+
+.tool-calls { margin: 8px 0 0; font-size: 12px; }
+.tool-calls summary { cursor: pointer; color: var(--muted); }
+.tool-calls ul { margin: 6px 0 0; padding-left: 18px; }
+.tool-calls li { margin: 4px 0; line-height: 1.6; }
+.tool-calls code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.tool-error { color: var(--danger); margin-left: 8px; }
+.tool-result { color: var(--text-dim); margin-left: 8px; white-space: pre-wrap; word-break: break-all; }

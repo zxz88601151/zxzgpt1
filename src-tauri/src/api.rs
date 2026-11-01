@@ -8,16 +8,10 @@
 //   {"type":"done"}                             正常结束
 
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
-}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatRequest {
@@ -25,7 +19,12 @@ pub struct ChatRequest {
     #[serde(default)]
     pub api_key: String,
     pub model: String,
-    pub messages: Vec<ChatMessage>,
+    // 注意：这里故意用 Value 而不是 ChatMessage。工具调用轮次的消息里有
+    // assistant 的 tool_calls 数组和 role=tool 的消息，写死成 {role, content}
+    // 会把它们丢掉，下一轮模型就对不上“调了什么、结果是什么”。
+    pub messages: Vec<Value>,
+    #[serde(default)]
+    pub tools: Option<Value>,
     #[serde(default = "default_temperature")]
     pub temperature: f64,
     #[serde(default)]
@@ -124,6 +123,10 @@ pub async fn stream_chat(req: ChatRequest, tx: Sender<Option<String>>) -> Result
     if let Some(mt) = req.max_tokens {
         body["max_tokens"] = json!(mt);
     }
+    if let Some(tools) = req.tools {
+        body["tools"] = tools;
+        body["tool_choice"] = json!("auto");
+    }
 
     let resp = request_builder(&client, &url, &req.api_key)
         .json(&body)
@@ -154,7 +157,7 @@ pub async fn stream_chat(req: ChatRequest, tx: Sender<Option<String>>) -> Result
             if line.ends_with('\r') {
                 line.pop();
             }
-            if let Some(evt) = parse_sse_line(&line) {
+            for evt in parse_sse_line(&line) {
                 if tx.send(Some(evt)).await.is_err() {
                     return Ok(());
                 }
@@ -164,7 +167,7 @@ pub async fn stream_chat(req: ChatRequest, tx: Sender<Option<String>>) -> Result
 
     // 部分实现不以换行结尾，收尾处理一次
     if !raw.trim().is_empty() {
-        if let Some(evt) = parse_sse_line(raw.trim()) {
+        for evt in parse_sse_line(raw.trim()) {
             let _ = tx.send(Some(evt)).await;
         }
     }
@@ -185,6 +188,10 @@ async fn chat_once(req: ChatRequest, tx: Sender<Option<String>>) -> Result<(), S
     });
     if let Some(mt) = req.max_tokens {
         body["max_tokens"] = json!(mt);
+    }
+    if let Some(tools) = req.tools {
+        body["tools"] = tools;
+        body["tool_choice"] = json!("auto");
     }
 
     let resp = request_builder(&client, &url, &req.api_key)
@@ -237,6 +244,36 @@ async fn chat_once(req: ChatRequest, tx: Sender<Option<String>>) -> Result<(), S
         .send(Some(json!({ "type": "delta", "text": content }).to_string()))
         .await;
 
+    // 非流式工具调用：一次性把完整调用列表发给前端，前端按 id 执行后回传。
+    if let Some(calls) = choice
+        .get("message")
+        .and_then(|m| m.get("tool_calls"))
+        .and_then(|c| c.as_array())
+    {
+        let out: Vec<Value> = calls
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let id = c
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("call_{i}"));
+                json!({
+                    "id": id,
+                    "name": c.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()).unwrap_or(""),
+                    "arguments": c.get("function").and_then(|f| f.get("arguments")).and_then(|v| v.as_str()).unwrap_or(""),
+                })
+            })
+            .collect();
+        if !out.is_empty() {
+            let _ = tx
+                .send(Some(json!({ "type": "tool_calls", "calls": out }).to_string()))
+                .await;
+        }
+    }
+
     if let Some(usage) = value.get("usage") {
         let _ = tx
             .send(Some(json!({ "type": "usage", "usage": usage }).to_string()))
@@ -246,19 +283,22 @@ async fn chat_once(req: ChatRequest, tx: Sender<Option<String>>) -> Result<(), S
     Ok(())
 }
 
-/// 解析 SSE 的一行 data，产出统一事件。
-fn parse_sse_line(line: &str) -> Option<String> {
+/// 解析 SSE 的一行 data，产出统一事件（可能多个：正文 + 工具调用增量）。
+/// 以前只返回一个事件，同一行里同时有 content 和 tool_calls 时工具调用会被丢掉；
+/// 现在返回 Vec，调用方逐个转发。tool_call_delta 只带原始增量片，前端按 index
+/// 累计 arguments，流结束时再合成完整调用——Rust 侧不拼 JSON，避免半截参数。
+fn parse_sse_line(line: &str) -> Vec<String> {
     let rest = match line.split_once(':') {
         Some((field, rest)) if field == "data" => rest.trim(),
-        _ => return None,
+        _ => return Vec::new(),
     };
     if rest.is_empty() || rest == "[DONE]" {
-        return None;
+        return Vec::new();
     }
 
     let value: Value = match serde_json::from_str(rest) {
         Ok(v) => v,
-        Err(_) => return None,
+        Err(_) => return Vec::new(),
     };
 
     if let Some(err) = value.get("error") {
@@ -267,12 +307,13 @@ fn parse_sse_line(line: &str) -> Option<String> {
             .and_then(|m| m.as_str())
             .unwrap_or("上游返回错误")
             .to_string();
-        return Some(json!({ "type": "error", "message": msg }).to_string());
+        return vec![json!({ "type": "error", "message": msg }).to_string()];
     }
 
+    let mut out: Vec<String> = Vec::new();
     if let Some(usage) = value.get("usage") {
         if usage.is_object() {
-            return Some(json!({ "type": "usage", "usage": usage }).to_string());
+            out.push(json!({ "type": "usage", "usage": usage }).to_string());
         }
     }
 
@@ -285,17 +326,36 @@ fn parse_sse_line(line: &str) -> Option<String> {
     if let Some(delta) = delta {
         if let Some(r) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
             if !r.is_empty() {
-                return Some(json!({ "type": "reasoning", "text": r }).to_string());
+                out.push(json!({ "type": "reasoning", "text": r }).to_string());
             }
         }
         if let Some(c) = delta.get("content").and_then(|c| c.as_str()) {
             if !c.is_empty() {
-                return Some(json!({ "type": "delta", "text": c }).to_string());
+                out.push(json!({ "type": "delta", "text": c }).to_string());
+            }
+        }
+        if let Some(calls) = delta.get("tool_calls").and_then(|c| c.as_array()) {
+            for (i, tc) in calls.iter().enumerate() {
+                let mut evt = json!({ "type": "tool_call_delta", "index": i });
+                if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+                    evt["id"] = json!(id);
+                }
+                if let Some(name) = tc.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()) {
+                    evt["name"] = json!(name);
+                }
+                if let Some(args) = tc.get("function").and_then(|f| f.get("arguments")).and_then(|v| v.as_str()) {
+                    evt["arguments"] = json!(args);
+                }
+                // 流式里 index 字段优先于数组位置：上游给 index 时用它，否则用位置。
+                if let Some(idx) = tc.get("index").and_then(|v| v.as_u64()) {
+                    evt["index"] = json!(idx);
+                }
+                out.push(evt.to_string());
             }
         }
     }
 
-    None
+    out
 }
 
 // ------------------------------------------------------------------ 辅助接口

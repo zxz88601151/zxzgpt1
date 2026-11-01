@@ -89,6 +89,27 @@ export async function fsWrite(root: string, rel: string, content: string): Promi
   }
 }
 
+export interface RunResult {
+  exit_code: number | null;
+  stdout: string;
+  stderr: string;
+  timed_out: boolean;
+  truncated: boolean;
+}
+
+/**
+ * 受控命令执行：只在 Tauri 桌面端可用，浏览器直开时直接报错。
+ * 白名单、超时、输出上限都在 Rust 侧（runx.rs）再校验一次，这里不做最终裁决，
+ * 只做参数转发与错误归一；前端的 isAllowedCommand 只是提前拦截、省一次 IPC。
+ */
+export async function runAllowed(root: string, argv: string[]): Promise<RunResult> {
+  try {
+    return await call<RunResult>("run_allowed", { root, argv });
+  } catch (e) {
+    throw new Error(errText(e));
+  }
+}
+
 /** 拼出给模型看的目录树（深度优先，忽略依赖与构建产物，最多 300 条） */
 export async function buildTree(root: string, depth = 2): Promise<string> {
   const lines: string[] = [];

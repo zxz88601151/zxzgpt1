@@ -109,6 +109,17 @@ describe("buildWorkspacePrompt", () => {
     expect(p).toContain("@@read:");
     expect(p).toContain("真实读写");
   });
+
+  it("确认开启时不再说自动写入，计划模式说清不落盘", () => {
+    expect(buildWorkspacePrompt("D:\\proj", "", { confirmWrites: true })).toContain("等用户批复后才写入磁盘");
+    expect(buildWorkspacePrompt("D:\\proj", "", { confirmWrites: true })).not.toContain("不需要用户确认");
+    expect(buildWorkspacePrompt("D:\\proj", "", { planMode: true })).toContain("只出方案，不落盘");
+  });
+
+  it("工具模式下要求优先用工具，不混用文本协议", () => {
+    expect(buildWorkspacePrompt("D:\\proj", "", { toolMode: true })).toContain("优先用工具");
+    expect(buildWorkspacePrompt("D:\\proj", "", { toolMode: true })).toContain("run_command");
+  });
 });
 
 describe("parseReadRequests", () => {

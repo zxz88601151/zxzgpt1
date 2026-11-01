@@ -168,12 +168,26 @@ export function backupRelPath(stamp: string, rel: string): string {
   return `${UNDO_DIR}/${stamp}/${normalizeRelPath(rel)}`;
 }
 
+export interface WorkspacePromptOptions {
+  /** 工具调用开启时，模型应优先用工具而不是 file: 块 */
+  toolMode?: boolean;
+  /** 写入前确认开启时，提示词必须如实说“要批了才写”，不能再说自动写入 */
+  confirmWrites?: boolean;
+  /** 计划模式下不落盘，提示词里先说清楚 */
+  planMode?: boolean;
+}
+
 /** 本地工程模式的系统提示词；tree 为空时只给根目录，不硬编造结构 */
-export function buildWorkspacePrompt(root: string, tree: string): string {
+export function buildWorkspacePrompt(root: string, tree: string, opts: WorkspacePromptOptions = {}): string {
+  const writeLine = opts.planMode
+    ? "计划模式：本轮只出方案，不落盘；你输出的文件块会被程序直接跳过。"
+    : opts.confirmWrites
+      ? "你输出的文件块会先弹差异面板，等用户批复后才写入磁盘；没批复之前不要把写入当成已完成。"
+      : "你输出的文件块会被程序**自动写入磁盘**，不需要用户确认；聊天窗口只显示写入结果，不显示代码正文。所以你说的每个字都不会代替文件内容——只有 file: 块才会真正落盘。";
   const lines = [
     "【本地工程模式 · 真实读写】",
     `你正在用户的本地磁盘上工作，工程根目录：${root}`,
-    "你输出的文件块会被程序**自动写入磁盘**，不需要用户确认；聊天窗口只显示写入结果，不显示代码正文。所以你说的每个字都不会代替文件内容——只有 file: 块才会真正落盘。",
+    writeLine,
   ];
   if (tree.trim()) {
     lines.push("当前目录结构（深度有限，已忽略依赖与构建产物）：", tree.trim());
@@ -181,6 +195,9 @@ export function buildWorkspacePrompt(root: string, tree: string): string {
     lines.push("当前目录为空或尚未扫描。");
   }
   lines.push(
+    opts.toolMode
+      ? "工具调用开启时优先用工具读写文件；下面的 file: / @@read: 只是不支持工具的兼容端回退，不要在工具可用时混用两套协议。"
+      : "工具调用未开启时用下面的文本协议读写文件。",
     "写入文件（新建或整文件覆盖）：",
     "```file:相对路径",
     "<该文件的完整内容>",
@@ -192,7 +209,9 @@ export function buildWorkspacePrompt(root: string, tree: string): string {
     "2. 一个文件一个代码块，内容必须是完整文件；禁止「…省略…」「其余不变」这类占位",
     "3. 改已有文件前先 @@read 看真实内容，不要凭猜测重写；改完输出整份新内容",
     "4. 解释写在代码块外面；不确定的事先读文件或直接说不知道",
-    "5. 不要用终端假设：你看不到命令输出，只能靠 @@read 获取事实"
+    opts.toolMode
+      ? "5. 工具调用开启时，测试与命令输出只能靠 run_command 工具获取，不要凭空编造命令输出"
+      : "5. 不要用终端假设：你看不到命令输出，只能靠 @@read 获取事实"
   );
   return lines.join("\n");
 }

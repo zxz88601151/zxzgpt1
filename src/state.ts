@@ -6,6 +6,8 @@
 
 import { DEFAULT_SETTINGS } from "./presets";
 import { buildWorkspacePrompt } from "./lib/files";
+import { buildPlanPrompt, buildProjectMemoryPrompt } from "./lib/project";
+import { buildToolsPrompt } from "./lib/tools";
 import { clamp, sliceContext, uid } from "./lib/text";
 import type { AppState, Conversation, Message, Settings, WireMessage } from "./types";
 
@@ -59,14 +61,47 @@ export function buildMessages(conv: Conversation, settings: Settings, skillPromp
 
   // 本地工程模式：把根目录、目录树和落盘格式约定放在最后，离用户消息最近
   const ws = settings.workspace;
-  if (ws) out.push({ role: "system", content: buildWorkspacePrompt(ws.root, ws.tree) });
+  if (ws) {
+    out.push({
+      role: "system",
+      content: buildWorkspacePrompt(ws.root, ws.tree, {
+        toolMode: settings.toolCalls !== false,
+        confirmWrites: Boolean(settings.confirmWrites),
+        planMode: Boolean(settings.planMode),
+      }),
+    });
+    // 工具说明：只在工具调用开启时发，放在工作区提示词之后、计划提示词之前
+    if (settings.toolCalls !== false) {
+      out.push({ role: "system", content: buildToolsPrompt(Boolean(settings.planMode), Boolean(settings.confirmWrites)) });
+    }
+    // 项目记忆：工程自己的 CLAUDE.md / AGENTS.md，比通用技能更具体
+    const memory = ws.memory && ws.memorySource ? buildProjectMemoryPrompt(ws.memorySource, ws.memory) : "";
+    if (memory) out.push({ role: "system", content: memory });
+  }
 
   const skills = skillPrompt.trim();
   if (skills) out.push({ role: "system", content: skills });
 
-  const usage = conv.messages.filter((m) => !m.error && !m.streaming && m.content);
+  // 计划模式指令放最后：离用户消息最近，模型最不容易把它当成可忽略的背景
+  if (settings.planMode) out.push({ role: "system", content: buildPlanPrompt() });
+
+  const usage = conv.messages.filter((m) => !m.error && !m.streaming && (m.content || m.toolCalls?.length));
   const turns = clamp(Number(settings.contextTurns) || 0, 0, 100);
   for (const m of sliceContext(usage, turns)) {
+    // 带工具调用的助手消息要展开成原生协议：先是带 tool_calls 的助手消息，
+    // 后面跟每一次调用对应的 tool 消息（tool_call_id 对上），模型才能把
+    // “我调了什么、结果是什么”对上号；只发文本会丢掉这层对应关系。
+    if (m.role === "assistant" && m.toolCalls?.length) {
+      out.push({
+        role: "assistant",
+        content: m.content,
+        tool_calls: m.toolCalls.map((t) => ({ id: t.id, type: "function" as const, function: { name: t.name, arguments: t.arguments } })),
+      });
+      for (const t of m.toolCalls) {
+        out.push({ role: "tool", content: t.error ? `工具执行失败：${t.error}` : (t.result ?? ""), tool_call_id: t.id });
+      }
+      continue;
+    }
     out.push({ role: m.role, content: m.content });
   }
   return out;

@@ -216,6 +216,46 @@ export function SettingsDrawer({ open, settings, transport, onClose, onSave, onT
             <span>流式输出（逐字返回）</span>
           </label>
 
+          <label className="check">
+            <input
+              id="planMode"
+              type="checkbox"
+              checked={draft.planMode ?? false}
+              onChange={(e) => patch({ planMode: e.target.checked })}
+            />
+            <span>计划模式：只出方案，不落盘（先对齐方案，再关掉它开写）</span>
+          </label>
+
+          <label className="check">
+            <input
+              id="confirmWrites"
+              type="checkbox"
+              checked={draft.confirmWrites ?? false}
+              onChange={(e) => patch({ confirmWrites: e.target.checked })}
+            />
+            <span>写入前确认：模型给的文件先看差异，批了才写盘</span>
+          </label>
+
+          <label className="check">
+            <input
+              id="toolCalls"
+              type="checkbox"
+              checked={draft.toolCalls ?? true}
+              onChange={(e) => patch({ toolCalls: e.target.checked })}
+            />
+            <span>工具调用：模型用读/写/列目录/搜索/跑命令五个工具干活（关了回到 file:/@@read 文本协议）</span>
+          </label>
+
+          <label className="check">
+            <input
+              id="autoTest"
+              type="checkbox"
+              checked={draft.autoTest ?? true}
+              onChange={(e) => patch({ autoTest: e.target.checked })}
+            />
+            <span>自动测试回路：写完文件后自动跑一次 npm test，失败把报错回传给模型再改，最多 3 轮（仅桌面端）</span>
+          </label>
+
           <div className="drawer-actions">
             <button className="primary-btn" id="btnSave" type="button" onClick={() => onSave(draft)}>
               保存

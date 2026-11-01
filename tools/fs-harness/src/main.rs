@@ -11,6 +11,9 @@
 #[path = "../../../src-tauri/src/fsx.rs"]
 mod fsx;
 
+#[path = "../../../src-tauri/src/runx.rs"]
+mod runx;
+
 fn main() {
     let dir = std::env::args().nth(1).unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
     println!("roots = {:?}", fsx::roots());
@@ -86,5 +89,36 @@ mod tests {
         assert!(entries[0].dir, "目录应排在前面");
         assert_eq!(entries[0].name, "zdir");
         assert_eq!(entries[1].name, "afile.txt");
+    }
+}
+
+#[cfg(test)]
+mod runx_tests {
+    use super::runx;
+
+    fn argv(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn allowlist_mirrors_frontend() {
+        assert!(runx::is_allowed(&argv(&["npm", "test"])).is_ok());
+        assert!(runx::is_allowed(&argv(&["npm", "run", "build"])).is_ok());
+        assert!(runx::is_allowed(&argv(&["git", "diff", "--stat"])).is_ok());
+        assert!(runx::is_allowed(&argv(&["npm", "install"])).is_err());
+        assert!(runx::is_allowed(&argv(&["git", "push"])).is_err());
+        assert!(runx::is_allowed(&argv(&["npm", "test", "a;rm -rf ."])).is_err());
+    }
+
+    #[test]
+    fn run_git_status_in_temp_dir_reports_not_fails_to_spawn() {
+        // 临时目录不是 git 仓库：git status 会非零退出，但命令本身必须能跑起来
+        // 并且输出被捕获，而不是“启动失败”。这验证的是执行层，不是 git 语义。
+        let dir = std::env::temp_dir().join(format!("zxz-runx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = runx::run_allowed(&dir.to_string_lossy(), &argv(&["git", "status"])).unwrap();
+        assert!(!r.timed_out);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

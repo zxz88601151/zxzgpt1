@@ -4,6 +4,7 @@
  */
 
 import { safeJsonParse } from "./lib/text";
+import { accumulateToolCallDeltas, type ToolCallFragment } from "./lib/tools";
 import type { ModelListResult, Settings, StreamEvent, TestResult, Transport, WireMessage } from "./types";
 
 declare global {
@@ -55,16 +56,19 @@ export interface ChatOptions {
   messages: WireMessage[];
   signal: AbortSignal;
   onEvent: (evt: StreamEvent) => void;
+  /** 工具定义：给了才发 tools + tool_choice=auto；不给就是纯聊天，不改老行为 */
+  tools?: { type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }[];
 }
 
 /** 发起一次对话；SSE 解析是手写的，桌面端与直连共用同一套逻辑。 */
-export async function chatStream({ settings, transport, messages, signal, onEvent }: ChatOptions): Promise<void> {
+export async function chatStream({ settings, transport, messages, signal, onEvent, tools }: ChatOptions): Promise<void> {
   const wantStream = settings.stream !== false;
   const payload = {
     model: settings.model,
     messages,
     temperature: Number(settings.temperature),
     stream: wantStream,
+    ...(tools?.length ? { tools, tool_choice: "auto" } : {}),
   };
   const maxTokens = settings.maxTokens && Number(settings.maxTokens) > 0 ? Number(settings.maxTokens) : null;
 
@@ -83,6 +87,7 @@ export async function chatStream({ settings, transport, messages, signal, onEven
       temperature: payload.temperature,
       max_tokens: maxTokens,
       stream: wantStream,
+      ...(tools?.length ? { tools } : {}),
     });
   } else {
     url = `${normalizeBase(settings.baseUrl)}/chat/completions`;
@@ -110,7 +115,13 @@ export async function chatStream({ settings, transport, messages, signal, onEven
   if (!res.body || (!wantStream && !contentType.includes("event-stream"))) {
     const json = (await res.json().catch(() => null)) as {
       error?: { message?: string };
-      choices?: { message?: { content?: string; reasoning_content?: string } }[];
+      choices?: {
+        message?: {
+          content?: string;
+          reasoning_content?: string;
+          tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[];
+        };
+      }[];
       usage?: Record<string, number>;
     } | null;
     if (!json) throw new Error("响应解析失败：无法读取 JSON");
@@ -118,6 +129,12 @@ export async function chatStream({ settings, transport, messages, signal, onEven
     const msg = json.choices?.[0]?.message || {};
     if (msg.reasoning_content) onEvent({ type: "reasoning", text: msg.reasoning_content });
     if (msg.content) onEvent({ type: "delta", text: msg.content });
+    if (Array.isArray((msg as { tool_calls?: unknown }).tool_calls)) {
+      const calls = (msg as { tool_calls: { id?: string; function?: { name?: string; arguments?: string } }[] }).tool_calls.map(
+        (c, i) => ({ id: c.id || `call_${i}`, name: c.function?.name || "", arguments: c.function?.arguments || "" }),
+      );
+      if (calls.length) onEvent({ type: "tool_calls", calls });
+    }
     if (json.usage) onEvent({ type: "usage", usage: json.usage });
     onEvent({ type: "done" });
     return;
@@ -126,6 +143,9 @@ export async function chatStream({ settings, transport, messages, signal, onEven
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  // 流式 tool_calls 增量：direct 模式从上游 delta 里取，proxy 模式从 Rust 转发的
+  // tool_call_delta 事件里取；流结束时合成一次完整调用再交给 App 执行。
+  const toolFragments: ToolCallFragment[] = [];
 
   const handleLine = (rawLine: string) => {
     const line = rawLine.trim();
@@ -141,12 +161,33 @@ export async function chatStream({ settings, transport, messages, signal, onEven
           message?: string;
           usage?: Record<string, number>;
           error?: { message?: string };
-          choices?: { delta?: { content?: string; reasoning_content?: string } }[];
+          index?: number;
+          id?: string;
+          name?: string;
+          arguments?: string;
+          choices?: {
+            delta?: {
+              content?: string;
+              reasoning_content?: string;
+              tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[];
+            };
+          }[];
         }
       | null;
     if (!json) return;
 
     if (transport.mode === "proxy") {
+      // Rust 侧已经转成统一事件；tool_call_delta 只累计、不直接透传，
+      // 流结束时由本函数合成一次 tool_calls 事件，避免 App 收到半截参数。
+      if (json.type === "tool_call_delta" && typeof json.index === "number") {
+        toolFragments.push({
+          index: json.index,
+          ...(typeof json.id === "string" ? { id: json.id } : {}),
+          ...(typeof json.name === "string" ? { name: json.name } : {}),
+          ...(typeof json.arguments === "string" ? { arguments: json.arguments } : {}),
+        });
+        return;
+      }
       onEvent(json as StreamEvent); // Rust 侧已经转成统一事件
       return;
     }
@@ -162,6 +203,16 @@ export async function chatStream({ settings, transport, messages, signal, onEven
     if (delta) {
       if (delta.reasoning_content) onEvent({ type: "reasoning", text: delta.reasoning_content });
       if (delta.content) onEvent({ type: "delta", text: delta.content });
+      if (Array.isArray(delta.tool_calls)) {
+        for (const tc of delta.tool_calls as { index?: number; id?: string; function?: { name?: string; arguments?: string } }[]) {
+          toolFragments.push({
+            index: typeof tc.index === "number" ? tc.index : toolFragments.length,
+            ...(tc.id ? { id: tc.id } : {}),
+            ...(tc.function?.name ? { name: tc.function.name } : {}),
+            ...(tc.function?.arguments ? { arguments: tc.function.arguments } : {}),
+          });
+        }
+      }
     }
   };
 
@@ -181,6 +232,11 @@ export async function chatStream({ settings, transport, messages, signal, onEven
     } catch {
       /* ignore */
     }
+  }
+
+  if (toolFragments.length) {
+    const calls = accumulateToolCallDeltas(toolFragments).filter((c) => c.name);
+    if (calls.length) onEvent({ type: "tool_calls", calls });
   }
 
   onEvent({ type: "done" });

@@ -66,6 +66,23 @@ describe("buildMessages", () => {
     expect(out.map((m) => m.content)).toEqual(["问题", "有效回答"]);
   });
 
+  it("带工具调用的助手消息展开成 tool_calls + tool 消息", () => {
+    const c = conv([
+      msg("user", "读一下 a.ts"),
+      msg("assistant", "", {
+        toolCalls: [{ id: "c1", name: "read_file", arguments: "{\"path\":\"a.ts\"}", result: "export const a = 1;" }],
+      }),
+      msg("user", "改一下"),
+    ]);
+    const out = buildMessages(c, settings({ contextTurns: 0 }));
+    const assistant = out.find((m) => m.role === "assistant");
+    expect(assistant?.tool_calls).toEqual([
+      { id: "c1", type: "function", function: { name: "read_file", arguments: "{\"path\":\"a.ts\"}" } },
+    ]);
+    const tool = out.find((m) => m.role === "tool");
+    expect(tool).toEqual({ role: "tool", content: "export const a = 1;", tool_call_id: "c1" });
+  });
+
   it("空助手占位不会挤掉真实的一轮上下文", () => {
     const c = conv([
       msg("user", "第一问"),
