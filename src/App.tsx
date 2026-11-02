@@ -537,7 +537,8 @@ export default function App() {
       // 重新生成时输入框里是上一次的原文，允许为空判断跳过
       if (!reuse && !text) return;
 
-      // 应用内命令 C1：以 / 开头的输入不发给模型，只改本应用自己的开关。
+      // 应用内命令 C1：只有首词命中已知命令名（/plan /tools /new /help 及中文别名）才当命令，
+      // 其余以 / 开头的正常句子照常发给模型（D16）。
       // 先于 busy/模型配置检查：busy 期间命令不执行且输入原样保留；改开关不需要已配好模型。
       const plan = planAppCommand(text, { busy: busyRef.current, active: !reuse && text.startsWith("/") });
       if (plan.kind === "reject_busy") return;

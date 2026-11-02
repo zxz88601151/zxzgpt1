@@ -4,8 +4,8 @@
  * 1) 只能动应用内状态：计划模式、工具调用、自动测试、写入前确认、探索模式、
  *    新建会话。绝不读文件、绝不写文件、绝不跑命令——那些是 C2 工程控制的事，
  *    不在这个文件里出现。
- * 2) 命令只在用户主动输入、且以 / 开头时解析；普通消息一个字都不拦截。
- *    解析失败（未知命令、开关值不是 开/关）只返回错误文本，不改任何状态。
+ * 2) 命令只在用户主动输入、且**首词命中已知命令名**时才解析；其余一个字都不拦截（D16）。
+ *    已知命令的参数解析失败（开关值不是 开/关、多带参数）只返回错误文本，不改任何状态。
  * 3) 语音触发时同样走这条解析：App 侧在执行前必须先把命令复述给用户看，
  *    本文件只负责"这句话是不是一条合法命令、改哪个开关"，不负责执行。
  *
@@ -38,19 +38,27 @@ const TOGGLE_KEYS: Record<string, ToggleKey> = {
   探索: "exploreMode",
 };
 
+/** 命令名的唯一权威：新增命令要同时改这里、TOGGLE_KEYS 与 appCommandHelp 的清单。 */
+const COMMAND_NAMES = new Set<string>(["help", "帮助", "new", "新建", ...Object.keys(TOGGLE_KEYS)]);
+
 function parseOnOff(word: string): boolean | null {
   if (word === "on" || word === "开" || word === "开启") return true;
   if (word === "off" || word === "关" || word === "关闭") return false;
   return null;
 }
 
-/** 解析一条斜杠命令。非 / 开头（含前后空白trim后）返回 null，表示不是命令。
- *  大小写策略：只认小写英文与中英别名（/plan、/计划），/PLAN 视为未知命令。 */
+/** 解析一条斜杠命令。
+ *  D16：只有**首词命中已知命令名**才算命令，其余一律返回 null 当普通消息发出去。
+ *  旧判定是「trim 后以 / 开头就是命令」，于是 `/etc/hosts 里的 127.0.0.1 是干嘛的`
+ *  这类以斜杠开头的正常句子被命令层吞掉，永远到不了模型——那正是约束 2 承诺不会做的事。
+ *  代价：命令打错（/pln 开）不再得到「未知命令」提示，而是原样发给模型；
+ *  已知命令的参数错误（/plan 也许吧、/help foo）仍然报错。
+ *  大小写策略：只认小写英文与中英别名（/plan、/计划）；/PLAN 不命中命令名，按普通消息发出。 */
 export function parseAppCommand(text: string): AppCommandResult | null {
   const t = text.trim();
   if (!t.startsWith("/")) return null;
   const parts = t.slice(1).trim().split(/\s+/).filter(Boolean);
-  if (!parts.length) return { error: "空命令，输入 /help 看可用的应用内命令" };
+  if (!parts.length || !COMMAND_NAMES.has(parts[0])) return null;
   const [cmd, arg] = parts;
   if (cmd === "help" || cmd === "帮助") {
     if (parts.length > 1) return { error: "/help 后面不带参数，直接显示命令清单" };
@@ -61,7 +69,6 @@ export function parseAppCommand(text: string): AppCommandResult | null {
     return { action: { kind: "new_session" } };
   }
   const key = TOGGLE_KEYS[cmd];
-  if (!key) return { error: `未知命令 /${cmd}，输入 /help 看可用的应用内命令` };
   if (arg === undefined) return { error: `/${cmd} 后面要跟 开 或 关，例如 /${cmd} 开` };
   const value = parseOnOff(arg);
   if (value === null) return { error: `/${cmd} 的值只能是 开 或 关，你写的是 ${arg}` };
