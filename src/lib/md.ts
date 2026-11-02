@@ -12,6 +12,25 @@ import { escapeAttr, escapeHtml, uid } from "./text";
 const CODE_RE = /```([^\n]*)\n?([\s\S]*?)(?:```|$)/g;
 const INLINE_RE = /`([^`\n]+)`/g;
 
+/** 协议白名单：只放行浏览器不会在本 WebView 里执行代码的 scheme。
+ *  ""＝无协议（相对路径、锚点、协议相对 //host），由 base URL 展开，安全。
+ *  新增协议要显式加进来并想清楚副作用——黑名单是默认放行，白名单是默认拒绝。 */
+const SAFE_SCHEMES = new Set(["", "http", "https", "mailto", "tel"]);
+
+/** 识别「浏览器最终看到的协议」，逐步镜像 WHATWG 基础 URL 解析器判定 scheme 之前的预处理：
+ *  ① 删掉输入中**所有** TAB/LF/CR（解析器在判协议前就删，协议名内部也算，`java\tscript:` 由此变成
+ *     `javascript:`——旧黑名单只挡 `^\s*`，这正是 R1 的真实绕过）；
+ *  ② 再剥离首尾的 C0 控制符与空格（0x00-0x20，JS 的 trim 管不到 0x01-0x08 这类）；
+ *  ③ 按 scheme 文法取 ASCII 字母开头、[alnum + - .] 延续、紧跟冒号的前缀。
+ *  只用于**识别**：写进属性的仍是原始 clean，中间出现非法字符（如 NUL）按解析器的行为
+ *  判为「没有协议」而不是删掉再拼，因此不会引入新的解析歧义。 */
+function browserScheme(raw: string): string {
+  const noBreaks = raw.replace(/[\t\n\r]/g, "");
+  const aligned = noBreaks.replace(/^[\x00-\x20]+/, "").replace(/[\x00-\x20]+$/, "");
+  const m = /^([a-zA-Z][a-zA-Z0-9+\-.]*):/.exec(aligned);
+  return m ? m[1].toLowerCase() : "";
+}
+
 export function renderCodeBlock(code: string, lang: string): string {
   const body = highlight(escapeHtml(code.replace(/\n$/, "")));
   const id = "cb-" + uid();
@@ -42,8 +61,8 @@ export function renderInline(input: string): string {
   text = text.replace(/!?\[([^\]]*)\]\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g, (m, label: string, rawUrl: string) => {
     const clean = String(rawUrl).trim();
     // 不做任何实体还原：浏览器在 href 属性内本就会把 &amp; 解码回 &，
-    // 还原既无必要，还会让 &#115; 这类实体绕过下面的协议黑名单（旧实现的真实漏洞）
-    if (/^\s*javascript:/i.test(clean) || /^\s*data:/i.test(clean)) return keep(escapeHtml(label));
+    // 还原既无必要，还会让 &#115; 这类实体绕过协议判定（P0-2 修掉的真实漏洞）
+    if (!SAFE_SCHEMES.has(browserScheme(clean))) return keep(escapeHtml(label));
     return m.startsWith("!")
       ? keep(`<img src="${escapeAttr(clean)}" alt="${escapeAttr(label)}" loading="lazy" />`)
       : keep(`<a href="${escapeAttr(clean)}" target="_blank" rel="noreferrer noopener">${escapeHtml(label)}</a>`);

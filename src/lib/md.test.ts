@@ -121,7 +121,7 @@ describe("属性注入回归（P0-2）", () => {
   });
 
   it("实体编码的 javascript: 协议保持实体编码、不可执行（&#115;=s 绕过回归）", () => {
-    // 字面串不是 javascript:，黑名单本就不拦；安全保证是 & 不被还原，
+    // 字面串不是任何协议名，白名单按「无协议」放行成相对路径；安全保证是 & 不被还原，
     // 浏览器单次解码后得到惰性字符串 "java&#115;cript:"，不会二次解码成协议
     const a = renderInline("[a](java&#115;cript:alert(1))");
     expect(a).toContain("java&amp;#115;cript:alert(1)");
@@ -149,6 +149,118 @@ describe("属性注入回归（P0-2）", () => {
   it("大小写混合的 javascript:/data: 仍被拦截", () => {
     expect(renderInline("[a](JaVaScRiPt:alert(1))")).not.toContain("href=");
     expect(renderInline("[a](Data:text/html,x)")).not.toContain("href=");
+  });
+});
+
+/** escapeAttr 只会发出这四种实体；单次替换即浏览器对属性值的一次解码，
+ *  顺序 replace 会把 &amp;quot; 误判成二次解码，所以用单趟正则映射。 */
+const ENTITY: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"' };
+const decodeOnce = (v: string) => v.replace(/&(amp|lt|gt|quot);/g, (_m, n: string) => ENTITY[n]);
+
+/** 从渲染结果里取所有 href/src，按浏览器看到的属性值解码，再交给 WHATWG 解析器定协议 */
+function finalProtocols(html: string): string[] {
+  return [...html.matchAll(/(?:href|src)="([^"]*)"/g)].map((m) => new URL(decodeOnce(m[1]), "http://localhost:1420/").protocol);
+}
+
+describe("协议白名单与控制字符绕过（R1）", () => {
+  const dangerous: [string, string][] = [
+    ["协议名内 TAB", "[a](java\tscript:alert(1))"],
+    ["协议名内 LF", "[a](java\nscript:alert(1))"],
+    ["协议名内 CR", "[a](java\rscript:alert(1))"],
+    ["协议名前 TAB", "[a](\tjavascript:alert(1))"],
+    ["协议名前 CR", "[a](\rjavascript:alert(1))"],
+    ["前导 C0 \\x01", "[a](\u0001javascript:alert(1))"],
+    ["前导 C0 \\x00", "[a](\u0000javascript:alert(1))"],
+    ["前导 \\x0c 表单符", "[a](\u000cjavascript:alert(1))"],
+    ["尾随 C0 \\x02", "[a](javascript:alert(1)\u0002)"],
+    ["大小写混合 + TAB", "[a](JaVa\tScRiPt:alert(1))"],
+    ["data 协议名内 TAB", "![x](da\tta:text/html;base64,AA)"],
+    ["vbscript", "[a](vbscript:msgbox(1))"],
+    ["about", "[a](about:blank)"],
+    ["blob", "[a](blob:http://localhost/uuid)"],
+    ["file", "[a](file:///C:/Windows/win.ini)"],
+    ["view-source", "[a](view-source:http://x/a)"],
+    ["chrome", "[a](chrome://version)"],
+    ["未知协议默认拒绝", "[a](wxwork://x)"],
+  ];
+
+  for (const [name, src] of dangerous) {
+    it(`${name} —— 不生成可点击链接，也不生成图片`, () => {
+      const html = renderInline(src);
+      expect(html).not.toMatch(/<a\s/);
+      expect(html).not.toMatch(/<img\s/);
+      expect(finalProtocols(html)).toEqual([]);
+      // 整段链接语法被消费、降级为纯文本，不会残留可被二次解析的 [ ]( 结构
+      expect(html).not.toMatch(/\]\(/);
+    });
+  }
+
+  it("协议名中间出现非法字符（NUL）时按解析器判为相对路径，最终协议是 base 的 http:", () => {
+    const html = renderInline("[a](java\u0000script:alert(1))");
+    const protocols = finalProtocols(html);
+    expect(protocols.length).toBe(1);
+    expect(protocols[0]).toBe("http:");
+    expect(protocols).not.toContain("javascript:");
+  });
+
+  it("白名单协议都落地，且解析器看到的协议与放行理由一致", () => {
+    const cases: [string, string][] = [
+      ["[a](https://x/a)", "https:"],
+      ["[a](HTTP://X/A)", "http:"],
+      ["[a](http://x/?a=1&b=2)", "http:"],
+      ["[a](mailto:someone@x.com)", "mailto:"],
+      ["[a](tel:+100)", "tel:"],
+    ];
+    for (const [src, protocol] of cases) {
+      const protocols = finalProtocols(renderInline(src));
+      expect(protocols).toEqual([protocol]);
+    }
+  });
+
+  it("相对路径 / 锚点 / 协议相对都放行，解析后落在 base 协议内", () => {
+    for (const src of ["[a](附件.md)", "[a](./rel/path)", "[a](/abs/path)", "[a](#heading)", "[a](//cdn.example.com/a.js)", "[a](path/to/file:name)"]) {
+      const protocols = finalProtocols(renderInline(src));
+      expect(protocols).toEqual(["http:"]);
+    }
+  });
+
+  it("前导控制符 + 大写协议经解析器还原后仍是合法 http:", () => {
+    const html = renderInline("[a]( \t\n\u000cHTTP://ok/a)");
+    expect(finalProtocols(html)).toEqual(["http:"]);
+    expect(html).toContain("<a href=");
+  });
+
+  it("percent 编码与实体形式的 javascript: 不会复活成协议", () => {
+    expect(finalProtocols(renderInline("[a](%6aavascript:alert(1))"))).toEqual(["http:"]);
+    expect(finalProtocols(renderInline("[a](java&#115;cript:alert(1))"))).toEqual(["http:"]);
+  });
+
+  it("合法查询参数的单个 & 仍只转义一次（解码后与原文等价）", () => {
+    const html = renderInline("[q](https://x/?a=1&b=2)");
+    expect(html).toContain('href="https://x/?a=1&amp;b=2"');
+    expect(decodeOnce(html.match(/href="([^"]*)"/)![1])).toBe("https://x/?a=1&b=2");
+  });
+
+  it("控制字符与裸引号混排时属性仍闭合（转义职责未被协议改动削弱）", () => {
+    const html = renderInline('[a](https://x/" onmouseover="\talert(1))');
+    expect(html).not.toContain('" onmouseover="');
+    expect(finalProtocols(html)).toEqual(["https:"]);
+  });
+
+  it("危险协议降级为纯文本后，label 里的尖括号仍被转义", () => {
+    const html = renderInline("[<b>点</b>](javascript:alert(1))");
+    expect(html).not.toMatch(/<a\s|<img\s|<b>/);
+    expect(html).toContain("&lt;b&gt;点&lt;/b&gt;");
+  });
+
+  it("块级 renderMarkdown 走同一条判定：真实文档路径同样拦下 TAB 绕过", () => {
+    // App 实际渲染的是整段 Markdown，这里补齐行内测试覆盖不到的段落 → 行内调用链
+    const html = renderMarkdown("请看 [点我](java\tscript:alert(1)) 这个链接");
+    expect(html).not.toMatch(/<a\s/);
+    expect(finalProtocols(html)).toEqual([]);
+    // 同一段落里的合法链接不受影响
+    const ok = renderMarkdown("请看 [官网](https://tauri.app) 和 [文档](./docs/a.md)");
+    expect(finalProtocols(ok)).toEqual(["https:", "http:"]);
   });
 });
 
