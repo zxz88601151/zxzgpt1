@@ -22,6 +22,13 @@ import {
 } from "./lib/skill";
 import { PROJECT_MEMORY_FILES, truncateProjectMemory } from "./lib/project";
 import { buildPendingWrites, type PendingWrite } from "./lib/pending";
+import {
+  appendAssistantMessage,
+  appActionLabel,
+  nextInputAfterCommand,
+  planAppCommand,
+  withToggleApplied,
+} from "./lib/appcontrol";
 import { loadLocalSkills, mergeSkills, pickSkills } from "./lib/skillstore";
 import {
   backupRelPath,
@@ -525,11 +532,43 @@ export default function App() {
 
   const send = useCallback(
     async (opts?: { reuseUser?: boolean }) => {
-      if (busyRef.current) return;
       const reuse = Boolean(opts?.reuseUser);
       const text = input.trim();
       // 重新生成时输入框里是上一次的原文，允许为空判断跳过
       if (!reuse && !text) return;
+
+      // 应用内命令 C1：以 / 开头的输入不发给模型，只改本应用自己的开关。
+      // 先于 busy/模型配置检查：busy 期间命令不执行且输入原样保留；改开关不需要已配好模型。
+      const plan = planAppCommand(text, { busy: busyRef.current, active: !reuse && text.startsWith("/") });
+      if (plan.kind === "reject_busy") return;
+      if (busyRef.current) return; // 普通消息的原有 busy 门
+      if (plan.kind !== "passthrough") {
+        // F1：只有真正执行的命令才清空输入；解析失败保留原文，用户可原地改
+        setInput(nextInputAfterCommand(input, plan));
+        if (plan.kind === "error") {
+          toast(plan.message, "error");
+          return;
+        }
+        if (plan.kind === "help") {
+          let conv = findActive(stateRef.current);
+          if (!conv) conv = createConv();
+          const helpConvId = conv.id;
+          update((prev) => ({
+            ...prev,
+            conversations: appendAssistantMessage(prev.conversations, helpConvId, plan.message, Date.now()).conversations,
+          }));
+          return;
+        }
+        if (plan.kind === "new_session") {
+          createConv();
+          toast(appActionLabel({ kind: "new_session" }), "");
+          return;
+        }
+        // toggle：与设置抽屉写同一份 settings，经 update() 走同一持久化通道
+        update((prev) => ({ ...prev, settings: withToggleApplied(prev.settings, plan) }));
+        toast(plan.label, "");
+        return;
+      }
 
       const s = stateRef.current.settings;
       if (!s.model) {

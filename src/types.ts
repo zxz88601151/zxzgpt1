@@ -113,6 +113,9 @@ export interface Settings {
   toolCalls?: boolean;
   /** 自动测试回路：写完文件后自动跑一次 npm test，失败把报错回传给模型再改，最多 3 轮（默认开；仅桌面端、仅工具调用开启时生效） */
   autoTest?: boolean;
+  /** 探索模式开关（C1 只负责存取这个开关；只读拦截行为属 A2，不在本批）。
+   *  缺省 undefined 按关处理，老设置无此字段兼容 */
+  exploreMode?: boolean;
 }
 
 export interface AppState {
