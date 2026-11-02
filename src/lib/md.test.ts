@@ -179,6 +179,9 @@ describe("协议白名单与控制字符绕过（R1）", () => {
     ["about", "[a](about:blank)"],
     ["blob", "[a](blob:http://localhost/uuid)"],
     ["file", "[a](file:///C:/Windows/win.ini)"],
+    // Q1：img 形态同样拦——CSP img-src 是否放行 file: 属部署态问题，不能当作已拦；白名单先拒
+    ["file 图片形态", "![x](file:///C:/Windows/win.ini)"],
+    ["file 大写协议", "[a](FILE:///C:/Windows/win.ini)"],
     ["view-source", "[a](view-source:http://x/a)"],
     ["chrome", "[a](chrome://version)"],
     ["未知协议默认拒绝", "[a](wxwork://x)"],
@@ -261,6 +264,52 @@ describe("协议白名单与控制字符绕过（R1）", () => {
     // 同一段落里的合法链接不受影响
     const ok = renderMarkdown("请看 [官网](https://tauri.app) 和 [文档](./docs/a.md)");
     expect(finalProtocols(ok)).toEqual(["https:", "http:"]);
+  });
+});
+
+describe("原始 HTML 标签经文本转义（P0-2 Q4）", () => {
+  // 安全性质是「不产生元素」：< 全部变 &lt;，浏览器按文本渲染。
+  // 不断言 onload= 字面串不存在——它作为转义后的正文本来就该在。
+  const raw = [
+    "<svg/onload=alert(1)>",
+    "<SVG/ONLOAD=alert(1)>",
+    '<svg onload="alert(1)">',
+    "<svg><animate/onload=alert(1)></svg>",
+  ];
+
+  it("行内：四种写法都只剩转义文本，输出里没有裸的 <", () => {
+    for (const src of raw) {
+      const html = renderInline(src);
+      expect(html).not.toMatch(/</);
+      expect(html).toMatch(/&lt;svg/i);
+    }
+    expect(renderInline("<svg/onload=alert(1)>")).toBe("&lt;svg/onload=alert(1)&gt;");
+  });
+
+  it("块级：段落/标题/列表/表格/引用每条路径都只出文本", () => {
+    const p = "<svg/onload=alert(1)>";
+    const paths = [
+      renderMarkdown(p),
+      renderMarkdown(`## ${p}`),
+      renderMarkdown(`- ${p}`),
+      renderMarkdown(`1. ${p}`),
+      renderMarkdown(`| 甲 | ${p} |\n| --- | --- |\n| 丙 | 丁 |`),
+      renderMarkdown(`> ${p}`),
+    ];
+    for (const html of paths) expect(html).not.toMatch(/<svg/i);
+    expect(paths[0]).toBe("<p>&lt;svg/onload=alert(1)&gt;</p>");
+  });
+
+  it("合法链接的 label 带 <svg/onload>：href 照常放行，label 只剩转义文本", () => {
+    expect(renderInline("[<svg/onload=alert(1)>](https://tauri.app)")).toBe(
+      '<a href="https://tauri.app" target="_blank" rel="noreferrer noopener">&lt;svg/onload=alert(1)&gt;</a>'
+    );
+  });
+
+  it("代码块内的 <svg/onload> 不逃出 <code>", () => {
+    const html = renderMarkdown("```html\n<svg/onload=alert(1)>\n```");
+    expect(html).not.toMatch(/<svg/i);
+    expect(html).toContain("<code id=");
   });
 });
 
