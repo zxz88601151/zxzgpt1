@@ -6,7 +6,7 @@
  */
 
 import { highlight } from "./hl";
-import { escapeHtml, uid } from "./text";
+import { escapeAttr, escapeHtml, uid } from "./text";
 
 // 信息串允许带冒号与路径，这样 ```file:src/a.ts 的路径不会被当成正文首行
 const CODE_RE = /```([^\n]*)\n?([\s\S]*?)(?:```|$)/g;
@@ -34,18 +34,24 @@ export function renderInline(input: string): string {
     return `\u0000T${tags.length - 1}\u0000`;
   };
 
-  let text = escapeHtml(input);
+  let text = input;
 
-  // 先渲染 Markdown 链接：裸链接若先占位，会让 [x](url) 里的 url 被吃掉
+  // 先渲染 Markdown 链接：必须在整体转义之前对原始输入做，
+  // 这样 URL/label 拿到的是原始值，属性位用 escapeAttr 一次到位（不会二次编码 &）；
+  // 裸链接若先占位，会让 [x](url) 里的 url 被吃掉
   text = text.replace(/!?\[([^\]]*)\]\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g, (m, label: string, rawUrl: string) => {
-    const clean = String(rawUrl).replace(/&amp;/g, "&").split(/\s+&quot;/)[0];
-    if (/^\s*javascript:/i.test(clean) || /^\s*data:/i.test(clean)) return label;
+    const clean = String(rawUrl).trim();
+    // 不做任何实体还原：浏览器在 href 属性内本就会把 &amp; 解码回 &，
+    // 还原既无必要，还会让 &#115; 这类实体绕过下面的协议黑名单（旧实现的真实漏洞）
+    if (/^\s*javascript:/i.test(clean) || /^\s*data:/i.test(clean)) return keep(escapeHtml(label));
     return m.startsWith("!")
-      ? keep(`<img src="${clean}" alt="${label}" loading="lazy" />`)
-      : keep(`<a href="${clean}" target="_blank" rel="noreferrer noopener">${label}</a>`);
+      ? keep(`<img src="${escapeAttr(clean)}" alt="${escapeAttr(label)}" loading="lazy" />`)
+      : keep(`<a href="${escapeAttr(clean)}" target="_blank" rel="noreferrer noopener">${escapeHtml(label)}</a>`);
   });
 
-  // 再处理裸链接
+  text = escapeHtml(text);
+
+  // 再处理裸链接（字符集不含引号，& 已由 escapeHtml 编码，原样插值即安全）
   text = text.replace(/(https?:\/\/[^\s<)"']+)/g, (_m, url: string) => {
     return keep(`<a href="${url}" target="_blank" rel="noreferrer noopener">${url}</a>`);
   });

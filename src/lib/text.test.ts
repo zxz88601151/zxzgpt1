@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clamp, escapeHtml, formatTime, safeJsonParse, sliceContext, uid } from "./text";
+import { clamp, escapeAttr, escapeHtml, formatTime, safeJsonParse, sliceContext, uid } from "./text";
 
 describe("escapeHtml", () => {
   it("转义三个危险字符", () => {
@@ -9,6 +9,22 @@ describe("escapeHtml", () => {
   it("非字符串输入按字符串处理", () => {
     expect(escapeHtml(42)).toBe("42");
     expect(escapeHtml(null)).toBe("null");
+  });
+});
+
+describe("escapeAttr", () => {
+  it("在 escapeHtml 基础上追加双引号编码", () => {
+    expect(escapeAttr('a"b<c&d>')).toBe("a&quot;b&lt;c&amp;d&gt;");
+  });
+
+  it("处理顺序保证不二次编码（& 最先转义）", () => {
+    // 输入里已有的 &quot; 必须变成 &amp;quot;，而不是被原样保留后又被解码
+    expect(escapeAttr("&quot;")).toBe("&amp;quot;");
+  });
+
+  it("不改变 escapeHtml 的行为契约", () => {
+    expect(escapeHtml('"')).toBe('"');
+    expect(escapeAttr('"')).toBe("&quot;");
   });
 });
 

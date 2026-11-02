@@ -8,6 +8,12 @@ export function escapeHtml(s: unknown): string {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/** 属性值转义：专用于插值进双引号界定的 HTML 属性（href/src/alt 等）。
+ *  在 escapeHtml 基础上追加引号编码；& 最先处理，避免二次编码。 */
+export function escapeAttr(s: unknown): string {
+  return escapeHtml(s).replace(/"/g, "&quot;");
+}
+
 export function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n));
 }
