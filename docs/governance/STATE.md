@@ -21,8 +21,8 @@
 
 | 命令 | 结果 |
 |---|---|
-| `npm test` | **327 passed / 15 files**（改动前 326） |
-| `npm run build` | 成功；`dist/assets/index-BFrjgvmk.js` 327.98 kB |
+| `npm test` | **328 passed / 15 files**（本轮起点 326） |
+| `npm run build` | 成功；`dist/assets/index-DXotYgGr.js` 328.08 kB |
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **58 passed / 1 ignored**（GNU 工具链；msvc 必失败） |
 
 `[FACT]` 本机 msvc 默认工具链会在链接期被 Git for Windows 的 coreutils `link.exe` 抢占，
@@ -65,19 +65,20 @@
 | 批次 | 内容 | 状态 | 证据 |
 |---|---|---|---|
 | B1 · P0-3 | npm 脚本审计构造级拒绝 + 全分隔符切段；只读 git 三道加固；`.git/**` 写拒绝 | **PASS** | `docs/audit/P0-3_HARDENING_20261103.md`；327/327 + 58/58 |
+| B3 · 写入前置 | `fsExists` 不再吞错；存在性校验失败 / 备份失败均中止写入 | **PASS** | 328/328；提交 `6edb112` |
 
 ### 下一批（按优先级，已排定，不再请示）
 
 | # | 任务 | 为什么现在 | 验收 |
 |---|---|---|---|
-| B2 | 运行器配置文件闸门：`vite.config.*` / `vitest.config.*` / `eslint.config.*` 由模型可写即等于任意执行 | 与 B1 同源，是当前唯一剩下的 RCE 链 | 写配置 + `npm run build` 被拒；有对照组用例 |
-| B3 | `fsExists` 错误语义 + 备份失败必须阻断写入（`fsapi.ts:152`、`App.tsx:281`） | 备份静默失效 = 撤销功能假存在 | 校验失败/备份失败均中止写入，用例覆盖 |
+| ~~B2~~ | ~~运行器配置文件闸门~~ → **已重新定性，见 DEC-005** | 与 B1 不同源，不构成独立攻击面 | 不做，改为 P0-4 权限模型 |
 | B4 | `.zxz/undo/**` 专用内部通道（模型不可写） | 撤销快照可被模型覆盖 | 模型写 `.zxz/undo/**` 被拒 |
 | B5 | 输出缓冲硬上限 + `env_clear()` + 最小环境白名单 | 本机 DoS 面 + 环境注入面 | 输出超限即停读；`SECRET_TOKEN` 不可见 |
 | B6 | 工具注册表（消除 5 处手写） | P1 抽取 Runtime 的前置 | `grep -c "call.name ===" src/` = 0 |
-| B7 | 抽 `src/orchestration/round.ts`（只搬轮末判定） | 最小可行切片，风险最低 | 5 条出口用例 + 现有 327 条不回退 |
+| B7 | 抽 `src/orchestration/round.ts`（只搬轮末判定） | 最小可行切片，风险最低 | 5 条出口用例 + 现有 328 条不回退 |
 | B8 | README e2e 项数重测并订正（D-DOC-1） | 现有多处自相矛盾 | 数字 = 实测 |
-| B9 | `.gitignore` 补 `.refs/`、`.tmp-skills/`、`.tmp-audit/`、`.tmp-live`、`.tmp-ws` | 193MB 第三方源码会被 `git add -A` 卷进库 | `git status --porcelain` 干净 |
+| B9 | ~~`.gitignore` 补漏~~ | 已完成（提交 `c69ab59`） | — |
+| B10 | P0-4 工具权限模型（`exec` 默认 ask） | 是"模型写的代码会被执行"这件事唯一真正的闸门 | `decide()` 组合用例 ≥ 12；默认下 `run_command` 必弹审批 |
 
 ## 6. 风险与阻断
 
@@ -97,3 +98,4 @@
 | DEC-002 | `.git/**` 整目录拒绝写入，而非只挡 `config` | 半开的口子会被 hooks / info/attributes 绕过 | 删除 `fsx::is_repo_metadata` 调用 |
 | DEC-003 | git 加固参数强制注入、用户不可关闭 | 依赖"用户没配置"不是安全设计 | 移除 `effective_argv` |
 | DEC-004 | 先修 RCE 链，再抽 Runtime | 抽取不改攻击面，修复直接降风险 | 调整 §5 顺序即可 |
+| DEC-005 | **撤回**"运行器配置文件构成独立 RCE 链"这一判断 | 复核后：`vite.config.*` 会被加载执行，但 `src/**/*.test.ts` 同样会被 vitest 执行——"执行模型写的代码"是编码 Agent 的既定能力，不是可被 blocklist 关闭的漏洞。真正的闸门是执行前的权限审批（P0-4），拿配置文件黑名单当安全边界只会制造虚假安全感 | 无需回滚；B2 从队列移除，改为 B10 |
