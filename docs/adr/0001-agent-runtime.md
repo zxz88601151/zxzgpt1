@@ -108,13 +108,41 @@ type RunState =
 ## 验收标准
 
 ```
-[ ] src/orchestration/ 存在，且 grep -rn "from \"react\"" src/orchestration/ 无命中
-[ ] 7 类行为用例全绿（vitest，mock provider + mock tools）
+[~] src/orchestration/ 存在，且 grep -rn "from \"react\"" src/orchestration/ 无命中
+[~] 7 类行为用例全绿（vitest，mock provider + mock tools）
 [ ] src/App.tsx < 500 行，且不再出现 stateRef.current 的手工双写
-[ ] 工具分发的 if/else 消失（grep -c "call.name ===" src/ == 0）
+[x] 工具分发的 if/else 消失（grep -c "call.name ===" src/ == 0）
 [ ] 迁移前后，tools/workspace-e2e.cjs 的通过项数量不变
 ```
 
 ---
 
+## 实施进度（2026-11-03，追加，不改上文）
+
+**已做**
+
+- **B6**：`[x]` 工具分发收敛到 `src/lib/registry.ts`。`grep -c "call.name ===" src/` = 0。
+- **B7**：`[~] src/orchestration/` 已存在（`round.ts`，零 import、零 React），
+  落地的是**轮末判定**这一个切片：`nextRound` / `stopNotice` / `shouldAutoTest`，
+  25 条断言（含"最后一轮无后续请求应判正常收尾而不是轮数用尽"这类顺序断言）。
+  `MAX_ROUNDS` 随之导出，不再是 App 里的局部常量。
+
+**没做，别读成做了**
+
+- `[~]` 7 类行为用例：目前是**纯决策层 6 个出口**，不是 ADR 原意的"整轮重放"。
+  「中断 / 上游错误 / 测试 3 轮」里真正影响用户的那部分（报错后会不会跑 `npm test`、
+  会不会落盘、审批挂起时 UI 与 Runtime 的请求 id 对齐）仍在 `send()` 闭包里，**0 覆盖**。
+  项目至今没有 jsdom / mock provider 测试设施（`STATE.md` §4 已记录），
+  要做到 7 类用例得先补这套设施。
+- `[ ]` `App.tsx` 仍有 1520 行（B10 加了审批 UI 接线，反而更长），`stateRef.current`
+  手工双写还在。搬运 `send` 未开始。
+- `[ ]` e2e 项数对账属 B8，本批未动。
+
+**结论**：ADR 未完成。B7 只完成"最小可行切片"，其价值在于把最绕的判定逻辑
+变成有测试的纯函数，而不是"编排层已拆分"。
+
+---
+
 *本 ADR 为 Phase 0 审计产出，未实施、未修改任何业务代码。*
+*进度小节为后续批次追加。*
+

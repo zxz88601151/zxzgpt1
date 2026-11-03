@@ -21,8 +21,8 @@
 
 | 命令 | 结果 |
 |---|---|
-| `npm test` | **366 passed / 16 files**（本轮起点 328） |
-| `npm run build` | 成功；`dist/assets/index-D2U6z4iv.js` 334.25 kB |
+| `npm test` | **396 passed / 17 files**（本轮起点 328） |
+| `npm run build` | 成功；`dist/assets/index-BUPLjQ7F.js` 335.02 kB |
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **79 passed / 1 ignored**（GNU 工具链；msvc 必失败） |
 | `cargo check --manifest-path src-tauri/Cargo.toml` | 通过，**0 warning**（B10 收口时实测） |
 
@@ -43,7 +43,7 @@
 
 ## 3. 当前结论（不夸大）
 
-- 代码级质量：**良好**。366 条前端单测、79 条 Rust 单测全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。
+- 代码级质量：**良好**。396 条前端单测、79 条 Rust 单测全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。
 - 安全态势：**PARTIAL → 明显改善**。P0 三条 + 本轮 2 条（npm `pre`/`post` 钩子绕过、`.npmrc` 改脚本 shell）+ 执行授权闸门（P0-4）已落地；其余已登记项见 §5 与 `TECHNICAL_DEBT.md`。
 - 交付状态：**NOT_READY**。无安装包；CI 不编译 `src-tauri` 本体；e2e 无法在 CI 复现；release exe 已落后于 HEAD。
 - 架构状态：**PARTIAL**。编排仍是 1380+ 行 `App.tsx` 内的闭包循环，`src/orchestration/` 不存在（B7 未做）。工具五处手写已收成注册表（B6 完成）。
@@ -52,11 +52,11 @@
 
 | 维度 | 关键事实 |
 |---|---|
-| 编排 | `send()` 300 行闭包；`MAX_ROUNDS=6` 未导出；run 状态散在 12 个局部变量；`AbortController` 只覆盖 `chatStream`，**杀不掉正在跑的 `npm test`** |
-| 工具 | 新增 1 个工具要改 5 处（`ToolName` / `TOOL_DEFS` / `validateToolArgs` / `executeTool` / `buildToolsPrompt`），无注册表；漏改无编译错误，只在运行时"未知工具" |
+| 编排 | `send()` 约 320 行闭包；~~`MAX_ROUNDS=6` 未导出~~ **已导出（B7）**；轮末判定已抽成纯函数 `src/orchestration/round.ts`；run 状态仍散在 12 个局部变量；`AbortController` 只覆盖 `chatStream`，**杀不掉正在跑的 `npm test`** |
+| 工具 | ~~新增 1 个工具要改 5 处，无注册表~~ **已修（B6）**：`src/lib/registry.ts` 的 `TOOLS` 是唯一真值源，其余全部派生；`findTool` 精确匹配不归一 |
 | 持久化 | 单键 `zxz.state.v1`，**无 schemaVersion**；250ms 全量写，连 `streaming` 中间态一起写；系统消息**完全不计**上下文预算 |
 | 计划模式 | 只有布尔开关 + 两处拦截 + 一段提示词；无产物、无审批、无对账 |
-| 测试 | `App.tsx` 1405 + `api.ts` 302 + 组件 2284 = **3991 行 0 覆盖**，且无 jsdom/testing-library，想补也补不了 |
+| 测试 | `App.tsx` 1520 + `api.ts` 302 + 组件 2300+ 行仍基本 0 覆盖，且无 jsdom/testing-library；`src/orchestration/round.ts` 与 `src/lib/registry.ts` 是仅有的两个"核心逻辑可测"的切片 |
 | CI | 仅 `frontend` + `rust-fs`；无 fmt/clippy、无 e2e、无版本一致性、无覆盖率门槛 |
 
 ## 5. 执行队列
@@ -70,15 +70,17 @@
 | B4 · 撤销隔离 | `.zxz/undo` 专用写入通道；`fsx::read`/`list_in` 对撤销区关闭；模型不可写不可读 | **PASS** | 提交 `d4b1d83`；前端 332 + Rust 61 |
 | B5 · 输出与环境 | 输出保留上限 256 KB（管道仍读空，不死锁）；`env_clear()` + 19 项白名单；`truncated` 显式回传 | **PASS** | 提交 `554dc1d`；前端 335 + Rust 65 |
 | B6 · 工具注册表 | 五份清单收成 `src/lib/registry.ts` 的 `TOOLS`，`findTool` 精确匹配不归一 | **PASS** | 提交 `449b3a5`；前端 351；`grep -c "call.name ==="` = 0 |
-| B10 · 执行授权闸门 | `perms::decide` 三态闸门（`Deny`/`Ask`/`Allow`）；scope = 命令+子命令；会话内有效、不落盘；前端确认框 + 授权列表可逐条撤销 | **PASS** | 前端 366 + Rust 79；`cargo check` 0 warning |
+| B10 · 执行授权闸门 | `perms::decide` 三态闸门（`Deny`/`Ask`/`Allow`）；scope = 命令+子命令；会话内有效、不落盘；前端确认框 + 授权列表可逐条撤销 | **PASS** | 前端 366 + Rust 79；`cargo check` 0 warning；`docs/audit/P0-4_EXEC_GATE_20261103.md` |
+| B7 · 轮末判定抽取 | `src/orchestration/round.ts`：`nextRound` / `stopNotice` / `shouldAutoTest` 三个纯函数；`MAX_ROUNDS` 导出；App 只剩执行 | **PASS**（切片） | 前端 **396**（25 条新断言）；已过独立复审（4 条 P2 + 4 条 P3，全部处置）；`docs/adr/0001` 进度小节 |
 
 ### 下一批（按优先级，已排定，不再请示）
 
 | # | 任务 | 为什么现在 | 验收 |
 |---|---|---|---|
-| B7 | 抽 `src/orchestration/round.ts`（只搬轮末判定） | 最小可行切片，风险最低 | 5 条出口用例 + 现有 366 条不回退 |
 | B8 | README e2e 项数重测并订正（D-DOC-1） | 现有多处自相矛盾 | 数字 = 实测 |
 | B11 | `.zxz/undo` 子目录列举失败时静默跳过 → 需要给出「快照可能不完整」标记 | 逐子目录 `catch` 会产出**看起来完整**的快照（P3，不导致数据丢失：恢复时 `undo_read` 会明确报错） | 子目录打不开时快照带 `incomplete` 标记 |
+| B12 | `send()` 整轮重放测试设施（jsdom + mock provider） | ADR 0001 的 7 类行为用例全依赖它；没有它，编排层回归只能靠人眼 | 至少 1 类（上游错误）能在 CI 跑 |
+| B13 | `AbortController` 管不到正在跑的 `npm test` | 用户点"停止"后子进程仍在跑，这是可控性问题不是体验问题 | 点停止后 `run_allowed` 的子进程被收树终止 |
 
 ## 6. 风险与阻断
 

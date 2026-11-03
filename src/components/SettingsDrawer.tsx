@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { fetchModels, testConnection } from "../api";
 import { PRESETS, findPreset } from "../presets";
 import { clamp } from "../lib/text";
+import { MAX_TEST_ROUNDS } from "../lib/tools";
 import type { Settings, Theme, Transport } from "../types";
 import type { ExecGrant } from "../lib/fsapi";
 import { IconButton } from "./ui";
@@ -267,10 +268,12 @@ export function SettingsDrawer({
             <input
               id="autoTest"
               type="checkbox"
-              checked={draft.autoTest ?? true}
+              // 兜底值必须是 false：执行侧要求严格 true 才跑，界面就不能在这里
+              // 显示成"已开启"。开关显示的和实际会发生的必须是同一件事。
+              checked={draft.autoTest ?? false}
               onChange={(e) => patch({ autoTest: e.target.checked })}
             />
-            <span>自动测试回路：写完文件后自动跑一次 npm test，失败把报错回传给模型再改，最多 3 轮（仅桌面端）</span>
+            <span>自动测试回路：写完文件后自动跑一次 npm test，失败把报错回传给模型再改，最多 {MAX_TEST_ROUNDS} 轮（仅桌面端）</span>
           </label>
 
           {/* 执行权限：让「谁被批准过跑什么」可见、可撤销。

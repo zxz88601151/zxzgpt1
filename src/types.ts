@@ -111,7 +111,7 @@ export interface Settings {
   confirmWrites?: boolean;
   /** 工具调用：模型可用 read/list/search/write/run 五个工具（默认开；关了回到纯文本 file:/@@read 协议） */
   toolCalls?: boolean;
-  /** 自动测试回路：写完文件后自动跑一次 npm test，失败把报错回传给模型再改，最多 3 轮（默认开；仅桌面端、仅工具调用开启时生效） */
+  /** 自动测试回路：写完文件后自动跑一次 npm test，失败把报错回传给模型再改，最多 3 轮（**默认关**，必须显式开；仅桌面端、仅工具调用开启时生效） */
   autoTest?: boolean;
   /** 探索模式开关（C1 只负责存取这个开关；只读拦截行为属 A2，不在本批）。
    *  缺省 undefined 按关处理，老设置无此字段兼容 */

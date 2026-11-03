@@ -65,6 +65,7 @@ import {
   truncateToolOutput,
 } from "./lib/tools";
 import { findTool, parseToolArgs, planModeBlocks, TOOL_DEFS, type ToolContext } from "./lib/registry";
+import { MAX_ROUNDS, nextRound, shouldAutoTest, stopNotice } from "./orchestration/round";
 import type { AppState, Conversation, FileWriteResult, Message, Settings, Theme, ToolCallRecord, Transport, Usage } from "./types";
 import type { ToastKind } from "./components/ui";
 
@@ -320,8 +321,7 @@ export default function App() {
 
   /* ------------------------------------------------------------ 本地工程：真实写盘 */
 
-  /** 单次对话最多几轮「读文件 → 改文件」，防止模型自己绕圈 */
-  const MAX_ROUNDS = 6;
+  // 轮数上限与轮末判定都在 src/orchestration/round.ts，App 只负责执行
 
   const patchMessage = useCallback(
     (convId: string, index: number, fn: (m: Message) => Message) => {
@@ -833,20 +833,28 @@ export default function App() {
           patchMessage(convId, index, () => finalMsg);
           baseMessages = [...baseMessages, finalMsg];
 
+          // 这一行不能删：它才是"报错/中止后不跑 npm test"的真正守卫。
+          // nextRound 里也有 aborted/failed 分支，但那要等测试回路跑完才轮到——
+          // 判定太晚，拦不住已经发生的事。
           if (aborted || failed) break;
 
           // 测试回路：本轮写了文件、且自动测试开启、且在桌面端，才自动跑测试。
           // 通过就停在本轮；失败把报错当成隐藏消息回传，模型下一轮再改；
           // 3 轮不过就停下，把失败原样报给人，不许模型宣称已修好。
           let testGiveUp = false;
-          // autoTest 默认关，且写成 === true：想开必须显式打开，默认路径不自动跑命令
+          // 自动测试的开启条件收在 shouldAutoTest 里：默认关、必须严格 true、
+          // 计划模式/浏览器直开/未接工程/关了工具都不跑。条件从 if 链搬走后，
+          // 判定本身有了单测，这里只剩"跑了怎么办"。
           if (
-            wroteSomething &&
-            s.autoTest === true &&
-            s.toolCalls !== false &&
-            !planMode &&
-            fsAvailable() &&
-            ws
+            ws &&
+            shouldAutoTest({
+              wroteSomething,
+              autoTest: s.autoTest,
+              toolCalls: s.toolCalls,
+              planMode,
+              desktop: fsAvailable(),
+              hasWorkspace: Boolean(ws),
+            })
           ) {
             try {
               // 脚本审计已下沉到 Rust 执行层（runx）：npm test 真正跑的脚本不是
@@ -872,28 +880,43 @@ export default function App() {
                   ),
                 }));
               } else {
+                // 提示文案由 stopNotice 统一给出，这里不再重复写一份——
+                // 两处各写一句，改一处忘一处的那天用户会看到两种结论。
                 testGiveUp = true;
-                toast(`测试 ${MAX_TEST_ROUNDS} 轮仍未通过，已停止自动修复，请人工处理`, "error");
               }
             } catch (e) {
               // 跑测试本身失败（比如不在桌面端、命令被拒）不阻断主流程，只报一声
               toast("自动测试未能运行：" + (e as Error).message, "error");
             }
           }
-          if (testGiveUp) break;
 
           // 模型要文件 / 技能附件：程序回传真实内容后继续下一轮
           const reads = ws ? parseReadRequests(acc.content) : [];
           const refs = allSkills.length ? parseSkillRefs(acc.content) : [];
-          // 有工具调用时必须继续下一轮，模型要看到工具结果才能回应；
-          // 只有既没工具调用、又没读/附件请求时，才是本轮真正结束。
-          if (!toolRecords.length && !reads.length && !refs.length) break;
-          if (round === MAX_ROUNDS - 1) {
-            toast(`已达到本次最多 ${MAX_ROUNDS} 轮读写，继续请再发一条消息`, "error");
+          // 轮末判定统一走 nextRound。顺序（中断/报错 → 测试放弃 → 自然收尾 → 轮数用尽）
+          // 由 round.ts 的测试锁住；这里不再自己排 if。停止时的提示也由 stopNotice 给，
+          // 包括"测试 3 轮未过"那句——原先两边各写一份，早晚会不一致。
+          const step = nextRound({
+            aborted,
+            // `failed` 在这一层是报错原文（空串表示没失败），判定层只认布尔：
+            // 把"空串=没失败"这种约定挡在纯函数外面。
+            failed: failed !== "",
+            testGiveUp,
+            toolCalls: toolRecords.length,
+            reads: reads.length,
+            skillRefs: refs.length,
+            round,
+          });
+          if (step.kind === "stop") {
+            const notice = stopNotice(step.reason);
+            if (notice) toast(notice, "error");
             break;
           }
           // 工具调用轮次里测试回路已经把报错回传了，读/附件请求仍按原流程回传，
           // 两类隐藏消息都会进下一轮的上下文，不会互相丢。
+          // 注意：这里是无条件回传的（含"只有工具调用、没有读请求"的轮次）。
+          // buildReadPayload([]) 仍会产出一句"基于以上真实内容继续"的引导，
+          // 这是既有行为，本批只做抽取，没有改它。
 
           const outcomes = ws ? await readForModel(ws.sessionId, reads) : [];
           const refOutcomes = await readSkillRefs(allSkills, refs);
