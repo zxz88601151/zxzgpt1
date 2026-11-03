@@ -12,6 +12,7 @@
 
 const { spawn } = require('child_process');
 const http = require('http');
+const net = require('net');
 const fs = require('fs');
 const path = require('path');
 
@@ -41,8 +42,33 @@ function check(name, ok, detail) {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
 }
 
-function req(port, method, p, headers = {}, body) {
-  const h = { ...headers };
+/** 裸 socket 探针：只发 headers，不发 body，看代理多久给出响应。
+ *  用来证明"鉴权发生在读 body 之前"——用 http.request 是证不了的。 */
+function rawProbe(port, payload, waitMs) {
+  return new Promise((resolve) => {
+    const sock = net.connect(port, '127.0.0.1', () => sock.write(payload));
+    let raw = '';
+    let done = false;
+    const finish = (timedOut) => {
+      if (done) return;
+      done = true;
+      sock.destroy();
+      resolve({ raw, timedOut });
+    };
+    const timer = setTimeout(() => finish(true), waitMs);
+    sock.on('data', (c) => (raw += c.toString()));
+    sock.on('end', () => {
+      clearTimeout(timer);
+      finish(false);
+    });
+    sock.on('error', () => {
+      clearTimeout(timer);
+      finish(false);
+    });
+  });
+}
+
+function req(port, method, p, headers = {}, body) {  const h = { ...headers };
   // 代理按 Content-Length 读 body（不解析 chunked），这里必须显式给出长度
   if (body) h['Content-Length'] = Buffer.byteLength(body);
   return new Promise((resolve, reject) => {
@@ -109,6 +135,19 @@ function req(port, method, p, headers = {}, body) {
   // 5b 非回环 Host 被拒（DNS rebinding 加固）
   const badHost = await req(info.port, 'GET', '/health', { 'x-zxz-token': info.token, Host: 'evil.example.com' });
   check('非回环 Host 被拒（403）', badHost.status === 403, `status=${badHost.status}`);
+
+  // 5c 鉴权必须在读 body 之前：声明 32MB、一个字节都不发，也必须立刻拿到 401。
+  // 若代理先读完 body 再校验，这里只会超时——那才是要抓的行为。
+  const early = await rawProbe(
+    info.port,
+    'POST /chat HTTP/1.1\r\nHost: 127.0.0.1\r\nx-zxz-token: wrong-token\r\nContent-Length: 33554432\r\n\r\n',
+    4000
+  );
+  check(
+    '未通过鉴权时不等 body 就先拒（401）',
+    !early.timedOut && /^HTTP\/1\.1 401/.test(early.raw),
+    early.timedOut ? '超时：说明在等 body' : (early.raw.split('\r\n')[0] || '(无响应)')
+  );
 
   // 6 模型列表转发（base_url / api_key 走请求体，不再进 URL）
   const modelsBody = JSON.stringify({

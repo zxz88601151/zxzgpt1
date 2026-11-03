@@ -104,10 +104,11 @@ async fn serve(port: u16, token: String) -> Result<(), String> {
 
 // ---------------------------------------------------------------- 请求/响应
 
+/// 已经通过鉴权的请求。`headers` 不在这里——Host / token 在 `RequestHead` 阶段
+/// 就校验完了，后面按路由分发只看 method / path / body，留着它只会变成死字段。
 struct Request {
     method: String,
     path: String,
-    headers: HashMap<String, String>,
     body: Vec<u8>,
 }
 
@@ -132,8 +133,10 @@ fn host_is_loopback(headers: &HashMap<String, String>) -> bool {
 }
 
 async fn handle_conn(mut socket: TcpStream, token: std::sync::Arc<String>) -> Result<(), String> {
-    let req = match read_request(&mut socket).await {
-        Ok(Some(r)) => r,
+    // 只先读头：鉴权要看的东西全在头里。把 body 留到鉴权之后读，
+    // 否则一个没 token 的请求也能让代理先收下 32MB——校验再准也没意义了。
+    let head = match read_head(&mut socket).await {
+        Ok(Some(h)) => h,
         Ok(None) => return Ok(()),
         Err(e) => {
             write_json(&mut socket, 400, &serde_json::json!({ "error": e })).await?;
@@ -142,7 +145,7 @@ async fn handle_conn(mut socket: TcpStream, token: std::sync::Arc<String>) -> Re
     };
 
     // Host 校验先于预检与令牌：非回环 Host 一律不服务。
-    if !host_is_loopback(&req.headers) {
+    if !host_is_loopback(&head.headers) {
         write_json(
             &mut socket,
             403,
@@ -152,14 +155,14 @@ async fn handle_conn(mut socket: TcpStream, token: std::sync::Arc<String>) -> Re
         return Ok(());
     }
 
-    // 预检请求
-    if req.method == "OPTIONS" {
+    // 预检请求：没有 body，直接回
+    if head.method == "OPTIONS" {
         write_cors(&mut socket, 204, "text/plain", "").await?;
         return Ok(());
     }
 
-    // 令牌校验
-    match req.headers.get("x-zxz-token") {
+    // 令牌校验（仍在读 body 之前）
+    match head.headers.get("x-zxz-token") {
         Some(v) if v == token.as_str() => {}
         _ => {
             write_json(
@@ -171,6 +174,17 @@ async fn handle_conn(mut socket: TcpStream, token: std::sync::Arc<String>) -> Re
             return Ok(());
         }
     }
+
+    // 到这里才认这个请求，也才去读它的 body
+    let RequestHead { method, path, headers, rest } = head;
+    let body = match read_body(&mut socket, &headers, rest).await {
+        Ok(b) => b,
+        Err(e) => {
+            write_json(&mut socket, 400, &serde_json::json!({ "error": e })).await?;
+            return Ok(());
+        }
+    };
+    let req = Request { method, path, body };
 
     let path = req.path.split('?').next().unwrap_or("/").to_string();
 
@@ -336,11 +350,22 @@ async fn write_cors(socket: &mut TcpStream, status: u16, content_type: &str, bod
 
 // ---------------------------------------------------------------- HTTP 解析
 
-/// 读取一个完整的 HTTP 请求（头 + Content-Length 指定的 body）。
-async fn read_request(socket: &mut TcpStream) -> Result<Option<Request>, String> {
+/// 读到的请求头（尚未读 body）。`rest` 是「头之后已经跟着读到的那部分字节」。
+struct RequestHead {
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+    rest: Vec<u8>,
+}
+
+/// 读请求头，读到 `\r\n\r\n` 为止就返回——**不碰 body**。
+///
+/// 拆开这一步是为了让鉴权发生在读 body 之前：头里已经有 Host 和 token，
+/// 没通过就不该让对端把 32MB 塞进来。合在一起读的话，校验再严也只是
+/// "收完再拒"，内存已经被对方牵着走了。
+async fn read_head(socket: &mut TcpStream) -> Result<Option<RequestHead>, String> {
     let mut buf = Vec::with_capacity(2048);
 
-    // 读到头部结束标记
     let head_end = loop {
         let mut chunk = [0u8; 1024];
         let n = socket.read(&mut chunk).await.map_err(|e| e.to_string())?;
@@ -372,14 +397,20 @@ async fn read_request(socket: &mut TcpStream) -> Result<Option<Request>, String>
         }
     }
 
+    Ok(Some(RequestHead { method, path, headers, rest }))
+}
+
+/// 按 Content-Length 读完 body。调用点必须在鉴权之后。
+async fn read_body(
+    socket: &mut TcpStream,
+    headers: &HashMap<String, String>,
+    rest: Vec<u8>,
+) -> Result<Vec<u8>, String> {
     // 先把 Content-Length 卡在上限内：读 body 之前就拒绝，避免按一个超大
     // 声明长度预留/累积内存，把本机内存打满。
     if let Some(len) = headers.get("content-length").and_then(|v| v.parse::<usize>().ok()) {
         if len > MAX_BODY_BYTES {
-            return Err(format!(
-                "请求体 {} 字节超过上限 {}，已拒绝",
-                len, MAX_BODY_BYTES
-            ));
+            return Err(format!("请求体 {} 字节超过上限 {}，已拒绝", len, MAX_BODY_BYTES));
         }
         let mut body = rest;
         while body.len() < len {
@@ -394,20 +425,9 @@ async fn read_request(socket: &mut TcpStream) -> Result<Option<Request>, String>
             }
         }
         body.truncate(len);
-        return Ok(Some(Request {
-            method,
-            path,
-            headers,
-            body,
-        }));
+        return Ok(body);
     }
-
-    Ok(Some(Request {
-        method,
-        path,
-        headers,
-        body: rest,
-    }))
+    Ok(rest)
 }
 
 fn find_head_end(buf: &[u8]) -> Option<usize> {

@@ -35,7 +35,7 @@ cd tools/proxy-harness && RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu cargo bu
 | `ZXZ_BASE=http://localhost:1420 node tools/e2e.cjs` | **24/24 PASS** |
 | `ZXZ_BASE=http://localhost:1420 node tools/workspace-e2e.cjs` | **39/39 PASS** |
 | `ZXZ_BASE=http://localhost:1420 node tools/skill-e2e.cjs` | **69/69 PASS** |
-| `ZXZ_BASE=http://localhost:1420 node tools/proxy-e2e.cjs` | **接口 10/10 + 前端 24/24** |
+| `ZXZ_BASE=http://localhost:1420 node tools/proxy-e2e.cjs` | **接口 11/11 + 前端 24/24**（第 11 条是随后新加的"鉴权前置于读 body"，见技术债 §1 第 7 条） |
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **79 passed / 1 ignored** |
 | `npx vitest run` | **396 passed / 17 files** |
 

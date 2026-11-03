@@ -87,6 +87,10 @@ zxz/
 
 - **为什么要绕一层本机代理**：浏览器有 CORS/CSP 限制，且各家对浏览器 Origin 的支持不一致。请求交给 Rust 发，就能接任何 OpenAI 兼容端点。
 - **通道安全**：只监听 `127.0.0.1`，每次启动用 OS 熵生成 256 位一次性 token，前端通过 IPC 拿端口和 token，请求必须带 `x-zxz-token` 头，并校验 Host 是回环名（挡 DNS rebinding），本机其它进程无法调用。
+  校验的**顺序**也是安全的一部分：先读头、鉴权通过之后才读 body（`read_head` / `read_body` 拆开）。
+  合在一起读的话，一个没有 token 的请求也能让代理先收下 32MB——"拒得对"，但内存已经被人牵着走。
+  这条有裸 socket 断言守着：声明 `Content-Length: 33554432` 却一个字节都不发，必须立刻拿到 401；
+  若代理在等 body，这条只会超时。
 - **端口策略**：从 `19527` 起向后探测空闲端口（最多 64 个），被占用自动顺延。
 - **双通道降级**：没有 IPC 时（比如用静态服务器直接打开 `dist/`），前端自动切到"浏览器直连"模式，界面功能不变，区别只是请求由浏览器发出。左下角会显示当前通道。
 
@@ -321,7 +325,7 @@ cd tools/proxy-harness && cargo build
 cd ../.. && node tools/proxy-e2e.cjs
 ```
 
-脚本会先直接对代理验 token 鉴权 / CORS 预检 / 未知路由 / 模型列表 / 非流式对话 / 上游 401 翻译，再把端口与 token 注入 `window.__TAURI_INTERNALS__`，让前端以「本地代理」通道跑一遍完整交互。2026-11-03 实测：接口 10/10 + 前端 24/24。
+脚本会先直接对代理验 token 鉴权 / CORS 预检 / 未知路由 / 模型列表 / 非流式对话 / 上游 401 翻译，再把端口与 token 注入 `window.__TAURI_INTERNALS__`，让前端以「本地代理」通道跑一遍完整交互。2026-11-03 实测：接口 11/11 + 前端 24/24。
 
 **两条前置，少一条就白跑**：
 
@@ -399,7 +403,7 @@ node tools/desktop-skill-e2e.cjs    # 静态 21 项，本轮未跑（见 9.6，�
 | `tools/e2e.cjs`（浏览器直连 + 模拟上游） | 24 | **24 PASS / 0 FAIL** |
 | `tools/workspace-e2e.cjs`（假 IPC 工程模式） | 39 | **39 PASS / 0 FAIL** |
 | `tools/skill-e2e.cjs`（假 IPC 技能库） | 69 | **69 PASS / 0 FAIL** |
-| `tools/proxy-e2e.cjs`（真实 Rust 代理，重编后） | 10 + 24 | **10/10 接口 + 24/24 前端** |
+| `tools/proxy-e2e.cjs`（真实 Rust 代理，重编后） | 11 + 24 | **11/11 接口 + 24/24 前端** |
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | 79 + 1 ignored | **79 PASS** |
 | `npx vitest run` | 396 / 17 文件 | **396 PASS** |
 

@@ -25,6 +25,7 @@
 | `npm run build` | 成功；`dist/assets/index-BUPLjQ7F.js` 335.02 kB |
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **79 passed / 1 ignored**（GNU 工具链；msvc 必失败） |
 | `cargo check --manifest-path src-tauri/Cargo.toml` | 通过，**0 warning**（B10 收口时实测） |
+| e2e（当日实跑） | `e2e.cjs` 24/24、`workspace-e2e` 39/39、`skill-e2e` 69/69、`proxy-e2e` 接口 11/11 + 前端 24/24 |
 
 `[FACT]` 本机 msvc 默认工具链会在链接期被 Git for Windows 的 coreutils `link.exe` 抢占，
 报 `link: extra operand`，且后台包装器仍上报 exit 0。**Rust 测试一律用**
@@ -72,16 +73,20 @@
 | B6 · 工具注册表 | 五份清单收成 `src/lib/registry.ts` 的 `TOOLS`，`findTool` 精确匹配不归一 | **PASS** | 提交 `449b3a5`；前端 351；`grep -c "call.name ==="` = 0 |
 | B10 · 执行授权闸门 | `perms::decide` 三态闸门（`Deny`/`Ask`/`Allow`）；scope = 命令+子命令；会话内有效、不落盘；前端确认框 + 授权列表可逐条撤销 | **PASS** | 前端 366 + Rust 79；`cargo check` 0 warning；`docs/audit/P0-4_EXEC_GATE_20261103.md` |
 | B7 · 轮末判定抽取 | `src/orchestration/round.ts`：`nextRound` / `stopNotice` / `shouldAutoTest` 三个纯函数；`MAX_ROUNDS` 导出；App 只剩执行 | **PASS**（切片） | 前端 **396**（25 条新断言）；已过独立复审（4 条 P2 + 4 条 P3，全部处置）；`docs/adr/0001` 进度小节 |
-| B8 · 证据对账 | README 全部 e2e 数字按当日实测重写；7 个未跑脚本标 `NOT_TESTED`；修掉假 IPC 落后与过期断言 | **PASS** | 24/39/69/10+24 全过；`docs/audit/B8_EVIDENCE_RECONCILIATION_20261103.md` |
+| B8 · 证据对账 | README 全部 e2e 数字按当日实测重写；7 个未跑脚本标 `NOT_TESTED`；修掉假 IPC 落后与过期断言 | **PASS** | 24/39/69/11+24 全过；`docs/audit/B8_EVIDENCE_RECONCILIATION_20261103.md` |
+| B15 · 代理鉴权前置 | `read_request` 拆成 `read_head` + `read_body`；Host / token 校验全部前移到读 body 之前 | **PASS** | 新增裸 socket 断言（不发 body 也必须立刻 401）；接口 11/11 + 前端 24/24 |
 
 ### 下一批（按优先级，已排定，不再请示）
 
+完整清单见 **`docs/audit/TECH_DEBT_REGISTER_20261103.md`**（P0–P3，带证据/影响/状态）。
+队列只列"要动手"的那几条：
+
 | # | 任务 | 为什么现在 | 验收 |
 |---|---|---|---|
-| B11 | `.zxz/undo` 子目录列举失败时静默跳过 → 需要给出「快照可能不完整」标记 | 逐子目录 `catch` 会产出**看起来完整**的快照（P3，不导致数据丢失：恢复时 `undo_read` 会明确报错） | 子目录打不开时快照带 `incomplete` 标记 |
-| B12 | `send()` 整轮重放测试设施（jsdom + mock provider） | ADR 0001 的 7 类行为用例全依赖它；没有它，编排层回归只能靠人眼 | 至少 1 类（上游错误）能在 CI 跑 |
-| B13 | `AbortController` 管不到正在跑的 `npm test` | 用户点"停止"后子进程仍在跑，这是可控性问题不是体验问题 | 点停止后 `run_allowed` 的子进程被收树终止 |
-| B14 | e2e 进 CI 的三个前置（playwright 入依赖、去 msedge 硬编码、端口对齐） | R3 的三个成因逐个可修，但不修就永远只能人工跑 | CI 上至少 `e2e.cjs` 能跑 |
+| B13 | `AbortController` 管不到正在跑的 `npm test`（D-01） | 界面显示"已停止"而命令还在跑——**界面在说谎**，且"停止"正是用户出问题时按的那个键 | 点停止后子进程被收树终止 |
+| B12 | `send()` 整轮重放测试设施（D-02） | 唯一的 P1 级质量缺口：1520 行编排零覆盖，396 条绿灯照不到那片区域 | 至少 1 类（上游错误）在 CI 跑 |
+| B11 | undo 子目录列举失败静默跳过（D-04） | 会产出"看起来完整"的快照 | 打不开时快照带 `incomplete` 标记 |
+| B14 | e2e 进 CI 的三个前置（D-08） | R3 三个成因已逐个实测确认，都可修 | CI 上 `e2e.cjs` 能跑 |
 
 ## 6. 风险与阻断
 
