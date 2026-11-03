@@ -303,21 +303,31 @@ node tools/mock-upstream.cjs 19888
 npx vite --port 1420 --strictPort        # 开发服务器（默认端口就是 1420）
 node tools/mock-upstream.cjs 19888       # 模拟上游，零真实 token
 
-ZXZ_BASE=http://localhost:1420 node tools/e2e.cjs   # 24 项，2026-11-03 实测 24/24
+node tools/e2e.cjs                       # 24 项，2026-11-03 实测 24/24
+# 默认就连 http://localhost:1420，不用再传 ZXZ_BASE（要连别处才传）
 ```
 
 纯逻辑单测（Markdown / 高亮 / 上下文窗口 / 会话过滤）不需要浏览器：
 
 ```bash
-npm test                  # vitest run，400 条（17 个文件），2026-11-03 实测
+npm test                  # vitest run，437 条（18 个文件），2026-11-03 实测
 ```
 
 **两个本机踩过的坑，写下来省得再踩**：
 
-- `ZXZ_BASE` 要用 `http://localhost:1420`，**不要用 `127.0.0.1`**。vite 默认只监听
-  `localhost`（落到 `::1`），`127.0.0.1:1420` 会直接 `ECONNREFUSED`。
+- 需要覆盖 `ZXZ_BASE` 时用 `http://localhost:1420`，**不要用 `127.0.0.1`**。vite 默认只监听
+  `localhost`（落到 `::1`），`127.0.0.1:1420` 会直接 `ECONNREFUSED`。脚本的默认值已经改成
+  `localhost:1420`，所以平时不用传。
 - 本机若设了 `http_proxy`，`curl` 会绕道代理并返回 502，看着像服务挂了。验证端口用
   `curl --noproxy '*'`。
+- **浏览器不再写死 `msedge`。** 所有会启动浏览器的脚本都走 `tools/browser.cjs`，
+  按 `ZXZ_BROWSER_CHANNEL` → `msedge` → `chrome` → playwright 自带 chromium 的顺序试。
+  以前五个脚本各自写死 `channel: 'msedge'`，在没装 Edge 的机器/CI 上会直接
+  `Chromium distribution 'msedge' is not found`——那个报错跟用例内容毫无关系，
+  看着像测试坏了，其实是环境缺浏览器。全都不行时的报错会把每次的真实原因列出来。
+- **`playwright` 目前不在 `package.json` 里**（只是在 `node_modules` 中），
+  `npm ci` 之后会消失。这是 e2e 进不了 CI 的最后一个原因，属「新增第三方依赖」，
+  需要业主批准后才能补进 `devDependencies`。
 
 ### 9.3 本机代理模式（走真实 Rust 转发）
 
@@ -339,9 +349,9 @@ cd ../.. && node tools/proxy-e2e.cjs
 
 **两条前置，少一条就白跑**：
 
-- **必须先 `ZXZ_BASE=...`**：脚本拉起 `e2e.cjs` 时只注入 `MODE=proxy` 和端口 token，
-  不传 `ZXZ_BASE`，于是子进程用回默认的 `5173`——那里没有服务，报的是
-  `waiting for locator('#btnNew') to be visible`，看着像前端挂了，其实是打错了端口。
+- ~~必须先 `ZXZ_BASE=...`~~ **已修**：子进程现在由脚本显式传入 `ZXZ_BASE`，
+  默认 `http://localhost:1420`，与 `vite.config.ts` 的端口一致。以前不传会让子进程
+  退回 `5173`，报 `waiting for locator('#btnNew') to be visible`，看着像前端挂了。
 - **改了 `proxy.rs` 就要重编 harness**。这个坑当场吃过一次：`target-gnu` 里的
   `proxy-harness.exe` 是 11-01 09:34 的，`proxy.rs` 是 11-01 22:07 改的，
   拿旧二进制跑出两条 FAIL（`非回环 Host 被拒` 返回 200、`/models` 报「未知路由」），
@@ -353,7 +363,7 @@ cd ../.. && node tools/proxy-e2e.cjs
 前端链路（注入假 IPC，无需桌面端）：
 
 ```bash
-ZXZ_BASE=http://localhost:1420 node tools/workspace-e2e.cjs   # 39 项，实测 39/39
+node tools/workspace-e2e.cjs   # 39 项，实测 39/39（默认连 localhost:1420）
 ```
 
 > 这份假 IPC 必须跟着真 IPC 的接口走。B4 把撤销备份改到 `undo_write` 专用通道之后，
@@ -395,7 +405,7 @@ node tools/live-deepseek-e2e.cjs       # 静态 27 项，本轮未跑（需真 K
 前端链路（注入假 IPC + 虚拟技能目录，无需桌面端）：
 
 ```bash
-ZXZ_BASE=http://localhost:1420 node tools/skill-e2e.cjs   # 69 项，实测 69/69
+node tools/skill-e2e.cjs   # 69 项，实测 69/69（默认连 localhost:1420）
 ```
 
 真机端到端（真目录、真 SKILL.md、真附件读取、审计清单真写盘）：

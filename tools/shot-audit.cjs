@@ -5,9 +5,9 @@
 'use strict';
 
 const path = require('path');
-const { chromium } = require('playwright');
+const { launchBrowser } = require('./browser.cjs');
 
-const BASE = process.env.ZXZ_BASE || 'http://127.0.0.1:5173';
+const BASE = process.env.ZXZ_BASE || 'http://localhost:1420';
 const MOCK = process.env.MOCK_BASE || 'http://127.0.0.1:19888/v1';
 const OUT = process.env.SHOT_DIR || 'F:/zhuomian/zxz/tools/shots';
 
@@ -22,7 +22,7 @@ const SEED = {
 };
 
 (async () => {
-  const browser = await chromium.launch({ channel: 'msedge' });
+  const browser = await launchBrowser();
   const page = await browser.newPage({ viewport: { width: 1240, height: 900 }, deviceScaleFactor: 2 });
   await page.addInitScript((seed) => {
     if (!localStorage.getItem('zxz.state.v1')) localStorage.setItem('zxz.state.v1', JSON.stringify(seed));

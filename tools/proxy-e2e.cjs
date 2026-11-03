@@ -199,8 +199,17 @@ function req(port, method, p, headers = {}, body) {  const h = { ...headers };
   check('上游 401 翻译为 error 事件', /"type":"error"/.test(errChat.body) && /401/.test(errChat.body), errChat.body.slice(0, 90));
 
   // 9 前端走代理通道跑完整用例
+  // ZXZ_BASE 必须显式传下去：子进程不继承"调用者当时敲了什么"，
+  // 以前没传，子进程就退回自己的默认端口，于是父进程连的是 1420、
+  // 子进程敲的是 5173，报 `waiting for locator('#btnNew')`，看着像前端崩了。
   const e2e = spawn(process.execPath, [path.join(__dirname, 'e2e.cjs')], {
-    env: { ...process.env, MODE: 'proxy', PROXY_PORT: String(info.port), PROXY_TOKEN: info.token },
+    env: {
+      ...process.env,
+      ZXZ_BASE: process.env.ZXZ_BASE || 'http://localhost:1420',
+      MODE: 'proxy',
+      PROXY_PORT: String(info.port),
+      PROXY_TOKEN: info.token,
+    },
     stdio: 'inherit',
   });
   const e2eCode = await new Promise((r) => e2e.on('exit', r));

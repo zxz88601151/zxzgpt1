@@ -7,9 +7,12 @@
  */
 'use strict';
 
-const { chromium } = require('playwright');
+const { launchBrowser } = require('./browser.cjs');
 
-const BASE = process.env.ZXZ_BASE || 'http://127.0.0.1:5173';
+// 默认值必须跟 vite.config.ts 的 port 一致（1420），否则不传 ZXZ_BASE 时
+// 会去敲一个没人监听的 5173，报 ERR_CONNECTION_REFUSED，看着像前端崩了。
+// 主机名用 localhost 而不是 127.0.0.1：vite 绑的是 ::1，写死 127.0.0.1 同样连不上。
+const BASE = process.env.ZXZ_BASE || 'http://localhost:1420';
 const MODE = process.env.MODE || 'direct';
 const MOCK = process.env.MOCK_BASE || 'http://127.0.0.1:19888/v1';
 
@@ -20,7 +23,7 @@ function check(name, ok, detail) {
 }
 
 (async () => {
-  const browser = await chromium.launch({ channel: 'msedge', headless: true });
+  const browser = await launchBrowser({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 860 } });
   const consoleErrors = [];
   page.on('console', (m) => {

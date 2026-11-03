@@ -80,6 +80,7 @@
 | B11 · 清单不完整要说出来 | `listUndo` 的 `walk()` 返回 `boolean`；子目录抛错 / 撞 400 条 / 超 8 层 → `snapshot.incomplete`；界面标「清单不完整」 | **PASS** | 提交 `8919e3f`；前端 **400**（新增 3 条：抛错 / 撞上限 / 全可读） |
 | B16 · devtools 只给 debug | `tauri` 依赖去掉 `features=["devtools"]`，改为可选特性；release 不再带右键检查元素 | **PASS** | 源码门控 `#[cfg(any(debug_assertions, feature="devtools"))]`；`cargo tree -e features` 中 devtools 边为空；`cargo check --all-targets` 0 warning；Rust 82 全绿 |
 | B12-A · 传输层判据 | 新增 `src/api.test.ts` 37 条：上游错误 / SSE 分帧 / 断流 / 工具增量 / Key 不进 URL 与请求头；独立复审后补 JSON 兜底与 `done` 唯一性两组 | **PASS** | 前端 **437**；8 次变异检验各自精确变红一条；CI `ci.yml:18` 直接覆盖；e2e 24/39/69 + 代理接口 11 全绿 |
+| B14-A · e2e 可复现 | `tools/browser.cjs` 逐级回落（env → msedge → chrome → 自带 chromium）；五个脚本去掉写死的 `channel`；默认 BASE 统一 `localhost:1420`；`proxy-e2e` 显式把 `ZXZ_BASE` 传给子进程 | **PASS** | 不传任何环境变量实测：`e2e` 24/24、`proxy-e2e` 11+24、`workspace` 39/39、`skill` 69/69；`ZXZ_BROWSER_CHANNEL="nope,msedge"` 真走进回落分支 |
 
 ### 下一批（按优先级）
 
@@ -90,6 +91,7 @@
 |---|---|---|---|
 | B14 | e2e 进 CI 的三个前置（D-08） | 唯一能覆盖真实 WebView 的手段；R3 三个成因已逐个实测确认，都可修 | CI 上 `e2e.cjs` 能跑 |
 | B12-B | `send()` 接线层判据（D-02 剩余） | 两层纯函数都有判据了，接线层仍靠人眼 | 需业主选路线，见下 |
+| B14-B | 把 `playwright` 写进 `devDependencies`（D-08 最后一步） | `npm ci` 后 e2e 会因缺 playwright 跑不了；这是加依赖，**等业主批** | CI 上 `npm ci && npm test && node tools/e2e.cjs` 全通 |
 | D-16 | 代理把「用户点停止」记成「连接处理失败」 | 日志在说谎的方向是「平时天天报错，真故障时反而不显眼」 | 中断时不再打错误 |
 
 > **B14 有一步撞甲方保留权限**：三个前置里「playwright 入依赖」要改 `package.json`（新增第三方依赖）。
@@ -109,7 +111,7 @@
 |---|---|---|---|
 | R1 | release exe 落后于 HEAD | 高 | `src-tauri/target/release/zxz.exe` 内嵌的仍是 `index-CQlZK13B.js`，而当前构建产物是 `index-BUPLjQ7F.js`（相差 B3–B8 共 6 批改动）。**未重编前不得声称交付物含任何本轮修复** |
 | R2 | 无安装包 | 高 | `bundle.targets: "all"` 配置存在但从未产出；`WebView2` 走 `downloadBootstrapper`，离线不可用 |
-| R3 | e2e 不可复现 | 中 | 三个成因 2026-11-03 全部实测确认：playwright 未入依赖（`npm ci` 后消失）、硬编码 `channel:"msedge"`、默认端口 5173 与 vite 1420 冲突（`proxy-e2e.cjs` 拉起子进程时不传 `ZXZ_BASE`，会退回 5173 并报 `waiting for locator('#btnNew')`，看着像前端崩了）。修法见 B14 |
+| R3 | e2e 不可复现 | ~~中~~ 低 | 三个成因里**两个已修（B14-A）**：`channel:"msedge"` 硬编码 → `tools/browser.cjs` 逐级回落；端口 5173 vs 1420 → 默认 `localhost:1420` 且子进程显式继承 `ZXZ_BASE`。实测四套脚本**零环境变量**可跑（24 / 39 / 69 / 11+24）。剩 `playwright` 未入 `devDependencies`，`npm ci` 后会消失——加依赖需业主批准 |
 | R4 | ~~release 无条件带 devtools~~ | ~~中~~ | **已解除**（B16）：`tauri` 依赖不再带 devtools 特性；debug 构建行为不变 |
 | R5 | 推送/发布未授权 | — | 按宪章 §3，push / 打安装包需业主显式授权 |
 

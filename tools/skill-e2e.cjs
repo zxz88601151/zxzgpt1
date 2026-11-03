@@ -10,9 +10,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('playwright');
+const { launchBrowser } = require('./browser.cjs');
 
-const BASE = process.env.ZXZ_BASE || 'http://127.0.0.1:5173';
+const BASE = process.env.ZXZ_BASE || 'http://localhost:1420';
 const MOCK = process.env.MOCK_BASE || 'http://127.0.0.1:19888/v1';
 const MOCK_ROOT = process.env.MOCK_SERVER || 'http://127.0.0.1:19888';
 const OUT = process.env.SHOT_DIR || 'F:/zhuomian/zxz/tools/shots';
@@ -45,7 +45,7 @@ const SEED = {
 };
 
 (async () => {
-  const browser = await chromium.launch({ channel: 'msedge', headless: true });
+  const browser = await launchBrowser({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 940 }, deviceScaleFactor: 2 });
   const errors = [];
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
