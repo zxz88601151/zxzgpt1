@@ -21,9 +21,10 @@
 
 | 命令 | 结果 |
 |---|---|
-| `npm test` | **328 passed / 15 files**（本轮起点 326） |
-| `npm run build` | 成功；`dist/assets/index-DXotYgGr.js` 328.08 kB |
-| `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **58 passed / 1 ignored**（GNU 工具链；msvc 必失败） |
+| `npm test` | **366 passed / 16 files**（本轮起点 328） |
+| `npm run build` | 成功；`dist/assets/index-D2U6z4iv.js` 334.25 kB |
+| `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **79 passed / 1 ignored**（GNU 工具链；msvc 必失败） |
+| `cargo check --manifest-path src-tauri/Cargo.toml` | 通过，**0 warning**（B10 收口时实测） |
 
 `[FACT]` 本机 msvc 默认工具链会在链接期被 Git for Windows 的 coreutils `link.exe` 抢占，
 报 `link: extra operand`，且后台包装器仍上报 exit 0。**Rust 测试一律用**
@@ -36,16 +37,16 @@
 | Phase 0 接管 | **COMPLETE** | 上表；与 `C1D_BASELINE_AND_GATE.md` 的基线差异已核对（HEAD 前移 3 个提交、版本号已统一） |
 | Phase 1 诊断 | **COMPLETE** | 三组独立只读审计（安全 / 架构 / 质量），见 §4 |
 | Phase 2 规划 | **COMPLETE** | 本文件 §5 队列 |
-| Phase 3 研发 | **IN PROGRESS** | P0-3 第一轮已落地并验证 |
-| Phase 4 独立审查 | IN PROGRESS | 每批改动配一次独立复审（本轮已完成安全复审） |
+| Phase 3 研发 | **IN PROGRESS** | P0-3 第一轮 + B4/B5/B6/B10 已落地并验证 |
+| Phase 4 独立审查 | IN PROGRESS | B10 一批已做独立复审（11 条发现，逐条验证后 9 条成立、2 条驳回） |
 | Phase 5/6 验收交付 | NOT_STARTED | 交付物未重编、未打安装包 |
 
 ## 3. 当前结论（不夸大）
 
-- 代码级质量：**良好**。326→327 条前端单测、58 条 Rust 单测全绿；安全类断言质量高（负向断言 + 解析器级判定）。
-- 安全态势：**PARTIAL**。P0 三条高危已堵（见 §5 批次 B1），仍有 8 条已登记未修。
+- 代码级质量：**良好**。366 条前端单测、79 条 Rust 单测全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。
+- 安全态势：**PARTIAL → 明显改善**。P0 三条 + 本轮 2 条（npm `pre`/`post` 钩子绕过、`.npmrc` 改脚本 shell）+ 执行授权闸门（P0-4）已落地；其余已登记项见 §5 与 `TECHNICAL_DEBT.md`。
 - 交付状态：**NOT_READY**。无安装包；CI 不编译 `src-tauri` 本体；e2e 无法在 CI 复现；release exe 已落后于 HEAD。
-- 架构状态：**PARTIAL**。编排仍是 1405 行 `App.tsx` 内的闭包循环，`src/orchestration/` 不存在。
+- 架构状态：**PARTIAL**。编排仍是 1380+ 行 `App.tsx` 内的闭包循环，`src/orchestration/` 不存在（B7 未做）。工具五处手写已收成注册表（B6 完成）。
 
 ## 4. 诊断要点（摘要，证据见各审计文件）
 
@@ -66,19 +67,18 @@
 |---|---|---|---|
 | B1 · P0-3 | npm 脚本审计构造级拒绝 + 全分隔符切段；只读 git 三道加固；`.git/**` 写拒绝 | **PASS** | `docs/audit/P0-3_HARDENING_20261103.md`；327/327 + 58/58 |
 | B3 · 写入前置 | `fsExists` 不再吞错；存在性校验失败 / 备份失败均中止写入 | **PASS** | 328/328；提交 `6edb112` |
+| B4 · 撤销隔离 | `.zxz/undo` 专用写入通道；`fsx::read`/`list_in` 对撤销区关闭；模型不可写不可读 | **PASS** | 提交 `d4b1d83`；前端 332 + Rust 61 |
+| B5 · 输出与环境 | 输出保留上限 256 KB（管道仍读空，不死锁）；`env_clear()` + 19 项白名单；`truncated` 显式回传 | **PASS** | 提交 `554dc1d`；前端 335 + Rust 65 |
+| B6 · 工具注册表 | 五份清单收成 `src/lib/registry.ts` 的 `TOOLS`，`findTool` 精确匹配不归一 | **PASS** | 提交 `449b3a5`；前端 351；`grep -c "call.name ==="` = 0 |
+| B10 · 执行授权闸门 | `perms::decide` 三态闸门（`Deny`/`Ask`/`Allow`）；scope = 命令+子命令；会话内有效、不落盘；前端确认框 + 授权列表可逐条撤销 | **PASS** | 前端 366 + Rust 79；`cargo check` 0 warning |
 
 ### 下一批（按优先级，已排定，不再请示）
 
 | # | 任务 | 为什么现在 | 验收 |
 |---|---|---|---|
-| ~~B2~~ | ~~运行器配置文件闸门~~ → **已重新定性，见 DEC-005** | 与 B1 不同源，不构成独立攻击面 | 不做，改为 P0-4 权限模型 |
-| B4 | `.zxz/undo/**` 专用内部通道（模型不可写） | 撤销快照可被模型覆盖 | 模型写 `.zxz/undo/**` 被拒 |
-| B5 | 输出缓冲硬上限 + `env_clear()` + 最小环境白名单 | 本机 DoS 面 + 环境注入面 | 输出超限即停读；`SECRET_TOKEN` 不可见 |
-| B6 | 工具注册表（消除 5 处手写） | P1 抽取 Runtime 的前置 | `grep -c "call.name ===" src/` = 0 |
-| B7 | 抽 `src/orchestration/round.ts`（只搬轮末判定） | 最小可行切片，风险最低 | 5 条出口用例 + 现有 328 条不回退 |
+| B7 | 抽 `src/orchestration/round.ts`（只搬轮末判定） | 最小可行切片，风险最低 | 5 条出口用例 + 现有 366 条不回退 |
 | B8 | README e2e 项数重测并订正（D-DOC-1） | 现有多处自相矛盾 | 数字 = 实测 |
-| B9 | ~~`.gitignore` 补漏~~ | 已完成（提交 `c69ab59`） | — |
-| B10 | P0-4 工具权限模型（`exec` 默认 ask） | 是"模型写的代码会被执行"这件事唯一真正的闸门 | `decide()` 组合用例 ≥ 12；默认下 `run_command` 必弹审批 |
+| B11 | `.zxz/undo` 子目录列举失败时静默跳过 → 需要给出「快照可能不完整」标记 | 逐子目录 `catch` 会产出**看起来完整**的快照（P3，不导致数据丢失：恢复时 `undo_read` 会明确报错） | 子目录打不开时快照带 `incomplete` 标记 |
 
 ## 6. 风险与阻断
 
@@ -99,3 +99,8 @@
 | DEC-003 | git 加固参数强制注入、用户不可关闭 | 依赖"用户没配置"不是安全设计 | 移除 `effective_argv` |
 | DEC-004 | 先修 RCE 链，再抽 Runtime | 抽取不改攻击面，修复直接降风险 | 调整 §5 顺序即可 |
 | DEC-005 | **撤回**"运行器配置文件构成独立 RCE 链"这一判断 | 复核后：`vite.config.*` 会被加载执行，但 `src/**/*.test.ts` 同样会被 vitest 执行——"执行模型写的代码"是编码 Agent 的既定能力，不是可被 blocklist 关闭的漏洞。真正的闸门是执行前的权限审批（P0-4），拿配置文件黑名单当安全边界只会制造虚假安全感 | 无需回滚；B2 从队列移除，改为 B10 |
+| DEC-006 | 撤销快照区对模型**读也关闭**，撤销面板改走 `undo_read` / `undo_list` 专用 IPC | 原设计只堵了写。但快照里留着"用户删掉的密钥、改过的旧内容"，可读就是泄漏；能列举全量快照还额外泄漏操作轨迹（何时改过哪些文件）。只堵写等于把敏感数据放在模型读得到的路径上 | 恢复 `read`/`list_in` 对 `.zxz/undo` 的放行即可（不推荐） |
+| DEC-007 | 执行授权 scope = 命令 + 子命令，只在内存、按会话记账 | 按"整个 `git` 允许"太粗（`git diff` 与 `git push` 天差地别）；按"完整 argv"太细，模型换个 `--stat` 就要再问一次，用户会训练成无脑点同意。落盘会把一次性批准变成永久后门 | 删除 `perms::grant` 的调用点，退回"每次必问" |
+| DEC-008 | 授权粒度实际是**工程目录级**，对话级隔离由前端主动撤回补偿 | `wsx::open` 对同一目录复用会话号，Rust 侧只有一个桶。前端在切/新建/删除/清空对话时撤销，能把粒度收回到对话级；但这是补偿不是隔离，一旦出现绕过前端的调用路径就退回工程级 | 让 `perms` 带上 convId 记账（需要新的会话维度，本版未做） |
+| DEC-009 | npm 脚本审计必须覆盖 `pre<name>` / `post<name>` | 实测可绕过：`{"pretest":"node evil.js","test":"node --test emit.js"}` 能过审并写出文件，因为只审了 `scripts.test`。`npm test` 实际跑三步，审一步等于没审 | 去掉钩子遍历（不推荐） |
+| DEC-010 | `.npmrc` / `.yarnrc` / `.yarnrc.yml` / `.pnpmfile.cjs` 与 `.git/**` 同级，写入一律拒绝 | 实测 `script-shell=C:/nonexistent/zzz-shell.exe` 会让 `npm run build` 去 spawn 那个路径——工程文件能改 npm 的脚本 shell，等于绕开"argv 里没有 shell"这条前提 | 移除 `fsx::is_toolchain_config` 的判定 |

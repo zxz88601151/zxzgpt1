@@ -181,6 +181,13 @@ pub fn list_in(root: &Path, rel: &str) -> Result<Vec<FsEntry>, String> {
     if root.as_os_str().is_empty() {
         return Err("工程目录为空".into());
     }
+    if !rel.trim().is_empty() {
+        let relp = safe_rel(rel)?;
+        // 与 read 同理：快照区的目录结构会泄漏「什么时候改过哪些文件」
+        if is_undo_area(&relp) {
+            return Err(format!("{rel} 在撤销快照区：只能通过撤销面板查看历史版本"));
+        }
+    }
     let dir = if rel.trim().is_empty() {
         root.to_path_buf()
     } else {
@@ -282,6 +289,13 @@ pub fn mkdir(dir: String, name: String) -> Result<String, String> {
 }
 
 pub fn read(root: &Path, rel: &str) -> Result<String, String> {
+    let relp = safe_rel(rel)?;
+    // 快照区存的是「用户改掉或删掉的旧内容」，当前文件里可能已经看不到的密钥
+    // 恰恰只在那里。模型能读 = 一条绕过当前状态的读通道，所以这里关掉，
+    // 改走 undo_read（只有撤销面板用）。
+    if is_undo_area(&relp) {
+        return Err(format!("{rel} 在撤销快照区：只能通过撤销面板查看历史版本"));
+    }
     // 边界全在 resolve 里：符号链接/联接点借道、悬空链接、..、绝对路径都在那一步拒绝
     let target = resolve(root, rel)?;
     let md = fs::metadata(&target).map_err(|e| format!("读取失败（{rel}）：{e}"))?;
@@ -300,6 +314,19 @@ pub fn exists(root: &Path, rel: &str) -> Result<bool, String> {
     Ok(target.exists())
 }
 
+/// 决定「工具链跑什么、用什么跑」的配置文件。
+///
+/// `.npmrc` 的 `script-shell` 会整个替换 npm 执行脚本用的 shell——实测有效：
+/// 把它指到一个不存在的路径，`npm run build` 直接 `spawn ENOENT`。也就是说
+/// 模型写一个自己的批处理、再把它设成 script-shell，此后任何一次「npm test」
+/// 跑的都是模型给的程序。`registry`、`ignore-scripts`、`yes` 同样改变行为。
+/// 模型改这些没有正当用途，整类拒绝。
+fn is_toolchain_config(name: &str) -> bool {
+    [".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs"]
+        .iter()
+        .any(|n| name.eq_ignore_ascii_case(n))
+}
+
 /// 受保护目录：程序自己的内部资产，模型与普通写通道一律不可写。
 ///
 /// - `.git/**`：这些路径一旦被改写，git 的行为就被改写了（`.git/config` 的
@@ -308,6 +335,10 @@ pub fn exists(root: &Path, rel: &str) -> Result<bool, String> {
 ///   = 受控执行变成任意执行。整目录拒绝，不做「只挡 config」这种半开的口子。
 /// - `.zxz/undo/**`：撤销快照是覆盖写失败时唯一的安全网。它能被写入 = 这张网可以被
 ///   改写，用户点「恢复」拿到的就是模型准备好的内容。快照只能经 `undo_write` 落盘。
+/// - `.zxz` 本身：它只能是目录。新工程里 `.zxz` 尚不存在时，模型可以把它写成一个
+///   普通文件；此后 `undo_write` 的 create_dir_all 永远失败，所有「覆盖已有文件」
+///   都会因「备份失败必须中止」而中止——一次自伤式拒绝服务。
+/// - 工具链配置：见 `is_toolchain_config`。
 ///
 /// 判定必须基于 **safe_rel 之后** 的路径：`.` 段会被 safe_rel 吃掉，所以
 /// `./.git/config` 的字符串首段是 `.` 而不是 `.git`——基于原始字符串判定会放行，
@@ -321,14 +352,28 @@ fn protected_area(relp: &Path) -> Option<&'static str> {
     if first.eq_ignore_ascii_case(".git") {
         return Some(".git");
     }
+    if is_toolchain_config(first) {
+        return Some("工具链执行配置");
+    }
     if first.eq_ignore_ascii_case(".zxz") {
         // `.zxz/` 下只有 undo 是安全资产；`.zxz/audit` 是模型自己产的报告，不挡。
-        let second = segs.next().unwrap_or("");
-        if second.eq_ignore_ascii_case("undo") {
-            return Some(".zxz/undo");
-        }
+        return match segs.next() {
+            None => Some(".zxz"),
+            Some(second) if second.eq_ignore_ascii_case("undo") => Some(".zxz/undo"),
+            Some(_) => None,
+        };
     }
     None
+}
+
+/// 撤销快照区：读也走专用通道（`undo_read` / `undo_list`），不走通用 `read`/`list_in`。
+///
+/// 快照里存的是「用户改掉或删掉的旧内容」——从 `.env`、config 里移除的密钥正确实
+/// 只在这一份里存在。模型在**当前**文件里读不到，却能靠 `read_file(".zxz/undo/...")`
+/// 读到，还能用 `list_dir` 拿到「用户什么时候改过哪些文件」的轨迹。所以这条通道
+/// 对模型关闭，只留给撤销面板。
+fn is_undo_area(relp: &Path) -> bool {
+    protected_area(relp) == Some(".zxz/undo")
 }
 
 pub fn write(root: &Path, rel: &str, content: String) -> Result<WriteResult, String> {
@@ -348,6 +393,15 @@ pub fn write(root: &Path, rel: &str, content: String) -> Result<WriteResult, Str
         if !path_inside(root, &parentc) {
             return Err(format!("{rel} 越出了工程目录"));
         }
+        // 再用**真实落点**复核一次保护判定。字符串层的首段比较挡不住 8.3 短名：
+        // `ZXZ~1` 在字符串上不等于 `.zxz`，canonicalize 之后才是同一个目录
+        // （本机 NTFS 没给这些目录生成短名，实测解析不到，但别的机器/别的卷会）。
+        // 判定的对象应该是「实际会写进哪个目录」，不是「输入长什么样」。
+        if let Ok(rel_parent) = parentc.strip_prefix(root) {
+            if let Some(area) = protected_area(rel_parent) {
+                return Err(format!("{rel} 实际落在 {area} 目录内：程序内部资产不允许经写文件通道改动"));
+            }
+        }
     }
 
     let created = !target.exists();
@@ -359,18 +413,32 @@ pub fn write(root: &Path, rel: &str, content: String) -> Result<WriteResult, Str
     })
 }
 
-/// 快照标识的合法形状：`2026-11-01T02-49-32`（19 字符，数字与固定分隔符）。
+/// 快照标识的合法形状：`2026-11-01T02-49-32`（19 字符，秒级）或
+/// `2026-11-01T02-49-32-123`（23 字符，毫秒级）。
 ///
 /// 严格到位是刻意的：这个值是撤销通道唯一由外部传入的「目录名」，
 /// 只要放过一个 `/` 或 `..`，整条通道就又变回任意路径写入。
+///
+/// 支持毫秒是因为秒级精度会撞车：同一秒内对同一文件备份两次（一轮里两次
+/// write_file，或写完立刻恢复），第二次会覆盖第一次的快照目录，最初的原始版本
+/// 就被悄悄顶掉了，而界面仍显示「已备份」。
 fn valid_stamp(s: &str) -> bool {
     let b = s.as_bytes();
-    if b.len() != 19 {
+    if b.len() != 19 && b.len() != 23 {
         return false;
     }
-    const VERIFY_DIGITS: [usize; 14] = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
-    const VERIFY_SEPS: [(usize, u8); 5] = [(4, b'-'), (7, b'-'), (10, b'T'), (13, b'-'), (16, b'-')];
-    VERIFY_DIGITS.iter().all(|&i| b[i].is_ascii_digit()) && VERIFY_SEPS.iter().all(|&(i, c)| b[i] == c)
+    const DIGITS: [usize; 14] = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
+    if !DIGITS.iter().all(|&i| b[i].is_ascii_digit()) {
+        return false;
+    }
+    if b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b'-' || b[16] != b'-' {
+        return false;
+    }
+    if b.len() == 23 {
+        // `-123`：分隔符 + 三位毫秒
+        return b[19] == b'-' && b[20].is_ascii_digit() && b[21].is_ascii_digit() && b[22].is_ascii_digit();
+    }
+    true
 }
 
 /// 撤销快照专用写入通道：模型侧工具够不到它，通用写通道又拒绝 `.zxz/undo`，
@@ -416,6 +484,75 @@ pub fn undo_write(root: &Path, stamp: &str, rel: &str, content: String) -> Resul
         bytes: content.len(),
         created,
     })
+}
+
+/// 撤销快照读取通道（只给撤销面板用，模型侧 `read`/`list_in` 已对该区关闭）。
+///
+/// `stamp` 为 None 时列出撤销根下的快照目录；给出时列出该快照内 `rel` 子目录
+/// （`rel` 为空表示快照根）。落点用 canonicalize 复核，必须真在 `.zxz/undo` 之下
+/// ——否则 `.zxz/undo` 被换成指向别处的 junction 时，这条通道就成了新的越界读口子。
+pub fn undo_list(root: &Path, stamp: Option<&str>, rel: &str) -> Result<Vec<FsEntry>, String> {
+    let undo_root = root.join(".zxz").join("undo");
+    if !undo_root.is_dir() {
+        return Ok(Vec::new()); // 还没写过任何文件，正常情况
+    }
+    let undo_canon = fs::canonicalize(&undo_root).map_err(|e| format!("撤销目录不可用：{e}"))?;
+
+    let dir = match stamp {
+        None => {
+            if !rel.trim().is_empty() {
+                return Err("未指定快照时不能列出子目录".into());
+            }
+            undo_canon.clone()
+        }
+        Some(s) => {
+            if !valid_stamp(s) {
+                return Err(format!("快照标识不合法（要求形如 2026-11-01T02-49-32）：{s}"));
+            }
+            let base = undo_canon.join(s);
+            if rel.trim().is_empty() {
+                base
+            } else {
+                let relp = safe_rel(rel)?;
+                if protected_area(&relp).is_some() {
+                    return Err(format!("{rel} 落在受保护目录内：快照里不能再进快照"));
+                }
+                base.join(&relp)
+            }
+        }
+    };
+
+    let real = fs::canonicalize(&dir).map_err(|e| format!("目录不可用：{e}"))?;
+    if !real.starts_with(&undo_canon) {
+        return Err("目录不在撤销快照区内，拒绝访问".into());
+    }
+    list(real.to_string_lossy().to_string())
+}
+
+/// 读一份快照的正文。落点同样要求真在撤销区之内。
+pub fn undo_read(root: &Path, stamp: &str, rel: &str) -> Result<String, String> {
+    if !valid_stamp(stamp) {
+        return Err(format!("快照标识不合法（要求形如 2026-11-01T02-49-32）：{stamp}"));
+    }
+    let relp = safe_rel(rel)?;
+    if protected_area(&relp).is_some() {
+        return Err(format!("{rel} 落在受保护目录内：快照里不能再进快照"));
+    }
+    let undo_root = root.join(".zxz").join("undo");
+    let undo_canon = fs::canonicalize(&undo_root).map_err(|e| format!("撤销目录不可用：{e}"))?;
+    let target = undo_canon.join(stamp).join(&relp);
+    let real = fs::canonicalize(&target).map_err(|e| format!("快照不存在（{stamp}/{rel}）：{e}"))?;
+    if !real.starts_with(&undo_canon) {
+        return Err("快照落点不在撤销目录内，拒绝读取".into());
+    }
+    let md = fs::metadata(&real).map_err(|e| format!("读取失败（{stamp}/{rel}）：{e}"))?;
+    if md.is_dir() {
+        return Err(format!("{rel} 是目录，不是文件"));
+    }
+    if md.len() > MAX_READ {
+        return Err(format!("{rel} 超过 4MB，拒绝读取"));
+    }
+    fs::read_to_string(&real).map_err(|e| format!("{rel} 不是可读的文本文件：{e}"))
 }
 
 #[cfg(test)]

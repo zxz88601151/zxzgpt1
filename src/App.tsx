@@ -1,7 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { chatStream, detectTransport, DIRECT } from "./api";
-import { buildTree, fsAvailable, fsExists, fsListIn, fsRead, fsWrite, runAllowed, sessionFor, undoWrite, wsClose, wsInfo, wsOpen as openSession } from "./lib/fsapi";
+import {
+  buildTree,
+  ExecGrantRequired,
+  fsAvailable,
+  fsExists,
+  fsListIn,
+  fsRead,
+  fsWrite,
+  permGrant,
+  permList,
+  permRevoke,
+  runAllowed,
+  sessionFor,
+  undoWrite,
+  wsClose,
+  wsInfo,
+  wsOpen as openSession,
+  type ExecGrant,
+} from "./lib/fsapi";
 import { buildMessages, filterConversations, findActive, loadState, newConversation, persist, titleFrom } from "./state";
 import { clamp, copyText, uid } from "./lib/text";
 import { diffLines, diffStats } from "./lib/diff";
@@ -46,10 +64,11 @@ import {
   testLoopDecision,
   truncateToolOutput,
 } from "./lib/tools";
-import { findTool, planModeBlocks, TOOL_DEFS, type ToolContext } from "./lib/registry";
+import { findTool, parseToolArgs, planModeBlocks, TOOL_DEFS, type ToolContext } from "./lib/registry";
 import type { AppState, Conversation, FileWriteResult, Message, Settings, Theme, ToolCallRecord, Transport, Usage } from "./types";
 import type { ToastKind } from "./components/ui";
 
+import { ConfirmExec, type ExecAsk, type ExecChoice } from "./components/ConfirmExec";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { Composer } from "./components/Composer";
@@ -83,6 +102,8 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [keyword, setKeyword] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
+  /** 当前生效的执行授权（Rust 侧记账，这里只是镜像给界面看） */
+  const [grants, setGrants] = useState<ExecGrant[]>([]);
   const [wsOpen, setWsOpen] = useState(false);
   const [undoOpen, setUndoOpen] = useState(false);
   const [skillOpen, setSkillOpen] = useState(false);
@@ -157,7 +178,84 @@ export default function App() {
   }, [toast]);
 
   /* ------------------------------------------------------------ 会话操作 */
+
+  /**
+   * 执行授权的确认框：exec 类命令默认不跑，先问人。
+   *
+   * 工具执行是 async 流程，确认框是 React 状态，所以用一个 Promise 桥接。
+   * ref 与 state 双写是必要的：ref 让同步路径（比如撤回授权时要作废待答的框）
+   * 能立刻拿到 resolver，state 负责触发渲染。
+   */
+  const [execAsk, setExecAsk] = useState<ExecAsk | null>(null);
+  const execAskRef = useRef<ExecAsk | null>(null);
+  const askExec = useCallback(
+    (label: string) =>
+      new Promise<ExecChoice>((resolve) => {
+        const ask: ExecAsk = { label, resolve };
+        execAskRef.current = ask;
+        setExecAsk(ask);
+      }),
+    []
+  );
+  const answerExec = useCallback((choice: ExecChoice) => {
+    const cur = execAskRef.current;
+    execAskRef.current = null;
+    setExecAsk(null);
+    cur?.resolve(choice);
+  }, []);
+
+  /** 从 Rust 侧拉一次授权表。失败就当空（界面只是镜像，权威判定永远在 Rust）。 */
+  const refreshGrants = useCallback(async () => {
+    const ws = stateRef.current.settings.workspace;
+    if (!ws) {
+      setGrants([]);
+      return;
+    }
+    try {
+      setGrants(await permList(ws.sessionId));
+    } catch {
+      setGrants([]);
+    }
+  }, []);
+
+  /** 撤销一条 / 全部授权。撤销之后必须重新拉表，让界面与 Rust 侧保持一致。 */
+  const revokeGrant = useCallback(
+    (scope?: string[]) => {
+      const ws = stateRef.current.settings.workspace;
+      if (!ws) return;
+      permRevoke(ws.sessionId, scope)
+        .then(setGrants)
+        .catch((e) => toast(`撤销失败：${(e as Error).message}`, "error"));
+    },
+    [toast]
+  );
+
+  // 打开设置时同步一次：用户在别处改了授权，抽屉里的列表要能反映出来
+  useEffect(() => {
+    if (drawerOpen) void refreshGrants();
+  }, [drawerOpen, refreshGrants]);
+
+
+  /**
+   * 把执行授权收回到「当前对话」的粒度。
+   *
+   * Rust 侧是按工程目录（sessionId）记账的——同一目录重复 open 会复用同一个会话，
+   * 所以「本工程目录都允许」的实际生命周期是「直到关闭工程」。切换或新建对话时
+   * 主动撤销，是为了不让上一个对话里点过的「允许」直接给下一个对话的模型用。
+   * 撤销失败要说出来：静默失败等于授权还在，而用户以为已经收回了。
+   */
+  const dropExecGrants = useCallback(() => {
+    // 先作废还挂着的确认框：用户切走了对话，就不该还有一个"等批准"的执行在排队
+    answerExec("deny");
+    const ws = stateRef.current.settings.workspace;
+    if (!ws) return;
+    permRevoke(ws.sessionId)
+      .then(() => setGrants([]))
+      .catch((e) => toast(`执行授权撤回失败：${(e as Error).message}`, "error"));
+  }, [answerExec, toast]);
+
   const createConv = useCallback(() => {
+    void dropExecGrants();
     const conv = newConversation();
     update((s) => ({ ...s, conversations: [...s.conversations, conv], activeId: conv.id }));
     setInput("");
@@ -165,15 +263,17 @@ export default function App() {
     setFocusSignal((n) => n + 1);
     if (window.innerWidth <= 860) setCollapsed(true);
     return conv;
-  }, [update]);
+  }, [dropExecGrants, update]);
 
   const selectConv = useCallback(
     (id: string) => {
+      // 切对话就把上一个对话批过的执行许可收回，理由见 dropExecGrants
+      if (id !== stateRef.current.activeId) void dropExecGrants();
       update((s) => ({ ...s, activeId: id }));
       setScrollSignal((n) => n + 1);
       if (window.innerWidth <= 860) setCollapsed(true);
     },
-    [update]
+    [dropExecGrants, update]
   );
 
   const renameConv = useCallback(
@@ -193,24 +293,30 @@ export default function App() {
   const deleteConv = useCallback(
     (id: string) => {
       if (!window.confirm("删除这个对话？删除后无法恢复。")) return;
+      // 删的如果是当前对话，activeId 会换人——那条授权属于被删掉的对话，必须跟着作废。
+      // 删后台对话则不影响当前授权（Rust 侧按会话记账，只有一个桶）。
+      const switching = stateRef.current.activeId === id;
+      if (switching) void dropExecGrants();
       update((s) => {
         const conversations = s.conversations.filter((c) => c.id !== id);
         const activeId = s.activeId === id ? conversations[0]?.id || null : s.activeId;
         return { ...s, conversations, activeId };
       });
     },
-    [update]
+    [dropExecGrants, update]
   );
 
   const clearConv = useCallback(() => {
     const conv = findActive(stateRef.current);
     if (!conv || !conv.messages.length) return;
     if (!window.confirm("清空当前对话的所有消息？")) return;
+    // 消息清空后，当初"因为这个对话在做什么"而批的授权就失去了依据，一并收回
+    void dropExecGrants();
     update((s) => ({
       ...s,
       conversations: s.conversations.map((c) => (c.id === conv.id ? { ...c, messages: [] } : c)),
     }));
-  }, [update]);
+  }, [dropExecGrants, update]);
 
   /* ------------------------------------------------------------ 本地工程：真实写盘 */
 
@@ -449,10 +555,24 @@ export default function App() {
       runCommand: async (argv) => {
         const ws = stateRef.current.settings.workspace;
         if (!ws) throw new Error("未接入工程目录");
-        return runAllowed(ws.sessionId, argv);
+        // exec 默认 ask：Rust 侧没有授权就抛 ExecGrantRequired，界面问过用户再重试。
+        // 循环最多三轮，避免授权逻辑出 bug 时变成死循环。
+        for (let attempt = 0; ; attempt++) {
+          try {
+            return await runAllowed(ws.sessionId, argv);
+          } catch (e) {
+            if (!(e instanceof ExecGrantRequired)) throw e;
+            if (attempt >= 2) throw new Error("多次授权后仍然无法执行，已停止重试");
+            const choice = await askExec(e.label);
+            if (choice === "deny") throw new Error("用户拒绝了这次命令执行");
+            // 授权失败会让下一轮再抛一次 ExecGrantRequired，由上面的 attempt 上限兜住
+            await permGrant(ws.sessionId, e.scope, choice === "once" ? 1 : null, e.label);
+            void refreshGrants();
+          }
+        }
       },
     }),
-    [requestApplyFiles]
+    [requestApplyFiles, askExec]
   );
 
   /**
@@ -471,12 +591,9 @@ export default function App() {
       if (!spec) return { ...base, error: `未知工具：${call.name}` };
       const ws = stateRef.current.settings.workspace;
       if (!ws) return { ...base, error: "未接入工程目录，工具不可用" };
-      let args: Record<string, unknown>;
-      try {
-        args = JSON.parse(call.arguments || "{}") as Record<string, unknown>;
-      } catch {
-        return { ...base, error: "工具参数不是合法 JSON" };
-      }
+      const parsedArgs = parseToolArgs(call.arguments);
+      if (!parsedArgs.ok) return { ...base, error: parsedArgs.error };
+      const args = parsedArgs.args;
       if (Boolean(stateRef.current.settings.planMode) && planModeBlocks(spec.access)) {
         return { ...base, error: "计划模式已拦截：本轮只出方案，不写文件、不跑命令" };
       }
@@ -1286,6 +1403,9 @@ export default function App() {
         onClose={() => setDrawerOpen(false)}
         onSave={saveSettings}
         onThemePreview={previewTheme}
+        grants={grants}
+        onRevoke={(scope) => revokeGrant(scope)}
+        onRevokeAll={() => revokeGrant()}
       />
 
       <FolderPicker
@@ -1330,6 +1450,9 @@ export default function App() {
         onPick={(path) => pickSkillDir(path)}
         onClear={clearSkillDir}
       />
+
+      {/* exec 默认 ask：模型要跑命令时先在这里确认，白名单外的东西连框都不会弹 */}
+      <ConfirmExec ask={execAsk} onChoose={answerExec} />
 
       <UndoPanel
         open={undoOpen}

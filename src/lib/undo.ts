@@ -8,8 +8,7 @@
  * 工程根目录不经过这里：所有读写都只认 Rust 登记的 sessionId（见 fsapi.ts）。
  */
 
-import { UNDO_DIR } from "./files";
-import { fsExists, fsListIn, fsRead, fsWrite, undoWrite, type FsEntry } from "./fsapi";
+import { fsExists, fsRead, fsWrite, undoList, undoRead, undoWrite, type FsEntry } from "./fsapi";
 
 export interface UndoFile {
   /** 工程内相对路径，如 `src/main.js` */
@@ -41,17 +40,20 @@ export function undoRootOf(root: string): string {
   return joinPath(root, ".zxz", "undo");
 }
 
-/** 快照目录名 → 人类可读时间（`2026-11-01T02-49-32` → `11-01 02:49:32`） */
+/** 快照目录名 → 人类可读时间（UTC 的 `2026-11-01T02-49-32-123` → 本地 `11-01 10:49:32`） */
 export function stampLabel(stamp: string): string {
-  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})$/.exec(stamp.trim());
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})(?:-(\d{3}))?$/.exec(stamp.trim());
   if (!m) return stamp;
-  const [, , month, day, hh, mm, ss] = m;
-  return `${month}-${day} ${hh}:${mm}:${ss}`;
+  const [, y, mo, d, hh, mm, ss, ms] = m;
+  // 目录名是 UTC，界面要显示本地时间，否则会差出时区（本机就是 8 小时）
+  const t = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(hh), Number(mm), Number(ss), ms ? Number(ms) : 0));
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())}`;
 }
 
-/** 快照文件名 → 生成目录名 */
+/** 快照文件名 → 生成目录名（毫秒精度：秒级会在同一秒内两次备份时撞车） */
 export function stampNow(d = new Date()): string {
-  return d.toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  return d.toISOString().replace(/[:.]/g, "-").slice(0, 23);
 }
 
 /** 绝对路径 → 相对某个前缀的工程内路径（统一用 /） */
@@ -62,43 +64,39 @@ export function relFromAbs(absPath: string, prefixAbs: string): string {
   return rel.replace(/[\\/]+/g, "/").replace(/^\/+/, "");
 }
 
-/** 快照目录在工程内的相对路径前缀 */
-const UNDO_PREFIX = `${UNDO_DIR}/`;
-
-/** 列出所有快照，新的在前；单个快照里按路径排序 */
+/** 列出所有快照，新的在前；单个快照里按路径排序。
+ *
+ * 走 `undo_list` 专用通道：模型的 `list_dir` 对 `.zxz/undo` 已关闭，
+ * 因为它会泄漏「用户什么时候改过哪些文件」的操作轨迹。
+ */
 export async function listUndo(sessionId: string): Promise<UndoSnapshot[]> {
-  // 目录不存在是正常情况（还没覆盖过任何文件）；存在却列不出来是真故障。
-  // 旧实现把这两种都 `catch` 成空数组，界面就显示「没有快照」——
-  // 用户会以为备份不存在，而实际上可能是权限或会话出了问题。
-  const hasUndo = await fsExists(sessionId, UNDO_DIR);
-  if (!hasUndo) return [];
-  const top = await fsListIn(sessionId, UNDO_DIR);
-
+  // 目录不存在时 Rust 侧返回空数组（还没覆盖过任何文件，正常情况）；
+  // 存在却列不出来会抛错——不能都吞成空，那会让界面显示「没有快照」。
+  const top = await undoList(sessionId, null, "");
   const snapshots: UndoSnapshot[] = [];
   for (const dir of top.filter((e) => e.dir)) {
     const files: UndoFile[] = [];
-    const base = `${UNDO_PREFIX}${dir.name}`;
-    await walk(sessionId, base, base, files, 0);
+    await walk(sessionId, dir.name, "", files, 0);
     snapshots.push({ stamp: dir.name, files: files.sort((x, y) => x.rel.localeCompare(y.rel)) });
   }
   return snapshots.sort((x, y) => y.stamp.localeCompare(x.stamp));
 
-  /** base 是快照目录（`.zxz/undo/<时间戳>`），out 里的 rel 都是相对它的工程内路径 */
-  async function walk(sid: string, base: string, dirRel: string, out: UndoFile[], depth: number): Promise<void> {
+  /** rel 是相对快照目录（`.zxz/undo/<stamp>`）的路径，空串表示快照根 */
+  async function walk(sid: string, stamp: string, rel: string, out: UndoFile[], depth: number): Promise<void> {
     if (depth > MAX_DEPTH || out.length >= MAX_FILES) return;
     let entries: FsEntry[];
     try {
-      entries = await fsListIn(sid, dirRel);
+      entries = await undoList(sid, stamp, rel);
     } catch {
       return;
     }
     for (const e of entries) {
       if (out.length >= MAX_FILES) return;
-      const rel = `${dirRel}/${e.name}`;
+      const childRel = rel ? `${rel}/${e.name}` : e.name;
       if (e.dir) {
-        await walk(sid, base, rel, out, depth + 1);
+        await walk(sid, stamp, childRel, out, depth + 1);
       } else {
-        out.push({ rel: rel.slice(base.length + 1), bytes: e.size });
+        out.push({ rel: childRel, bytes: e.size });
       }
     }
   }
@@ -106,7 +104,7 @@ export async function listUndo(sessionId: string): Promise<UndoSnapshot[]> {
 
 /** 读某一版备份的正文 */
 export async function readUndoFile(sessionId: string, stamp: string, rel: string): Promise<string> {
-  return fsRead(sessionId, `${UNDO_DIR}/${stamp}/${rel}`);
+  return undoRead(sessionId, stamp, rel);
 }
 
 export interface RestoreResult {

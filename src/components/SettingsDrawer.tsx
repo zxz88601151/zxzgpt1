@@ -3,6 +3,7 @@ import { fetchModels, testConnection } from "../api";
 import { PRESETS, findPreset } from "../presets";
 import { clamp } from "../lib/text";
 import type { Settings, Theme, Transport } from "../types";
+import type { ExecGrant } from "../lib/fsapi";
 import { IconButton } from "./ui";
 
 interface SettingsDrawerProps {
@@ -13,11 +14,27 @@ interface SettingsDrawerProps {
   onSave: (next: Settings) => void;
   /** 主题下拉改动时即时预览，保存后才落盘 */
   onThemePreview: (theme: Theme) => void;
+  /** 当前生效的执行授权（Rust 侧记账，这里只展示） */
+  grants: ExecGrant[];
+  /** 撤销一条授权 */
+  onRevoke: (scope: string[]) => void;
+  /** 清空本工程目录的全部授权 */
+  onRevokeAll: () => void;
 }
 
 type ResultKind = "" | "ok" | "bad";
 
-export function SettingsDrawer({ open, settings, transport, onClose, onSave, onThemePreview }: SettingsDrawerProps) {
+export function SettingsDrawer({
+  open,
+  settings,
+  transport,
+  onClose,
+  onSave,
+  onThemePreview,
+  grants,
+  onRevoke,
+  onRevokeAll,
+}: SettingsDrawerProps) {
   const [draft, setDraft] = useState<Settings>(settings);
   const [models, setModels] = useState<string[]>([]);
   const [keyVisible, setKeyVisible] = useState(false);
@@ -255,6 +272,33 @@ export function SettingsDrawer({ open, settings, transport, onClose, onSave, onT
             />
             <span>自动测试回路：写完文件后自动跑一次 npm test，失败把报错回传给模型再改，最多 3 轮（仅桌面端）</span>
           </label>
+
+          {/* 执行权限：让「谁被批准过跑什么」可见、可撤销。
+              没有这一块的话，授权就是只进不出的黑洞——用户只能靠记忆判断
+              模型现在还能自己跑些什么。 */}
+          <div className="perm-block">
+            <h4>已授予的执行权限</h4>
+            {grants.length === 0 ? (
+              <p className="help">暂无。模型每次要跑命令都会先问你；关掉工程或切换对话后需要重新批准。</p>
+            ) : (
+              <ul className="perm-list">
+                {grants.map((g) => (
+                  <li key={g.scope.join(" ")} className="perm-item">
+                    <code className="perm-cmd">{g.label || g.scope.join(" ")}</code>
+                    <span className="perm-meta">{g.uses_left === null ? "本工程目录有效" : `还剩 ${g.uses_left} 次`}</span>
+                    <button className="ghost-btn" type="button" onClick={() => onRevoke(g.scope)}>
+                      撤销
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {grants.length > 0 ? (
+              <button className="ghost-btn" type="button" onClick={onRevokeAll}>
+                全部撤销
+              </button>
+            ) : null}
+          </div>
 
           <div className="drawer-actions">
             <button className="primary-btn" id="btnSave" type="button" onClick={() => onSave(draft)}>

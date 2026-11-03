@@ -317,6 +317,28 @@ export function validateToolArgs(name: string, args: Record<string, unknown>): s
   return spec.validate(args);
 }
 
+/**
+ * 把模型给的工具参数原文解成参数对象。
+ *
+ * 单独抽出来，是因为「JSON.parse 成功」不等于「参数可用」：`null`、`[1,2]`、`3`、`"x"`
+ * 都是合法 JSON，parse 完却不是对象，随后 validate 里读 `args.path` 会抛异常——
+ * 如果那一步在 try 外面，整轮对话会被一个畸形参数直接打断。
+ */
+export function parseToolArgs(
+  raw: string
+): { ok: true; args: Record<string, unknown> } | { ok: false; error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw || "{}");
+  } catch {
+    return { ok: false, error: "工具参数不是合法 JSON" };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, error: "工具参数必须是 JSON 对象" };
+  }
+  return { ok: true, args: parsed as Record<string, unknown> };
+}
+
 /** 给模型看的工具说明：放在工作区提示词之后、计划提示词之前 */
 export function buildToolsPrompt(planMode: boolean, confirmWrites: boolean): string {
   const lines = [

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildToolsPrompt,
   findTool,
+  parseToolArgs,
   planModeBlocks,
   TOOL_DEFS,
   TOOLS,
@@ -205,5 +206,41 @@ describe("执行入口", () => {
       })
     );
     expect(out.result).toContain("a.ts:2");
+  });
+});
+
+describe("parseToolArgs：合法 JSON ≠ 可用参数", () => {
+  it("正常对象放行", () => {
+    const r = parseToolArgs('{"path":"a.ts"}');
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.args.path).toBe("a.ts");
+  });
+
+  it("空串当成空对象（模型偶尔不给 arguments）", () => {
+    const r = parseToolArgs("");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.args).toEqual({});
+  });
+
+  it("语法错误报「不是合法 JSON」", () => {
+    const r = parseToolArgs('{"path":');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("不是合法 JSON");
+  });
+
+  // 下面这些都能 JSON.parse 成功，但都不是对象。放过去的话，validate 里读 args.path
+  // 会抛在 try 外面，一个畸形参数就能打断整轮对话。
+  it.each(["null", "[1,2]", "3", '"x"', "true"])("非对象字面量 %s 被归一成错误", (raw) => {
+    const r = parseToolArgs(raw);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe("工具参数必须是 JSON 对象");
+  });
+
+  it("解析失败与类型不对是两种不同错误，别混成一句", () => {
+    const syntax = parseToolArgs("{oops");
+    const type = parseToolArgs("null");
+    expect(syntax.ok).toBe(false);
+    expect(type.ok).toBe(false);
+    if (!syntax.ok && !type.ok) expect(syntax.error).not.toBe(type.error);
   });
 });

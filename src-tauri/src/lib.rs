@@ -6,6 +6,7 @@
 
 mod api;
 mod fsx;
+mod perms;
 mod proxy;
 mod runx;
 mod wsx;
@@ -35,12 +36,20 @@ pub fn spawn_proxy() -> ProxyInfo {
 }
 
 /// 工程根目录的唯一入口：所有文件与命令操作都先经过这里把 sessionId 换成 root。
-///
-/// P0-4 的权限系统（ADR-0002）就接在这一行——`decide()` 会从「这个会话登记过吗」
-/// 升级成「这个操作被批准了吗」，调用点不用再改。现在只做会话边界校验，
-/// 行为与迁移前一致：登记过就放行。
 fn root_for(session_id: &str, op: &str) -> Result<PathBuf, String> {
     wsx::root_of(session_id).map_err(|e| format!("{op}：{e}"))
+}
+
+/// exec 闸门：`run_allowed` 的真正入口。
+///
+/// 这个函数存在的唯一目的，是让「有没有被批准」由 Rust 判定，而不是由前端。
+/// 前端能做的是弹框问用户，那是体验；没有用户批准就起不了子进程，才是安全属性。
+/// 判定在 IPC 后面，所以 devtools、前端 bug、将来接进来的第三方脚本都跳不过去。
+///
+/// 错误用 JSON 字符串回传，让前端能区分「需要授权」与「白名单拒绝」：
+/// 前者该弹框，后者该直接告诉模型换个写法。
+fn gate_exec(session_id: &str, argv: &[String]) -> Result<(), String> {
+    perms::guard(session_id, argv).map_err(|denied| denied.to_json())
 }
 
 /// 工作区会话：工程目录只在这里登记一次，之后前端只认 sessionId。
@@ -53,6 +62,9 @@ mod ws_cmds {
 
     #[tauri::command]
     pub fn ws_close(session_id: String) -> Result<(), String> {
+        // 授权跟着会话走：会话一关，先前批过的执行许可全部作废。
+        // 顺序上先清授权再关会话——反过来的话 close 失败会留下孤儿授权。
+        crate::perms::clear_session(&session_id);
         crate::wsx::close(&session_id)
     }
 
@@ -125,6 +137,24 @@ mod fs_cmds {
         let root = crate::root_for(&session_id, "写撤销快照")?;
         crate::fsx::undo_write(&root, &stamp, &rel, content)
     }
+
+    /// 撤销快照的读取通道：`fs_read` / `fs_list_in` 对 `.zxz/undo` 已关闭，
+    /// 撤销面板改走这两条。`stamp` 为 null 时列出快照目录列表。
+    #[tauri::command]
+    pub fn undo_list(
+        session_id: String,
+        stamp: Option<String>,
+        rel: String,
+    ) -> Result<Vec<crate::fsx::FsEntry>, String> {
+        let root = crate::root_for(&session_id, "列撤销快照")?;
+        crate::fsx::undo_list(&root, stamp.as_deref(), &rel)
+    }
+
+    #[tauri::command]
+    pub fn undo_read(session_id: String, stamp: String, rel: String) -> Result<String, String> {
+        let root = crate::root_for(&session_id, "读撤销快照")?;
+        crate::fsx::undo_read(&root, &stamp, &rel)
+    }
 }
 
 /// 受控命令执行 IPC 壳：白名单、超时、输出上限都在 runx 里，壳只做参数转发。
@@ -132,10 +162,47 @@ mod fs_cmds {
 ///
 /// 工作目录只来自会话登记的根目录：这里不收、也不认任何 cwd 参数。
 mod run_cmds {
+    /// 执行一条已经获批的白名单命令。
+    ///
+    /// 注意执行顺序：先确认会话（root 拿得到），再过授权闸门，最后才 spawn。
+    /// `gate_exec` 不能省、也不能挪到前端——它是「没有用户批准就起不了进程」
+    /// 这句话的唯一实现。
     #[tauri::command]
     pub fn run_allowed(session_id: String, argv: Vec<String>) -> Result<crate::runx::RunResult, String> {
         let root = crate::root_for(&session_id, "执行命令")?;
+        crate::gate_exec(&session_id, &argv)?;
         crate::runx::run_allowed(&root, &argv)
+    }
+}
+
+/// 执行许可 IPC：查询、授予、撤销、列举。
+///
+/// `perm_grant` 是唯一能创建授权的入口，它只被前端界面调用——工具清单里没有它，
+/// 模型无法通过工具调用触达。也不存在「先跑起来再自己授权」这条路：
+/// 模型写的代码要跑起来，本身就得先过 `run_cmds::run_allowed` 的闸门。
+mod perm_cmds {
+    /// `uses` 为 null 表示本会话内不限次，为数字表示还能用几次
+    #[tauri::command]
+    pub fn perm_grant(
+        session_id: String,
+        scope: Vec<String>,
+        uses: Option<u32>,
+        label: String,
+    ) -> Result<Vec<crate::perms::Grant>, String> {
+        crate::root_for(&session_id, "授予执行许可")?;
+        Ok(crate::perms::grant(&session_id, &scope, uses, label))
+    }
+
+    #[tauri::command]
+    pub fn perm_revoke(session_id: String, scope: Option<Vec<String>>) -> Result<Vec<crate::perms::Grant>, String> {
+        crate::root_for(&session_id, "撤销执行许可")?;
+        Ok(crate::perms::revoke(&session_id, scope.as_deref()))
+    }
+
+    #[tauri::command]
+    pub fn perm_list(session_id: String) -> Result<Vec<crate::perms::Grant>, String> {
+        crate::root_for(&session_id, "查看执行许可")?;
+        Ok(crate::perms::list(&session_id))
     }
 }
 
@@ -154,7 +221,12 @@ pub fn run() {
             fs_cmds::fs_exists,
             fs_cmds::fs_write,
             fs_cmds::undo_write,
-            run_cmds::run_allowed
+            fs_cmds::undo_list,
+            fs_cmds::undo_read,
+            run_cmds::run_allowed,
+            perm_cmds::perm_grant,
+            perm_cmds::perm_revoke,
+            perm_cmds::perm_list
         ])
         .setup(|_app| {
             let _ = PROXY.set(proxy::spawn());

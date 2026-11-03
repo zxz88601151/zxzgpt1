@@ -17,6 +17,9 @@ mod runx;
 #[path = "../../../src-tauri/src/wsx.rs"]
 mod wsx;
 
+#[path = "../../../src-tauri/src/perms.rs"]
+mod perms;
+
 fn main() {
     let dir = std::env::args().nth(1).unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
     println!("roots = {:?}", fsx::roots());
@@ -156,7 +159,9 @@ mod wsx_tests {
 
 #[cfg(test)]
 mod runx_tests {
+    use super::perms;
     use super::runx;
+    use super::wsx;
     use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
@@ -410,6 +415,125 @@ mod runx_tests {
         assert!(r.truncated, "超限输出必须标记 truncated");
         assert_eq!(r.stdout.chars().count(), 20000, "展示层截断失败");
         assert!(r.exit_code.is_some(), "超限不能把退出码弄丢——那会让测试回路误判通过");
+    }
+
+    /// exec 默认 ask 的端到端证据。
+    ///
+    /// 「闸门拒绝了」这句话本身不是证据——命令可能压根起不来（脚本写错、
+    /// npm 不在 PATH），那样 marker 也不会出现，测试会假通过。所以必须同时有
+    /// 对照组：授权之后同一条命令要真的跑起来、真的写出 marker。
+    /// 只有「未授权不出现 + 授权后出现」这一对，才证明拦的是执行本身。
+    #[test]
+    fn unapproved_exec_cannot_start_a_process() {
+        let dir = npm_project("permgate", "require('fs').writeFileSync('ran.txt', 'hit');\n");
+        let s = wsx::open(&dir.to_string_lossy()).unwrap();
+        let root = wsx::root_of(&s.id).unwrap();
+        let cmd = argv(&["npm", "run", "build"]);
+        let marker = dir.join("ran.txt");
+
+        // 被测组：全新会话没有任何授权
+        match perms::guard(&s.id, &cmd) {
+            Err(perms::GateDenied::NeedGrant { scope, .. }) => {
+                assert_eq!(scope, vec!["npm", "run", "build"], "授权粒度必须是命令+子命令");
+            }
+            other => panic!("新会话必须是 NeedGrant，实际 {other:?}"),
+        }
+        assert!(!marker.exists(), "闸门拒绝了，但命令还是跑起来了");
+
+        // 对照组：批准之后必须真的能跑，否则上面的「没出现」说明不了任何事
+        perms::grant(&s.id, &["npm".into(), "run".into(), "build".into()], None, "build".into());
+        assert!(perms::guard(&s.id, &cmd).is_ok());
+        let r = runx::run_allowed(&root, &cmd).unwrap();
+        assert!(r.exit_code.is_some(), "对照组命令没跑起来：{:?}", r.stderr);
+        assert!(marker.exists(), "对照组失效：授权后命令仍然没执行，这条用例证明不了闸门");
+
+        // 撤销之后立刻不能再用
+        perms::revoke(&s.id, None);
+        assert!(matches!(perms::guard(&s.id, &cmd), Err(perms::GateDenied::NeedGrant { .. })));
+
+        wsx::close(&s.id).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 授权不能覆盖白名单：给一条危险命令批了也没用。
+    ///
+    /// 这条防的是「审批把白名单架空」——如果 decide 先看授权再看白名单，
+    /// 用户一次误点就等于永久开了 `npm install`。
+    #[test]
+    fn grant_cannot_override_the_allowlist() {
+        let s = wsx::open(&std::env::temp_dir().to_string_lossy()).unwrap();
+        perms::grant(&s.id, &["npm".into(), "install".into()], None, "install".into());
+        perms::grant(&s.id, &["git".into(), "push".into()], None, "push".into());
+        match perms::guard(&s.id, &argv(&["npm", "install"])) {
+            Err(perms::GateDenied::Refused { reason }) => assert!(reason.contains("npm 只允许"), "{reason}"),
+            other => panic!("白名单必须先拒，实际 {other:?}"),
+        }
+        assert!(matches!(perms::guard(&s.id, &argv(&["git", "push"])), Err(perms::GateDenied::Refused { .. })));
+        wsx::close(&s.id).unwrap();
+    }
+
+    /// 授权不能跨工程目录继承，也不能在会话关闭后存活。
+    ///
+    /// 注意一个已知语义（见 wsx::open）：同一个目录重复登记会复用同一个 sessionId，
+    /// 所以授权实际是「按工程目录」记账的，不是「按对话」。这是有意的——启动恢复、
+    /// 重新选中都幂等。代价是同一目录的多个对话共享授权，因此前端在切换对话时
+    /// 会主动调 perm_revoke 把它收回到「当前对话」。
+    #[test]
+    fn grant_does_not_survive_session_close_or_leak_across_sessions() {
+        let dir_a = npm_project("permleak-a", "console.log('a');\n");
+        let dir_b = npm_project("permleak-b", "console.log('b');\n");
+        let a = wsx::open(&dir_a.to_string_lossy()).unwrap();
+        let b = wsx::open(&dir_b.to_string_lossy()).unwrap();
+        assert_ne!(a.id, b.id, "不同目录必须是不同会话");
+
+        perms::grant(&a.id, &["git".into(), "status".into()], None, "status".into());
+        assert!(perms::guard(&a.id, &argv(&["git", "status"])).is_ok());
+        // 另一个工程目录不能沾光
+        assert!(matches!(perms::guard(&b.id, &argv(&["git", "status"])), Err(perms::GateDenied::NeedGrant { .. })));
+
+        // 同一目录再 open 会复用同一会话（幂等），授权因此跟着目录走
+        let again = wsx::open(&dir_a.to_string_lossy()).unwrap();
+        assert_eq!(again.id, a.id, "wsx::open 对同目录是幂等的，这条是授权按目录记账的原因");
+
+        wsx::close(&a.id).unwrap();
+        // wsx::close 只关会话；授权清理是 lib.rs 的 ws_close 命令做的。
+        // 这里显式走一遍同样的清理，验证清理之后确实失效。
+        perms::clear_session(&a.id);
+        assert!(matches!(perms::guard(&a.id, &argv(&["git", "status"])), Err(perms::GateDenied::NeedGrant { .. })));
+        // 会话已关闭时，连闸门都进不去（root_of 先拒）
+        assert!(wsx::root_of(&a.id).is_err());
+        wsx::close(&b.id).unwrap();
+        let _ = fs::remove_dir_all(&dir_a);
+        let _ = fs::remove_dir_all(&dir_b);
+    }
+
+    /// 架构约束：生产代码里 `runx::run_allowed` 只能有**一个**调用点，且在闸门之后。
+    ///
+    /// 这个断言防的是「以后再加一个执行 IPC，顺手直接调了 run_allowed」——
+    /// 那种改动编译通过、功能正常、审计时很难注意到，但正好把 exec 默认 ask 绕开了。
+    /// 用读源码的方式做检查不算优雅，但它是唯一能在 CI 无 GUI 环境里跑起来的约束。
+    #[test]
+    fn exec_has_exactly_one_guarded_entry_point() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let lib = fs::read_to_string(root.join("src-tauri/src/lib.rs")).expect("读不到 lib.rs");
+        let hits: Vec<usize> = lib.match_indices("crate::runx::run_allowed").map(|(i, _)| i).collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "lib.rs 里 runx::run_allowed 应当只有一个调用点（闸门后面那个），实际 {} 个",
+            hits.len()
+        );
+        let i = hits[0];
+        // 按字符边界回退：直接 i-300 可能切在一个多字节汉字中间，panic 起来像测试坏了
+        let mut start = i.saturating_sub(300);
+        while start > 0 && !lib.is_char_boundary(start) {
+            start -= 1;
+        }
+        let before = &lib[start..i];
+        assert!(
+            before.contains("gate_exec"),
+            "唯一的执行调用点前面没有 gate_exec —— exec 默认 ask 被绕开了"
+        );
     }
 
     /// 相对路径不能当工作目录：cwd 只认会话登记出来的绝对路径

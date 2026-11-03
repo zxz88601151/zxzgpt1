@@ -184,6 +184,24 @@ export async function undoWrite(sessionId: string, stamp: string, rel: string, c
   }
 }
 
+/** 撤销快照读取：`fsRead` / `fsListIn` 对 `.zxz/undo` 已关闭，撤销面板走这两条。 */
+export async function undoRead(sessionId: string, stamp: string, rel: string): Promise<string> {
+  try {
+    return await call<string>("undo_read", { sessionId, stamp, rel });
+  } catch (e) {
+    throw new Error(errText(e));
+  }
+}
+
+/** `stamp` 为 null 时列出快照目录；给出时列出该快照内 `rel` 子目录（空串 = 快照根） */
+export async function undoList(sessionId: string, stamp: string | null, rel: string): Promise<FsEntry[]> {
+  try {
+    return await call<FsEntry[]>("undo_list", { sessionId, stamp, rel });
+  } catch (e) {
+    throw new Error(errText(e));
+  }
+}
+
 export interface RunResult {
   exit_code: number | null;
   stdout: string;
@@ -192,18 +210,95 @@ export interface RunResult {
   truncated: boolean;
 }
 
+/** 一条执行授权：作用域是「命令 + 子命令」，例如 ["npm","test"] */
+export interface ExecGrant {
+  scope: string[];
+  /** null = 本会话（本工程目录）内不限次 */
+  uses_left: number | null;
+  label: string;
+}
+
+export type ExecDecision =
+  | { kind: "allow" }
+  | { kind: "ask"; scope: string[]; label: string }
+  | { kind: "deny"; reason: string };
+
+/**
+ * Rust 侧的 exec 闸门要求用户先授权。
+ *
+ * 这个类存在的意义是让界面能区分「需要弹框问人」和「命令本身被拒绝」：
+ * 前者该等用户点头，后者该直接把原因告诉模型换个写法。两者混在一起的话，
+ * 会给 `npm install` 也弹一个确认框，用户点了允许才发现白名单还是拒的。
+ */
+export class ExecGrantRequired extends Error {
+  readonly scope: string[];
+  readonly label: string;
+  constructor(scope: string[], label: string) {
+    super(`需要授权：${label}`);
+    this.name = "ExecGrantRequired";
+    this.scope = scope;
+    this.label = label;
+  }
+}
+
+/** Rust 用 JSON 字符串回传闸门判定，这里还原成上面两种错误 */
+function toExecError(e: unknown): Error {
+  const text = errText(e);
+  if (text.startsWith("{")) {
+    try {
+      const j = JSON.parse(text) as { kind?: unknown; scope?: unknown; label?: unknown; reason?: unknown };
+      if (j.kind === "need_grant") {
+        const scope = Array.isArray(j.scope) ? j.scope.map(String) : [];
+        return new ExecGrantRequired(scope, typeof j.label === "string" ? j.label : scope.join(" "));
+      }
+      if (j.kind === "refused" && typeof j.reason === "string") return new Error(j.reason);
+    } catch {
+      /* 不是闸门的 JSON，落到原文 */
+    }
+  }
+  return new Error(text);
+}
+
 /**
  * 受控命令执行：只在 Tauri 桌面端可用，浏览器直开时直接报错。
- * 白名单、超时、输出上限都在 Rust 侧（runx.rs）再校验一次，这里不做最终裁决，
- * 只做参数转发与错误归一；前端的 isAllowedCommand 只是提前拦截、省一次 IPC。
+ * 白名单、超时、输出上限都在 Rust 侧（runx.rs）再校验一次，这里不做最终裁决；
+ * **执行许可也在 Rust 侧判定**，未批准时抛 `ExecGrantRequired`。
  * 工作目录由 Rust 按 sessionId 决定，这里传不了 cwd。
  */
 export async function runAllowed(sessionId: string, argv: string[]): Promise<RunResult> {
   try {
     return await call<RunResult>("run_allowed", { sessionId, argv });
   } catch (e) {
-    throw new Error(errText(e));
+    throw toExecError(e);
   }
+}
+
+/**
+ * 记一条授权。`uses` 为 null 表示本会话内不限次，为数字表示还能用几次。
+ *
+ * 这是唯一能创建授权的入口，只被界面调用——工具清单里没有它，模型无法通过
+ * 工具调用触达；也不存在「先跑起来再自己授权」的路：模型写的代码要跑起来，
+ * 本身就得先过闸门。
+ */
+export async function permGrant(sessionId: string, scope: string[], uses: number | null, label: string): Promise<ExecGrant[]> {
+  try {
+    return await call<ExecGrant[]>("perm_grant", { sessionId, scope, uses, label });
+  } catch (e) {
+    throw toExecError(e);
+  }
+}
+
+/** 撤销授权。不传 scope 就清空该会话的全部授权 */
+export async function permRevoke(sessionId: string, scope?: string[]): Promise<ExecGrant[]> {
+  try {
+    return await call<ExecGrant[]>("perm_revoke", { sessionId, scope });
+  } catch (e) {
+    throw toExecError(e);
+  }
+}
+
+export async function permList(sessionId: string): Promise<ExecGrant[]> {
+  return call<ExecGrant[]>("perm_list", { sessionId });
 }
 
 /** 拼出给模型看的目录树（深度优先，忽略依赖与构建产物，最多 300 条） */

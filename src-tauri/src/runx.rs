@@ -74,9 +74,11 @@ const ENV_KEEP: [&str; 19] = [
 
 /// 子进程最终能看到的环境变量键（白名单 + 下面显式注入的 git 隔离项）。
 ///
-/// 对外暴露只为一件事：让测试能判定「子进程有没有多拿到东西」。
+/// 仅供测试：用来判定「子进程有没有多拿到东西」。
 /// 有了它，隔离性就是可判定的——不用往宿主环境里塞哨兵（那会污染并发测试），
 /// 直接比「子进程报上来的键集合」和「应该有的键集合」即可。
+/// 生产代码不需要这个键表：真正生效的是下面 spawn 处那份显式 `.env()` 列表。
+#[cfg(test)]
 pub fn allowed_env_keys() -> Vec<&'static str> {
     let mut v: Vec<&'static str> = ENV_KEEP.to_vec();
     v.extend([
@@ -147,6 +149,14 @@ fn strip_exec_ext(cmd: &str) -> &str {
 /// 命令名里不能带路径分隔符：白名单只认 PATH 上的裸命令名，不给可执行文件的路径。
 fn has_path_sep(cmd: &str) -> bool {
     cmd.contains('/') || cmd.contains('\\')
+}
+
+/// 命令名的规范化形式：去掉可执行后缀再转小写（`NPM.CMD` → `npm`）。
+///
+/// 白名单与权限 scope 必须用同一个规范化，否则「授权 npm test、执行 npm.cmd test」
+/// 会被判成两个不同的东西——那不是更安全，只是把两边的一致性又交给了人工同步。
+pub fn normalize_cmd(cmd: &str) -> String {
+    strip_exec_ext(cmd).to_ascii_lowercase()
 }
 
 /// PATH 里能不能找到这个文件（只看是不是普通文件，不执行它）
@@ -269,6 +279,13 @@ struct NpmScripts {
 
 /// 执行 npm 脚本命令前的权威审计：argv 过了白名单还不够，脚本内容也要过。
 /// package.json 缺失/解析失败 → scripts.test 不存在 → 一律拒绝。
+///
+/// **必须连生命周期钩子一起审**。npm 跑 `npm test` 时实际执行的是
+/// `pretest → test → posttest`，跑 `npm run build` 时是 `prebuild → build → postbuild`。
+/// 只审 `<name>` 一个键的话，模型只要写 `{"scripts":{"pretest":"node evil.js",
+/// "test":"vitest run"}}`，用户在确认框里看到「npm test」、主脚本也通过审计，
+/// 而 `pretest` 已经以当前用户权限跑了任意命令——批准的与实际执行的不是同一个东西。
+/// 存在即审，缺失不管（`pretest` 本来就可以不存在）。
 fn check_npm_script(root: &Path, argv: &[String]) -> Result<(), String> {
     let Some(name) = npm_script_name(argv) else {
         return Ok(());
@@ -277,15 +294,30 @@ fn check_npm_script(root: &Path, argv: &[String]) -> Result<(), String> {
         .map_err(|_| "无法读取工程根目录的 package.json，不能审计 npm 将要执行的脚本，命令已拒绝".to_string())?;
     let parsed: NpmScripts =
         serde_json::from_str(&raw).map_err(|e| format!("package.json 解析失败，无法审计 npm 脚本：{e}"))?;
-    let script = parsed.scripts.as_ref().and_then(|m| m.get(name));
-    match script {
-        Some(s) if is_safe_npm_script(s) => Ok(()),
-        Some(s) => Err(format!(
-            "package.json 的 scripts.{name}（{}）不在受信任运行器清单里，命令已拒绝",
-            s.chars().take(120).collect::<String>()
-        )),
-        None => Err(format!("package.json 里没有 scripts.{name}，命令已拒绝")),
+    let scripts = parsed
+        .scripts
+        .as_ref()
+        .ok_or_else(|| format!("package.json 里没有 scripts.{name}，命令已拒绝"))?;
+
+    let check = |key: &str, s: &str| -> Result<(), String> {
+        if is_safe_npm_script(s) {
+            Ok(())
+        } else {
+            Err(format!(
+                "package.json 的 scripts.{key}（{}）不在受信任运行器清单里，命令已拒绝",
+                s.chars().take(120).collect::<String>()
+            ))
+        }
+    };
+
+    let primary = scripts.get(name).ok_or_else(|| format!("package.json 里没有 scripts.{name}，命令已拒绝"))?;
+    check(name, primary)?;
+    for hook in [format!("pre{name}"), format!("post{name}")] {
+        if let Some(s) = scripts.get(&hook) {
+            check(&hook, s)?;
+        }
     }
+    Ok(())
 }
 
 /// 白名单校验：Ok 表示允许，Err 是中文拒绝原因。前端 tools.ts 里有一份镜像逻辑。

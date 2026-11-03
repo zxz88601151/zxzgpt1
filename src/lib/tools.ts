@@ -214,6 +214,11 @@ export function npmScriptName(argv: string[]): string | null {
  * run_command 执行前的脚本审计：argv 过了 argv 白名单，还不够——
  * 还要看它将要执行的 package.json 脚本内容。返回 null 表示放行，
  * 否则返回中文拒绝原因。pkgRaw 是 package.json 原文（调用方负责读）。
+ *
+ * npm 跑 `npm test` 实际执行 `pretest → test → posttest`，跑 `npm run build`
+ * 是 `prebuild → build → postbuild`。只审主脚本等于把任意命令挂在钩子上：
+ * 用户批准的是「npm test」，真正执行的却是 `pretest` 里那条。三个键都要审。
+ * 与 Rust `runx.rs` 的 check_npm_script 保持一致。
  */
 export function checkNpmCommandScript(argv: string[], pkgRaw: string): string | null {
   const name = npmScriptName(argv);
@@ -224,12 +229,23 @@ export function checkNpmCommandScript(argv: string[], pkgRaw: string): string | 
   } catch {
     return "package.json 解析失败，无法审计 npm 将要执行的脚本，命令已拒绝";
   }
-  const script = pkg?.scripts?.[name];
-  if (typeof script !== "string" || !script.trim()) {
-    return `package.json 里没有可审计的 scripts.${name}，命令已拒绝`;
-  }
-  if (!isSafeNpmScript(script)) {
-    return `npm 将要执行的 scripts.${name} 不在受信任运行器清单里（只认 vitest / jest / mocha / node --test / tsc / vite / eslint），命令已拒绝`;
+  const scripts = pkg?.scripts;
+  const check = (key: string, script: unknown): string | null => {
+    if (typeof script !== "string" || !script.trim()) {
+      return `package.json 里没有可审计的 scripts.${key}，命令已拒绝`;
+    }
+    if (!isSafeNpmScript(script)) {
+      return `npm 将要执行的 scripts.${key} 不在受信任运行器清单里（只认 vitest / jest / mocha / node --test / tsc / vite / eslint），命令已拒绝`;
+    }
+    return null;
+  };
+  const primary = check(name, scripts?.[name]);
+  if (primary) return primary;
+  for (const hook of [`pre${name}`, `post${name}`]) {
+    const script = scripts?.[hook];
+    if (script === undefined) continue;
+    const bad = check(hook, script);
+    if (bad) return bad;
   }
   return null;
 }
