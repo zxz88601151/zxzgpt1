@@ -26,3 +26,40 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --manifest-path tools/fs-harness/Cargo.toml
+
+  e2e:
+    # 浏览器直连通道的端到端（对应 README 9.2）。代理通道要编 Rust harness，
+    # 见 README 9.3，暂不进 CI。
+    #
+    # 独立成 job 而不是塞进 frontend：e2e 依赖浏览器，比单测脆，出问题时要能
+    # 一眼看出是"e2e 挂了"还是"单测挂了"。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # playwright 在 devDependencies 里，但它自带的是驱动、不含浏览器本体。
+      # --with-deps 会顺带装 Linux 侧缺的库（没有它 chromium 起不来，报的是
+      # 一堆 libnss3/libatk 缺失，看着像代码问题）。
+      - run: npx playwright install --with-deps chromium
+      - name: 起 vite 与假上游
+        run: |
+          npx vite --port 1420 --strictPort > /tmp/vite.log 2>&1 &
+          node tools/mock-upstream.cjs 19888 > /tmp/mock.log 2>&1 &
+          # 不用 wait-on：那要再加一个依赖。curl 在 ubuntu-latest 上现成有。
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null http://localhost:1420/ \
+               && curl -sf -o /dev/null http://127.0.0.1:19888/v1/models; then
+              echo "两个服务都起来了"; exit 0
+            fi
+            sleep 1
+          done
+          echo "服务没起来，日志如下"; tail -40 /tmp/vite.log /tmp/mock.log; exit 1
+      - name: 跑 e2e
+        run: node tools/e2e.cjs
+      - name: 失败时打印服务日志
+        if: failure()
+        run: tail -60 /tmp/vite.log /tmp/mock.log

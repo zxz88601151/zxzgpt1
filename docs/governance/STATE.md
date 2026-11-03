@@ -82,6 +82,7 @@
 | B12-A · 传输层判据 | 新增 `src/api.test.ts` 37 条：上游错误 / SSE 分帧 / 断流 / 工具增量 / Key 不进 URL 与请求头；独立复审后补 JSON 兜底与 `done` 唯一性两组 | **PASS** | 前端 **437**；8 次变异检验各自精确变红一条；CI `ci.yml:18` 直接覆盖；e2e 24/39/69 + 代理接口 11 全绿 |
 | B14-A · e2e 可复现 | `tools/browser.cjs` 逐级回落（env → msedge → chrome → 自带 chromium）；五个脚本去掉写死的 `channel`；默认 BASE 统一 `localhost:1420`；`proxy-e2e` 显式把 `ZXZ_BASE` 传给子进程 | **PASS** | 不传任何环境变量实测：`e2e` 24/24、`proxy-e2e` 11+24、`workspace` 39/39、`skill` 69/69；`ZXZ_BROWSER_CHANNEL="nope,msedge"` 真走进回落分支 |
 | B12-B1 · 渲染夹具 | 业主批准后装 `jsdom@25`；`vitest.config.ts` 收 `*.test.tsx`（环境仍是 node，DOM 按文件声明）；新增 `src/app.test.tsx`：jsdom 里能挂载、空输入不发请求、有输入点发送真的打到 `/chat/completions` 且流回的 delta 渲染成回答 | **PASS** | 前端 **441**（19 文件）；3 次变异检验各自变红一条（去掉空输入守卫 / 改错上游路径 / 断掉 delta 追加） |
+| B14-B · e2e 进 CI | 业主批准把 `playwright@1.64.1` 写进 `devDependencies`；`ci.yml` 新增独立 `e2e` job（`npm ci` → `playwright install chromium` → 起 vite + 假上游 → `node tools/e2e.cjs`） | **NOT_TESTED** | `npm ci --dry-run` 通过（锁文件一致）；YAML 结构自检通过（3 个 job、0 制表符）；job 内的命令与本地实跑的命令逐条一致。**但 job 本身从未在 GitHub 上执行过**——本地跑不了 Actions，不给 PASS |
 
 ### 下一批（按优先级）
 
@@ -90,19 +91,17 @@
 
 | # | 任务 | 为什么现在 | 验收 |
 |---|---|---|---|
-| B14 | e2e 进 CI 的三个前置（D-08） | 唯一能覆盖真实 WebView 的手段；R3 三个成因已逐个实测确认，都可修 | CI 上 `e2e.cjs` 能跑 |
-| B12-B | `send()` 接线层判据（D-02 剩余） | 两层纯函数都有判据了，接线层仍靠人眼 | 需业主选路线，见下 |
-| B14-B | 把 `playwright` 写进 `devDependencies`（D-08 最后一步） | `npm ci` 后 e2e 会因缺 playwright 跑不了；这是加依赖，**等业主批** | CI 上 `npm ci && npm test && node tools/e2e.cjs` 全通 |
+| B12-B2 | `send()` 整轮重放场景（D-02 剩余） | 夹具已通（B12-B1），现在可以往里加场景了：上游报错、工具调用后再失败、中途停止 | 至少 1 类"上游错误"场景在 CI 的 `npm test` 里跑 |
+| B12-B3 | 场景齐了之后，把 `send()` 搬进 `src/orchestration/`（D-06） | 有网之后再动 320 行闭包才安全；否则等于"没判据且刚大改过" | `App.tsx` 行数下降且 441 条断言不变绿→红 |
 | D-16 | 代理把「用户点停止」记成「连接处理失败」 | 日志在说谎的方向是「平时天天报错，真故障时反而不显眼」 | 中断时不再打错误 |
+| 首次 CI 运行 | 看 `e2e` job 到底能不能跑通（B14-B 标的是 `NOT_TESTED`） | job 已写好，但从没在 GitHub 上执行过。首次推送后需据此改成 PASS 或按真实报错修 | 截图/日志中 `e2e` job 为绿 |
 
-> **B14 有一步撞甲方保留权限**：三个前置里「playwright 入依赖」要改 `package.json`（新增第三方依赖）。
-> 另两个（去掉 `channel:"msedge"` 硬编码、端口 5173 vs 1420 对齐）不涉及依赖，可以先做。
+> **B12-B 路线已定**：业主选了「先装 jsdom 拿判据，再拆 `send()`」。
+> B12-B1 已完成（`jsdom@25` 已装，App 能在 jsdom 里挂载并被驱动，4 条用例 + 3 次变异检验）。
+> 顺序是刻意的：先有回归网，再动全仓最热的那段代码——反过来就是把"没判据"升级成"没判据且刚大改过"。
 >
-> **B12-B 需要业主在两条路线里选**，两者回滚成本差别很大，不替业主决定：
-> 1. **先有判据再拆**：装 `jsdom`（甲方保留权限）→ 渲染 `App` 跑整轮重放 → 再动 `send()`。
->    安全，但要加依赖。
-> 2. **拆完再补**：把 `send()` 的副作用改成注入式、整体搬进 `src/orchestration/`（node 环境即可测，
->    顺带解决 D-06 的 1520 行）。不加依赖，但动的是全仓最热、零覆盖的 320 行闭包。
+> **B14 依赖已批准**：`playwright@1.64.1` 已进 `devDependencies`，`e2e` job 已写。
+> 只剩"它到底跑不跑得通"这一件事没法在本地验证。
 >
 > 两条都没擅自开工。
 
@@ -112,7 +111,7 @@
 |---|---|---|---|
 | R1 | release exe 落后于 HEAD | 高 | `src-tauri/target/release/zxz.exe` 内嵌的仍是 `index-CQlZK13B.js`，而当前构建产物是 `index-BUPLjQ7F.js`（相差 B3–B8 共 6 批改动）。**未重编前不得声称交付物含任何本轮修复** |
 | R2 | 无安装包 | 高 | `bundle.targets: "all"` 配置存在但从未产出；`WebView2` 走 `downloadBootstrapper`，离线不可用 |
-| R3 | e2e 不可复现 | ~~中~~ 低 | 三个成因里**两个已修（B14-A）**：`channel:"msedge"` 硬编码 → `tools/browser.cjs` 逐级回落；端口 5173 vs 1420 → 默认 `localhost:1420` 且子进程显式继承 `ZXZ_BASE`。实测四套脚本**零环境变量**可跑（24 / 39 / 69 / 11+24）。剩 `playwright` 未入 `devDependencies`，`npm ci` 后会消失——加依赖需业主批准 |
+| R3 | e2e 不可复现 | ~~中~~ 低 | 三个成因全部处理（B14-A + 业主批准加依赖）：`msedge` 硬编码 → `tools/browser.cjs` 逐级回落；端口 → `localhost:1420` 且子进程继承 `ZXZ_BASE`；`playwright` 入 `devDependencies`。`ci.yml` 已加 `e2e` job。**但该 job 从未在 GitHub 上实际跑过**（本地跑不了 Actions），只能标 `NOT_TESTED`；首次推送后需要看一次运行结果 |
 | R4 | ~~release 无条件带 devtools~~ | ~~中~~ | **已解除**（B16）：`tauri` 依赖不再带 devtools 特性；debug 构建行为不变 |
 | R5 | 推送/发布未授权 | — | 按宪章 §3，push / 打安装包需业主显式授权 |
 

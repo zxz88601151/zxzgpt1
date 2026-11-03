@@ -40,7 +40,7 @@
 | D-05 | P2 | 渲染进程可对任意绝对路径 `fs_list` / `fs_mkdir` | `lib.rs` 的 `fs_cmds::fs_list` / `fs_mkdir` 是无状态命令，不校验会话 | 选择器天生要能浏览（设计如此），但一旦渲染进程被攻破（XSS/恶意依赖），可枚举全盘目录、在全盘建空目录。写入/读取内容仍被会话通道挡住 | 设计取舍，未修 |
 | D-06 | P2 | `App.tsx` 1520 行上帝组件 + `stateRef` 手工双写 | ADR 0001 验收项 `App.tsx < 500 行` 仍为 `[ ]` | 任何 UI 改动的回归面都很大 | 未修（ADR 0001 未完成） |
 | D-07 | P2 | 存档单键、无 `schemaVersion` | `zxz.state.v1` 一把梭；`250ms` 全量写，含 `streaming` 中间态 | 字段语义变更无法迁移；写放大 | 未修 |
-| D-08 | P2 | e2e 进不了 CI | R3 三个成因里**两个已修**：`msedge` 硬编码 → `tools/browser.cjs` 逐级回落；端口 5173 vs 1420 → 默认改成 `localhost:1420` + 子进程显式继承 `ZXZ_BASE`。剩 `playwright` 未入 `devDependencies` | e2e 只能人工跑，回归靠自觉。现在四套脚本**零环境变量**可跑，但 `npm ci` 后仍会因缺 playwright 跑不了 | 部分修复（B14-A），最后一步需业主批准加依赖 |
+| D-08 | P2 | e2e 进不了 CI | R3 三个成因全部处理：`msedge` 硬编码 → `tools/browser.cjs` 逐级回落；端口 5173 vs 1420 → 默认 `localhost:1420` + 子进程显式继承 `ZXZ_BASE`；`playwright` 已入 `devDependencies`（业主批准）。`ci.yml` 新增 `e2e` job | 本地四套脚本零环境变量可跑；CI 里那个 job **从未在 GitHub 上实际执行过**（本地跑不了 Actions），所以只能标 `NOT_TESTED` 而不是 `PASS` | 已接入，待首次运行确认 |
 | D-09 | ~~P2~~ | ~~release 无条件带 devtools~~ | `tauri/Cargo.toml` 的 `features=["devtools"]` 无 `cfg(debug_assertions)` 门控 | 发布物给用户附赠一个调试接口 | **已修**，见 §4 第 19 条 |
 | D-10 | P3 | 一次性授权在闸门处即扣，spawn 失败也扣 | `perms::decide` 在 `runx` 之前扣 `uses_left` | 用户要再批一次。失败方向是**更严**，不是更松 | 取舍，已写入 README 14.2.1 |
 | D-11 | P3 | `GIT_CONFIG_GLOBAL=<空设备>` 同时丢掉用户的 `safe.directory` | `runx.rs` 的 git 隔离项 | 仓库属主不同时报 `dubious ownership`。报错明确，不是静默错误结果；保留用户配置等于重新打开 `textconv` 那扇门 | 取舍（DEC-003 的直接后果） |
@@ -121,6 +121,7 @@ D-06 排第一不代表马上动手：它要动全仓最热、零覆盖的 320 �
 | 21 | **要了流式、上游返回整段 JSON → 静默空回答**（独立复审揪出） | `api.ts:115` 的条件只判 `!wantStream`，注释却写着"或代理返回一次性 JSON"。`stream` 默认 true，于是 JSON 被当 SSE 逐行解析、一行都不以 `data:` 开头 → 零 delta、零报错，用户看到空回答。改成 `isJson = contentType.includes("json")` 参与判定：上游明确说是 JSON 就走一次性分支。**复现**：先加用例（红：`[{"type":"done"}]`）→ 再改代码（绿）。变异检验：撤掉 `isJson` → 恰好 1 条红 |
 | 22 | **代理模式下 `done` 发两条、且第一条排在 `tool_calls` 之前**（独立复审揪出） | `proxy.rs:295` 无条件发 `done`，`api.ts:191` 原样转发，`api.ts:242` 再补一条。断言它"就是两条"等于把缺陷固化成契约。现改为 `if (json.type === "done") return;`，统一由 `api.ts` 在流末发唯一一条。**当前对 App 无可见后果**（`grep '"done"' src/App.tsx` 为 0，没有消费者），属预防性修复——但顺序错误会让将来任何按 `done` 收尾的消费者整轮丢掉工具调用，所以不留 |
 | 23 | e2e 脚本写死 `msedge`、默认端口 5173（B14-A） | 新建 `tools/browser.cjs`：按 `ZXZ_BROWSER_CHANNEL`（支持逗号列表）→ `msedge` → `chrome` → 无 channel 逐级回落，全失败时列出每次真实原因；5 个脚本改为调用它。`e2e/skill-e2e/workspace-e2e/shot-*` 的默认 BASE 改成 `localhost:1420`（与 `vite.config.ts` 的端口一致）；`proxy-e2e` 显式把 `ZXZ_BASE` 传给子进程。**实测**：不传任何变量下 `e2e` 24/24、`proxy-e2e` 11+24、`workspace` 39/39、`skill` 69/69；`ZXZ_BROWSER_CHANNEL="nope,msedge"` 真实走进回落分支并打印 `[browser] 用 msedge 启动` |
+| 24 | e2e 进 CI（B14-B） | `playwright@1.64.1` 入 `devDependencies`；`ci.yml` 新增独立 `e2e` job：`npm ci` → `npx playwright install --with-deps chromium` → 起 vite(1420) + 假上游(19888) 并用 curl 轮询就绪（不引 `wait-on`）→ `node tools/e2e.cjs` → 失败时打印服务日志。**证据到哪一步**：`npm ci --dry-run` 通过（锁文件一致）、YAML 结构自检通过（3 job / 0 制表符）、job 内命令与本地实跑逐条一致。**没到哪一步**：job 从未在 GitHub 上执行过 → 标 `NOT_TESTED`，不标 PASS |
 
 ## 5. 维护规则
 
