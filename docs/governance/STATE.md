@@ -21,11 +21,12 @@
 
 | 命令 | 结果 |
 |---|---|
-| `npm test` | **400 passed / 17 files**（本轮起点 328） |
+| `npm test` | **431 passed / 18 files**（本轮起点 328；B12-A 新增 `src/api.test.ts` 31 条） |
 | `npm run build` | 成功；`dist/assets/index-C_jjb0nX.js` 335.51 kB（2026-11-03 23:34 实测） |
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **82 passed / 1 ignored**（GNU 工具链；msvc 必失败） |
 | `cargo check --manifest-path src-tauri/Cargo.toml` | 通过，**0 warning**（`--all-targets` 亦 0，2026-11-03 23:36 实测） |
 | e2e（当日实跑） | `e2e.cjs` 24/24、`workspace-e2e` 39/39、`skill-e2e` 69/69、`proxy-e2e` 接口 11/11 + 前端 24/24 |
+| CI 是否跑到新测试 | **是**：`.github/workflows/ci.yml:18` 的 `npm test` 走 vitest，`include: src/**/*.test.ts` |
 
 `[FACT]` 本机 msvc 默认工具链会在链接期被 Git for Windows 的 coreutils `link.exe` 抢占，
 报 `link: extra operand`，且后台包装器仍上报 exit 0。**Rust 测试一律用**
@@ -39,12 +40,12 @@
 | Phase 1 诊断 | **COMPLETE** | 三组独立只读审计（安全 / 架构 / 质量），见 §4 |
 | Phase 2 规划 | **COMPLETE** | 本文件 §5 队列 |
 | Phase 3 研发 | **IN PROGRESS** | B1/B3/B4/B5/B6/B7/B8/B10/B11/B13/B15/B16 已落地并验证 |
-| Phase 4 独立审查 | IN PROGRESS | B10 一批已做独立复审（11 条发现，逐条验证后 9 条成立、2 条驳回） |
+| Phase 4 独立审查 | IN PROGRESS | B10 一批已做独立复审（11 条发现，逐条验证后 9 条成立、2 条驳回）；B7 一批 8 条；B12-A 待审 |
 | Phase 5/6 验收交付 | NOT_STARTED | 交付物未重编、未打安装包 |
 
 ## 3. 当前结论（不夸大）
 
-- 代码级质量：**良好**。400 条前端单测、82 条 Rust 单测全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。
+- 代码级质量：**良好**。431 条前端单测、82 条 Rust 单测全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。新增的传输层用例做过变异检验（改坏生产代码 → 对应用例必须变红），不是只看绿灯。
 - 安全态势：**PARTIAL → 明显改善**。P0 三条 + 本轮 2 条（npm `pre`/`post` 钩子绕过、`.npmrc` 改脚本 shell）+ 执行授权闸门（P0-4）已落地；其余已登记项见 §5 与 `TECHNICAL_DEBT.md`。
 - 交付状态：**NOT_READY**。无安装包；CI 不编译 `src-tauri` 本体；e2e 无法在 CI 复现；release exe 已落后于 HEAD。
 - 架构状态：**PARTIAL**。编排仍是 1520 行 `App.tsx` 内的闭包循环；`src/orchestration/` 已存在但只有一个 `round.ts`（B7 切片），`send()` 本体未搬。工具五处手写已收成注册表（B6 完成）。ADR 0001 的 5 条验收标准 1.5 条达成（详见该 ADR 的"实施进度"小节，未勾的不勾）。
@@ -57,7 +58,7 @@
 | 工具 | ~~新增 1 个工具要改 5 处，无注册表~~ **已修（B6）**：`src/lib/registry.ts` 的 `TOOLS` 是唯一真值源，其余全部派生；`findTool` 精确匹配不归一 |
 | 持久化 | 单键 `zxz.state.v1`，**无 schemaVersion**；250ms 全量写，连 `streaming` 中间态一起写；系统消息**完全不计**上下文预算 |
 | 计划模式 | 只有布尔开关 + 两处拦截 + 一段提示词；无产物、无审批、无对账 |
-| 测试 | `App.tsx` 1520 + `api.ts` 302 + 组件 2300+ 行仍基本 0 覆盖，且无 jsdom/testing-library；`src/orchestration/round.ts` 与 `src/lib/registry.ts` 是仅有的两个"核心逻辑可测"的切片 |
+| 测试 | ~~`api.ts` 零覆盖~~ **已覆盖（B12-A，31 条 + 4 次变异检验）**；`App.tsx` 1520 行与组件 2300+ 行仍基本 0 覆盖，且无 jsdom/testing-library；可测切片为 `orchestration/round.ts`、`lib/registry.ts`、`api.ts` 三处 |
 | CI | 仅 `frontend` + `rust-fs`；无 fmt/clippy、无 e2e、无版本一致性、无覆盖率门槛 |
 
 ## 5. 执行队列
@@ -78,20 +79,28 @@
 | B13 · 停止真的停 | `run_cancel` + 会话级取消位；`RunResult.cancelled` 与 `timed_out` 分开；测试断言**耗时**而非标志位 | **PASS** | Rust **82**（新增 3 条取消用例，含真起 60 秒 npm test 再取消）；前端 400 |
 | B11 · 清单不完整要说出来 | `listUndo` 的 `walk()` 返回 `boolean`；子目录抛错 / 撞 400 条 / 超 8 层 → `snapshot.incomplete`；界面标「清单不完整」 | **PASS** | 提交 `8919e3f`；前端 **400**（新增 3 条：抛错 / 撞上限 / 全可读） |
 | B16 · devtools 只给 debug | `tauri` 依赖去掉 `features=["devtools"]`，改为可选特性；release 不再带右键检查元素 | **PASS** | 源码门控 `#[cfg(any(debug_assertions, feature="devtools"))]`；`cargo tree -e features` 中 devtools 边为空；`cargo check --all-targets` 0 warning；Rust 82 全绿 |
+| B12-A · 传输层判据 | 新增 `src/api.test.ts` 31 条：上游错误 / SSE 分帧 / 断流 / 工具增量 / Key 不进 URL 与请求头。**零新增依赖** | **PASS** | 前端 **431**；4 次变异检验各自精确变红一条；CI `ci.yml:18` 的 `npm test` 直接覆盖 |
 
-### 下一批（按优先级，已排定，不再请示）
+### 下一批（按优先级）
 
 完整清单见 **`docs/audit/TECH_DEBT_REGISTER_20261103.md`**（P0–P3，带证据/影响/状态）。
 队列只列"要动手"的那几条：
 
 | # | 任务 | 为什么现在 | 验收 |
 |---|---|---|---|
-| B12 | `send()` 整轮重放测试设施（D-02） | 唯一的 P1 级质量缺口：1520 行编排零覆盖，400 条绿灯照不到那片区域 | 至少 1 类（上游错误）在 CI 跑 |
-| B14 | e2e 进 CI 的三个前置（D-08） | R3 三个成因已逐个实测确认，都可修 | CI 上 `e2e.cjs` 能跑 |
+| B14 | e2e 进 CI 的三个前置（D-08） | 唯一能覆盖真实 WebView 的手段；R3 三个成因已逐个实测确认，都可修 | CI 上 `e2e.cjs` 能跑 |
+| B12-B | `send()` 接线层判据（D-02 剩余） | 两层纯函数都有判据了，接线层仍靠人眼 | 需业主选路线，见下 |
 
-> **B12 卡在甲方保留权限上**：原方案要装 `jsdom` + mock provider，属于「新增第三方依赖」，按宪章 §3 需业主批准。
-> 不装依赖的替代路线是把 `send()` 的副作用改成注入式后整体搬进 `src/orchestration/`（纯函数、node 环境可测，
-> 顺带解决 D-06），但要动的是全仓最热且零覆盖的 320 行闭包——需要业主选。两条都写进了请示，未擅自开工。
+> **B14 有一步撞甲方保留权限**：三个前置里「playwright 入依赖」要改 `package.json`（新增第三方依赖）。
+> 另两个（去掉 `channel:"msedge"` 硬编码、端口 5173 vs 1420 对齐）不涉及依赖，可以先做。
+>
+> **B12-B 需要业主在两条路线里选**，两者回滚成本差别很大，不替业主决定：
+> 1. **先有判据再拆**：装 `jsdom`（甲方保留权限）→ 渲染 `App` 跑整轮重放 → 再动 `send()`。
+>    安全，但要加依赖。
+> 2. **拆完再补**：把 `send()` 的副作用改成注入式、整体搬进 `src/orchestration/`（node 环境即可测，
+>    顺带解决 D-06 的 1520 行）。不加依赖，但动的是全仓最热、零覆盖的 320 行闭包。
+>
+> 两条都没擅自开工。
 
 ## 6. 风险与阻断
 
