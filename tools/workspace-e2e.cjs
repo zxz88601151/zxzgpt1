@@ -127,6 +127,27 @@ function check(name, ok, detail) {
           written.push({ sessionId: args.sessionId, rel: args.rel, bytes: args.content.length, created });
           return { path: toAbs(args.rel), bytes: args.content.length, created };
         }
+        // 撤销区走专用通道：普通 fs_write 在 Rust 侧已整目录拒绝 .zxz/undo，
+        // 这里必须跟着实现，否则"备份走专用通道"这条链路在 e2e 里根本走不通。
+        if (cmd === 'undo_write') {
+          const rel = '.zxz/undo/' + args.stamp + '/' + args.rel;
+          const created = !Object.prototype.hasOwnProperty.call(disk, rel);
+          disk[rel] = args.content;
+          written.push({ sessionId: args.sessionId, rel, bytes: args.content.length, created });
+          return { path: toAbs(rel), bytes: args.content.length, created };
+        }
+        if (cmd === 'undo_read') {
+          const rel = '.zxz/undo/' + args.stamp + '/' + args.rel;
+          if (!Object.prototype.hasOwnProperty.call(disk, rel)) throw new Error('快照不存在：' + rel);
+          return disk[rel];
+        }
+        if (cmd === 'undo_list') {
+          const head =
+            args.stamp == null ? '.zxz/undo' : '.zxz/undo/' + args.stamp + (args.rel ? '/' + args.rel : '');
+          return listOf(toAbs(head));
+        }
+        // 执行授权：本脚本不跑命令，但打开工程时会拉一次授权列表，不能让它抛
+        if (cmd === 'perm_list' || cmd === 'perm_grant' || cmd === 'perm_revoke') return [];
         throw new Error('unknown cmd: ' + cmd);
       },
     };

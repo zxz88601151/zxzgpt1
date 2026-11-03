@@ -164,10 +164,13 @@ function check(name, ok, detail) {
   }, null, { timeout: 60000 });
   const lastReq = await (await fetch(new URL(MOCK).origin + '/_last')).json();
   const ctx = lastReq.messages || [];
+  // 只数对话消息：system 是「窗口之外」的固定上下文（技能提示词 / 工程提示词都在这一层），
+  // 它不参与轮数裁剪。早先这里直接数 ctx.length，技能提示词一加进来就假红了。
+  const dialog = ctx.filter((m) => m.role !== "system");
   check(
     '上下文轮数=1 只带最近一轮',
-    ctx.length === 3 && ctx[0].role === 'user' && ctx[1].role === 'assistant' && ctx[2].role === 'user',
-    `${ctx.length} 条：${ctx.map((m) => m.role).join(',')}`
+    dialog.length === 3 && dialog[0].role === 'user' && dialog[1].role === 'assistant' && dialog[2].role === 'user',
+    `${dialog.length} 条对话（另有 ${ctx.length - dialog.length} 条 system）：${dialog.map((m) => m.role).join(',')}`
   );
   await page.click('#modelPill');
   await page.fill('#contextTurns', '10');

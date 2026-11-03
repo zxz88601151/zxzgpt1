@@ -13,8 +13,8 @@
 | 分支 / HEAD | `main` / `c351694`（`docs(audit): O1 重编宿主真机实测…`） |
 | 远端 | `origin` 内网 Gitea `192.168.3.200:3000/zxzjxx/zxzgpt.git`（与本地同步）；`github` 备用 |
 | 版本号 | `package.json` / `tauri.conf.json` / `Cargo.toml` 三处均 `0.3.0`（一致） |
-| 技术栈 | Tauri 2 + Rust（fsx / runx / wsx / proxy / api）＋ React 18 + TS + Vite 6 |
-| 规模 | 前端 10,462 行（`App.tsx` 1405 行）；Rust 6 模块 |
+| 技术栈 | Tauri 2 + Rust（fsx / runx / wsx / proxy / api / perms）＋ React 18 + TS + Vite 6 |
+| 规模 | 前端 11,850 行（`App.tsx` 1520 行）；Rust 8 文件 / 7 模块（`perms.rs` 为 B10 新增） |
 | 工作区 | 已跟踪文件 0 改动；未跟踪：`.refs/`（193MB）、`.tmp-skills/`、`docs/audit/*.md`、`docs/governance/` |
 
 ### 1.1 基线命令与实测结果
@@ -46,7 +46,7 @@
 - 代码级质量：**良好**。396 条前端单测、79 条 Rust 单测全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。
 - 安全态势：**PARTIAL → 明显改善**。P0 三条 + 本轮 2 条（npm `pre`/`post` 钩子绕过、`.npmrc` 改脚本 shell）+ 执行授权闸门（P0-4）已落地；其余已登记项见 §5 与 `TECHNICAL_DEBT.md`。
 - 交付状态：**NOT_READY**。无安装包；CI 不编译 `src-tauri` 本体；e2e 无法在 CI 复现；release exe 已落后于 HEAD。
-- 架构状态：**PARTIAL**。编排仍是 1380+ 行 `App.tsx` 内的闭包循环，`src/orchestration/` 不存在（B7 未做）。工具五处手写已收成注册表（B6 完成）。
+- 架构状态：**PARTIAL**。编排仍是 1520 行 `App.tsx` 内的闭包循环；`src/orchestration/` 已存在但只有一个 `round.ts`（B7 切片），`send()` 本体未搬。工具五处手写已收成注册表（B6 完成）。ADR 0001 的 5 条验收标准 1.5 条达成（详见该 ADR 的"实施进度"小节，未勾的不勾）。
 
 ## 4. 诊断要点（摘要，证据见各审计文件）
 
@@ -72,23 +72,24 @@
 | B6 · 工具注册表 | 五份清单收成 `src/lib/registry.ts` 的 `TOOLS`，`findTool` 精确匹配不归一 | **PASS** | 提交 `449b3a5`；前端 351；`grep -c "call.name ==="` = 0 |
 | B10 · 执行授权闸门 | `perms::decide` 三态闸门（`Deny`/`Ask`/`Allow`）；scope = 命令+子命令；会话内有效、不落盘；前端确认框 + 授权列表可逐条撤销 | **PASS** | 前端 366 + Rust 79；`cargo check` 0 warning；`docs/audit/P0-4_EXEC_GATE_20261103.md` |
 | B7 · 轮末判定抽取 | `src/orchestration/round.ts`：`nextRound` / `stopNotice` / `shouldAutoTest` 三个纯函数；`MAX_ROUNDS` 导出；App 只剩执行 | **PASS**（切片） | 前端 **396**（25 条新断言）；已过独立复审（4 条 P2 + 4 条 P3，全部处置）；`docs/adr/0001` 进度小节 |
+| B8 · 证据对账 | README 全部 e2e 数字按当日实测重写；7 个未跑脚本标 `NOT_TESTED`；修掉假 IPC 落后与过期断言 | **PASS** | 24/39/69/10+24 全过；`docs/audit/B8_EVIDENCE_RECONCILIATION_20261103.md` |
 
 ### 下一批（按优先级，已排定，不再请示）
 
 | # | 任务 | 为什么现在 | 验收 |
 |---|---|---|---|
-| B8 | README e2e 项数重测并订正（D-DOC-1） | 现有多处自相矛盾 | 数字 = 实测 |
 | B11 | `.zxz/undo` 子目录列举失败时静默跳过 → 需要给出「快照可能不完整」标记 | 逐子目录 `catch` 会产出**看起来完整**的快照（P3，不导致数据丢失：恢复时 `undo_read` 会明确报错） | 子目录打不开时快照带 `incomplete` 标记 |
 | B12 | `send()` 整轮重放测试设施（jsdom + mock provider） | ADR 0001 的 7 类行为用例全依赖它；没有它，编排层回归只能靠人眼 | 至少 1 类（上游错误）能在 CI 跑 |
 | B13 | `AbortController` 管不到正在跑的 `npm test` | 用户点"停止"后子进程仍在跑，这是可控性问题不是体验问题 | 点停止后 `run_allowed` 的子进程被收树终止 |
+| B14 | e2e 进 CI 的三个前置（playwright 入依赖、去 msedge 硬编码、端口对齐） | R3 的三个成因逐个可修，但不修就永远只能人工跑 | CI 上至少 `e2e.cjs` 能跑 |
 
 ## 6. 风险与阻断
 
 | # | 项 | 级别 | 说明 |
 |---|---|---|---|
-| R1 | release exe 落后于 HEAD | 高 | 本轮改了 `tools.ts`，exe 内嵌 `index-CQlZK13B.js` ≠ 当前 `index-BFrjgvmk.js`。**未重编前不得声称交付物含本次修复** |
+| R1 | release exe 落后于 HEAD | 高 | `src-tauri/target/release/zxz.exe` 内嵌的仍是 `index-CQlZK13B.js`，而当前构建产物是 `index-BUPLjQ7F.js`（相差 B3–B8 共 6 批改动）。**未重编前不得声称交付物含任何本轮修复** |
 | R2 | 无安装包 | 高 | `bundle.targets: "all"` 配置存在但从未产出；`WebView2` 走 `downloadBootstrapper`，离线不可用 |
-| R3 | e2e 不可复现 | 中 | playwright 未入依赖（`npm ci` 后消失）、硬编码 `channel:"msedge"`、默认端口 5173 与 vite 1420 冲突 |
+| R3 | e2e 不可复现 | 中 | 三个成因 2026-11-03 全部实测确认：playwright 未入依赖（`npm ci` 后消失）、硬编码 `channel:"msedge"`、默认端口 5173 与 vite 1420 冲突（`proxy-e2e.cjs` 拉起子进程时不传 `ZXZ_BASE`，会退回 5173 并报 `waiting for locator('#btnNew')`，看着像前端崩了）。修法见 B14 |
 | R4 | release 无条件带 devtools | 中 | `tauri/Cargo.toml` 的 `features=["devtools"]` 无 `cfg(debug_assertions)` 门控 |
 | R5 | 推送/发布未授权 | — | 按宪章 §3，push / 打安装包需业主显式授权 |
 

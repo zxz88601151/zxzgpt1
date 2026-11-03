@@ -24,6 +24,8 @@ zxz/
 │   ├── state.ts                存储读写、上下文窗口、会话过滤（纯函数，可单测）
 │   ├── api.ts                  双通道传输层 + SSE 解析（代理 / 直连）
 │   ├── styles.css              样式（深色 / 浅色双主题）
+│   ├── orchestration/
+│   │   └── round.ts            轮末判定（纯函数：停/继续、停止提示、自动测试门禁）+ 单测
 │   ├── lib/
 │   │   ├── md.ts               自实现 Markdown 渲染
 │   │   ├── hl.ts               自实现代码高亮（5 类 token）
@@ -37,7 +39,7 @@ zxz/
 │   │   ├── tools.ts            工具定义、白名单、tool_calls 合并、测试回路决策（纯逻辑）
 │   │   ├── pending.ts          写入前确认：待批清单（纯逻辑，不碰 IPC）
 │   │   ├── fsapi.ts            本机文件 IPC 封装（列目录 / 读 / 写 / 拼目录树）
-│   │   └── *.test.ts           本目录 12 个单测文件（全仓 15 个 / 326 条，见 §9.6）
+│   │   └── *.test.ts           本目录 13 个单测文件（全仓 17 个 / 396 条，见 §9.6）
 │   ├── skills/
 │   │   ├── index.ts            内建技能装配（?raw 导入，与外部技能同一套解析）
 │   │   ├── sources.ts          外部来源登记表（29 条）+ 分组汇总 + 审计清单生成
@@ -56,6 +58,7 @@ zxz/
 │       ├── SkillChips.tsx      输入框上方：已启用技能的胶囊
 │       ├── SkillPanel.tsx      技能库两页签：技能（分类分组）/ 来源清单（审计项 + 导出）
 │       ├── PendingWrites.tsx   写入前确认面板：勾选文件、看差异、批了才写盘
+│       ├── ConfirmExec.tsx     执行授权确认框：仅此一次 / 本工程目录都允许 / 拒绝
 │       ├── Welcome.tsx         空会话引导（含人像 hero）
 │       └── ui.tsx              图标 / 按钮 / Toast / 头像等通用件
 ├── dist/                       Vite 构建产物（Tauri 直接托管）
@@ -283,17 +286,24 @@ node tools/mock-upstream.cjs 19888
 ### 9.2 浏览器直连模式（不需要编译 Rust）
 
 ```bash
-cd dist && python -m http.server 5173 --bind 127.0.0.1   # 任意静态服务器均可
+npx vite --port 1420 --strictPort        # 开发服务器（默认端口就是 1420）
+node tools/mock-upstream.cjs 19888       # 模拟上游，零真实 token
 
-npm i playwright          # 仅测试用（Chromium 用本机 Edge，channel=msedge）
-node tools/e2e.cjs        # 24 项端到端
+ZXZ_BASE=http://localhost:1420 node tools/e2e.cjs   # 24 项，2026-11-03 实测 24/24
 ```
 
 纯逻辑单测（Markdown / 高亮 / 上下文窗口 / 会话过滤）不需要浏览器：
 
 ```bash
-npm test                  # vitest run，326 条（15 个文件）
+npm test                  # vitest run，396 条（17 个文件），2026-11-03 实测
 ```
+
+**两个本机踩过的坑，写下来省得再踩**：
+
+- `ZXZ_BASE` 要用 `http://localhost:1420`，**不要用 `127.0.0.1`**。vite 默认只监听
+  `localhost`（落到 `::1`），`127.0.0.1:1420` 会直接 `ECONNREFUSED`。
+- 本机若设了 `http_proxy`，`curl` 会绕道代理并返回 502，看着像服务挂了。验证端口用
+  `curl --noproxy '*'`。
 
 ### 9.3 本机代理模式（走真实 Rust 转发）
 
@@ -311,35 +321,55 @@ cd tools/proxy-harness && cargo build
 cd ../.. && node tools/proxy-e2e.cjs
 ```
 
-脚本会先直接对代理验 token 鉴权 / CORS 预检 / 未知路由 / 模型列表 / 非流式对话 / 上游 401 翻译，再把端口与 token 注入 `window.__TAURI_INTERNALS__`，让前端以「本地代理」通道跑一遍完整交互。
+脚本会先直接对代理验 token 鉴权 / CORS 预检 / 未知路由 / 模型列表 / 非流式对话 / 上游 401 翻译，再把端口与 token 注入 `window.__TAURI_INTERNALS__`，让前端以「本地代理」通道跑一遍完整交互。2026-11-03 实测：接口 10/10 + 前端 24/24。
+
+**两条前置，少一条就白跑**：
+
+- **必须先 `ZXZ_BASE=...`**：脚本拉起 `e2e.cjs` 时只注入 `MODE=proxy` 和端口 token，
+  不传 `ZXZ_BASE`，于是子进程用回默认的 `5173`——那里没有服务，报的是
+  `waiting for locator('#btnNew') to be visible`，看着像前端挂了，其实是打错了端口。
+- **改了 `proxy.rs` 就要重编 harness**。这个坑当场吃过一次：`target-gnu` 里的
+  `proxy-harness.exe` 是 11-01 09:34 的，`proxy.rs` 是 11-01 22:07 改的，
+  拿旧二进制跑出两条 FAIL（`非回环 Host 被拒` 返回 200、`/models` 报「未知路由」），
+  重编之后同样两条都是 PASS。**测试二进制比源码旧时，FAIL 结论无效**——
+  先比时间戳再下判断。
 
 ### 9.4 本地写代码（工程模式）
 
 前端链路（注入假 IPC，无需桌面端）：
 
 ```bash
-node tools/workspace-e2e.cjs        # 18 项
+ZXZ_BASE=http://localhost:1420 node tools/workspace-e2e.cjs   # 39 项，实测 39/39
 ```
+
+> 这份假 IPC 必须跟着真 IPC 的接口走。B4 把撤销备份改到 `undo_write` 专用通道之后，
+> 这里没跟上的那段时间，`[[files]]` 落盘会一路失败、卡在等「已落盘」超时——
+> 报错信息完全没提撤销，很容易误判成写盘坏了。现在补齐了
+> `undo_write` / `undo_read` / `undo_list` / `perm_*`。
 
 真机端到端（走真实 Rust IPC、真写磁盘）：
 
 ```bash
 # 1) 临时把 --remote-debugging-port 写进 tauri.conf.json 的 windows[0].additionalBrowserArgs
 # 2) 重编并启动 exe，3) 跑脚本，4) 记得把配置改回去再重编
-node tools/desktop-workspace-e2e.cjs   # 13 项
+node tools/desktop-workspace-e2e.cjs   # 静态 34 项，本轮未跑（见 9.6）
 ```
 
 Rust 侧路径校验与真实写入（不依赖 tauri，`#[path]` 引用 `fsx.rs` 原文）：
 
 ```bash
-cd tools/fs-harness && cargo test      # 58 条（另 1 条 60 秒超时用例默认 ignore，用 --ignored 跑）
+cd tools/fs-harness && cargo test      # 79 条（另 1 条 60 秒超时用例默认 ignore，用 --ignored 跑）
 ```
+
+> 必须带 GNU 工具链：`RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu`。
+> 本机 msvc 默认工具链会在链接期被 Git for Windows 的 `link.exe` 抢占，
+> 报 `link: extra operand`，**而且依然返回 exit 0**——成败只能读日志，不能看退出码。
 
 真模型全流程（选文件夹 → 真读 → 写代码落盘；打的是你在界面里接的模型，不是模拟上游）：
 
 ```bash
 # 同一个 CDP 前置（临时开 --remote-debugging-port=9223，跑完重编还原）
-node tools/live-deepseek-e2e.cjs       # 26 项
+node tools/live-deepseek-e2e.cjs       # 静态 27 项，本轮未跑（需真 Key，见 9.6）
 ```
 
 > 这个脚本不改你的 baseUrl / Key / 模型，只在开头读出来断言「确实是真 DeepSeek」，
@@ -351,22 +381,57 @@ node tools/live-deepseek-e2e.cjs       # 26 项
 前端链路（注入假 IPC + 虚拟技能目录，无需桌面端）：
 
 ```bash
-node tools/skill-e2e.cjs            # 47 项
+ZXZ_BASE=http://localhost:1420 node tools/skill-e2e.cjs   # 69 项，实测 69/69
 ```
 
 真机端到端（真目录、真 SKILL.md、真附件读取、审计清单真写盘）：
 
 ```bash
-node tools/desktop-skill-e2e.cjs    # 17 项（同样需要先开 CDP 端口编译）
+node tools/desktop-skill-e2e.cjs    # 静态 21 项，本轮未跑（见 9.6，同样需要先开 CDP 端口编译）
 ```
 
-### 9.6 覆盖范围
+### 9.6 覆盖范围（2026-11-03 重测，数字=实测）
 
-> 口径说明（2026-11-03）：本节 vitest 与 Rust 单测条数是当日实测；**e2e 的“项数”是历史记录，
-> 未在当日重测**，与 9.2–9.5 各小节的数字存在互相矛盾（同一脚本在两处写成不同值），
-> 以脚本实际跑出来的退出码与断言输出为准，不以本行数字为准。重测后统一订正（见 `docs/governance/STATE.md` D-DOC-1）。
+**当日实跑，全绿**：
 
-前端直连 24 项、真实代理 10 项接口断言 + 24 项前端、工程模式 34 项、真机读写 25 项、技能库 47 项、真机技能 17 项、Rust 单测 **58 条**（另 1 条超时用例默认 ignore）、纯逻辑单测 **328 条**（15 个 `.test.ts`：`src/lib` 12 + `src/skills` 2 + `src/state.test.ts` 1，2026-11-03 `npx vitest run` 实测；改测试后以 `Tests` 行为准）。覆盖：通道探测、设置抽屉、拉取模型、测试连接、流式逐字输出、Markdown（标题/列表/嵌套/表格/引用/行内代码/加粗/删除线/外链）、代码高亮与复制按钮、长文本完整渲染、usage 回显、思维链折叠、停止生成、重新生成不重复追加用户消息、上下文轮数窗口、多会话/搜索/主题、刷新后持久化、上游 401/404 错误提示、无 JS 运行时错误；技能库另含 frontmatter 解析、分类分组、触发词自动匹配、3 个上限、外部目录扫描与坏技能报错、29 条来源清单与审计清单导出（无工程时下载、有工程时写进 `.zxz/audit/`）。
+| 脚本 / 命令 | 项数 | 结果 |
+|---|---|---|
+| `tools/e2e.cjs`（浏览器直连 + 模拟上游） | 24 | **24 PASS / 0 FAIL** |
+| `tools/workspace-e2e.cjs`（假 IPC 工程模式） | 39 | **39 PASS / 0 FAIL** |
+| `tools/skill-e2e.cjs`（假 IPC 技能库） | 69 | **69 PASS / 0 FAIL** |
+| `tools/proxy-e2e.cjs`（真实 Rust 代理，重编后） | 10 + 24 | **10/10 接口 + 24/24 前端** |
+| `cargo test --manifest-path tools/fs-harness/Cargo.toml` | 79 + 1 ignored | **79 PASS** |
+| `npx vitest run` | 396 / 17 文件 | **396 PASS** |
+
+**当日没跑，只有静态计数**（下表数字是脚本里 `check(...)` 的调用点数量，
+不是运行结果；未跑的原因逐个写在最后一列）：
+
+| 脚本 | 静态项数 | 为什么没跑 |
+|---|---|---|
+| `tools/desktop-workspace-e2e.cjs` | 34 | 需要临时把 CDP 端口编进 exe 并重编——重编产物属业主保留权限 |
+| `tools/desktop-skill-e2e.cjs` | 21 | 同上 |
+| `tools/live-deepseek-e2e.cjs` | 27 | 需要真实 API Key + CDP 前置 |
+| `tools/live-web-round.cjs` | 47 | 同上 |
+| `tools/live-tools-e2e.cjs` | 20 | 同上 |
+| `tools/live-tools-edge.cjs` | 29 | 同上（历史记录写的是 28/28，与静态计数差 1） |
+| `tools/live-skill-e2e.cjs` | 35 | 同上 |
+
+> **不要把静态计数当通过证据**。它只能说明脚本里写了多少条断言，
+> 不能说明这些断言今天是不是都过。上表这七个脚本本轮的状态是 `NOT_TESTED`。
+
+**上一版的数字为什么全错**：那些数字是历史记录，脚本后来一直在加断言，README 没跟着改，
+于是同一个脚本在两处写成不同值（工程模式一处 18、一处 34；技能库 47、真机技能 17）。
+这次全部按当天实跑输出重写，**以后改脚本必须同时改这张表**——
+数字过期比没有数字更糟，因为它看起来像证据。
+
+覆盖内容：通道探测、设置抽屉、拉取模型、测试连接、流式逐字输出、Markdown
+（标题/列表/嵌套/表格/引用/行内代码/加粗/删除线/外链）、代码高亮与复制按钮、
+长文本完整渲染、usage 回显、思维链折叠、停止生成、重新生成不重复追加用户消息、
+上下文轮数窗口、多会话/搜索/主题、刷新后持久化、上游 401/404 错误提示、无 JS 运行时错误；
+工程模式另含目录选择/新建/重名报错、路径越权拦截、自动落盘、回读校验、diff、撤销与回滚；
+技能库另含 frontmatter 解析、分类分组、触发词自动匹配、3 个上限、外部目录扫描与坏技能报错、
+29 条来源清单与审计清单导出（无工程时下载、有工程时写进 `.zxz/audit/`）。
+
 
 ## 10. 本地工程模式（让模型直接在你电脑上读写代码）
 
@@ -793,13 +858,29 @@ shell 却会再执行一条命令。所以先做构造级拒绝（`$`、反引�
 
 ### 14.4 本版验证状态（先说清楚，再谈功能）
 
-- 前端已验：`npm test`（vitest）通过、类型检查 0 error；工具白名单、tool_calls 合并、
-  测试回路决策、工具消息展开都有单测。
-- Rust 已按 fsx 的老办法处理：`runx.rs` 不依赖 tauri，`tools/fs-harness` 用
-  `#[path]` 直接引用它跑白名单与执行单测，CI 的 rust-fs 任务会跑到。
-- 本机没有 cargo，`src-tauri` 本体（lib.rs 的 IPC 注册、api.rs 的工具转发）
-  在本机没有编译过，桌面全量构建与真模型工具调用仍需在 Windows 真机上验证
-  后才能算“跑通过”。没验过的不要宣称已验。
+**当前状态（2026-11-03 实测，替换掉下面那段历史描述）**：
+
+| 项目 | 结果 |
+| --- | --- |
+| `npx vitest run` | **396 passed / 17 files** |
+| `npx tsc --noEmit` | **0 error** |
+| `npm run build` | 成功 |
+| `cargo check --manifest-path src-tauri/Cargo.toml` | **通过，0 warning**（含 lib.rs 的 IPC 注册、api.rs 转发） |
+| `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **79 passed / 1 ignored**（GNU 工具链） |
+| `run_allowed` 在本机真 spawn `npm --version` | 退出码 0，输出 10.9.7 |
+| `node tools/e2e.cjs` / `workspace-e2e` / `skill-e2e` / `proxy-e2e` | 24/24、39/39、69/69、10+24 全过（见 9.6） |
+
+**仍未验的**：桌面全量构建、安装包产出、真模型工具调用（需真 Key 与 CDP 前置）、
+以及 9.6 表里那七个 `NOT_TESTED` 脚本。没验过的不要宣称已验。
+
+<details>
+<summary>历史描述（已被上表取代，保留以说明当时为什么这么写）</summary>
+
+> 本机没有 cargo，`src-tauri` 本体（lib.rs 的 IPC 注册、api.rs 的工具转发）
+> 在本机没有编译过，桌面全量构建与真模型工具调用仍需在 Windows 真机上验证
+> 后才能算“跑通过”。
+
+</details>
 
 ### 14.5 集成时的补充验证（本机 Windows 真机）
 
@@ -809,7 +890,7 @@ shell 却会再执行一条命令。所以先做构造级拒绝（`$`、反引�
 | --- | --- |
 | `cargo check`（含 runx.rs、lib.rs IPC 注册、api.rs 工具转发） | 通过，0 warning |
 | fs-harness Rust 单测 | 通过（含 runx 白名单与真实 spawn） |
-| vitest | 通过（328 条，2026-11-03 实测） |
+| vitest | 通过（条数以 14.4 的当日实测为准，本节不再单独记数） |
 | `run_allowed` 在本机真 spawn `npm --version` | 退出码 0，输出 10.9.7 |
 
 **集成过程中修掉的两个缺陷**（都是原补丁在 Windows 上的真问题）：
@@ -824,6 +905,10 @@ shell 却会再执行一条命令。所以先做构造级拒绝（`$`、反引�
 
 ### 14.6 护栏的边界用例（真模型 + Rust 双侧）
 
+> **口径（2026-11-03 重测时补）**：本节的 `28/28` 是当时的实跑记录，**本轮没有重跑**
+> （`tools/live-tools-edge.cjs` 需要真模型 Key + CDP 前置，状态 `NOT_TESTED`）。
+> 脚本现在静态有 29 个断言点。下面四项的结论按"当时实测"读，不当成今日证据。
+
 前三节的 happy path 跑通不等于护栏有效——护栏只有被触达时才起作用。下面四项都用真模型
 在桌面端实跑过（`tools/live-tools-edge.cjs`，28/28），四项都 PASS：
 
@@ -834,11 +919,14 @@ shell 却会再执行一条命令。所以先做构造级拒绝（`$`、反引�
 | 目录逃逸 | 指名让模型用 `read_file` 读 `../.tmp-edge-outside.txt` | 工具返回 error，没有任何一条工具结果带出根目录外内容 |
 | 项目记忆 | 明令“不许用工具、不许读文件”，问 CLAUDE.md 里的约定 | 答出了 `ZXZ-MEMO-7742`，且** 0 次工具调用**，证明确实是随请求注入而非临时去读 |
 
-Rust 侧另补了三条 `run_allowed` 的边界用例（`tools/fs-harness`，30 条全过）：
+Rust 侧另补了边界用例（`tools/fs-harness`，当日 **79 条全过**，另有 1 条 `#[ignore]`）：
 
 - **非零退出码必须透传**：自动测试回路靠它判断“过没过”，掉了就会把失败误判成通过。
-- **超大输出不死锁**：stdout / stderr 各 30 万字符，两个流都精确截断到 20000 且几十毫秒
-  返回——这条盯的是“双线程排空管道”，没排空的话会卡死在管道缓冲区上。
+- **超大输出不死锁**：两个流都必须读到 EOF（提前停读会把子进程堵死在管道缓冲区），
+  但只保留 256 KB，超出部分丢掉并置 `truncated`。
+- **环境是白名单不是宿主拷贝**：`env_clear()` 之后只加回 19 项；测试比的是
+  「子进程报上来的键集合」。注意宿主的进程沙箱会在 env 之外注入 `LSBOX_*` 这类变量，
+  写断言时要把它们和 npm 自己加的 `npm_*` 区分开，否则会误判成泄漏。
 - **超时 + 进程树**（`#[ignore]`，要实打实等 60 秒，`cargo test -- --ignored` 才跑）：
   这条一开始是** FAIL **，把 14.2 记的那个真缺陷挖了出来，详见 14.2 与下一段。
 
