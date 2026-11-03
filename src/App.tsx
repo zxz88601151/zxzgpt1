@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { chatStream, detectTransport, DIRECT } from "./api";
-import { buildTree, fsAvailable, fsExists, fsListIn, fsRead, fsWrite, runAllowed, sessionFor, wsClose, wsInfo, wsOpen as openSession } from "./lib/fsapi";
+import { buildTree, fsAvailable, fsExists, fsListIn, fsRead, fsWrite, runAllowed, sessionFor, undoWrite, wsClose, wsInfo, wsOpen as openSession } from "./lib/fsapi";
 import { buildMessages, filterConversations, findActive, loadState, newConversation, persist, titleFrom } from "./state";
 import { clamp, copyText, uid } from "./lib/text";
 import { diffLines, diffStats } from "./lib/diff";
@@ -296,7 +296,9 @@ export default function App() {
             // 备份失败必须阻断写入：没有备份的覆盖不可撤销，不能"先写了再说"。
             oldText = await fsRead(ws.sessionId, b.path);
             backup = backupRelPath(stamp, b.path);
-            await fsWrite(ws.sessionId, backup, oldText);
+            // 走撤销专用通道：普通 fsWrite 现在整目录拒绝 .zxz/undo，
+            // 因为模型手里的 write_file 用的正是那条通道。
+            await undoWrite(ws.sessionId, stamp, b.path, oldText);
             backedUp += 1;
           }
           const r = await fsWrite(ws.sessionId, b.path, b.content);

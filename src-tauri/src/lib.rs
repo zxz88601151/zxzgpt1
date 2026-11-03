@@ -109,6 +109,22 @@ mod fs_cmds {
         let root = crate::root_for(&session_id, "写文件")?;
         crate::fsx::write(&root, &rel, content)
     }
+
+    /// 撤销快照专用写入：只落 `.zxz/undo/<stamp>/<rel>`。
+    ///
+    /// 这是一条**不对外暴露给模型**的内部通道：模型手上的写工具走的是上面的
+    /// `fs_write`，而 `fs_write` 整目录拒绝 `.zxz/undo`。撤销快照是覆盖写失败时
+    /// 唯一的退路，它的写入路径因此必须和普通写路径分开。
+    #[tauri::command]
+    pub fn undo_write(
+        session_id: String,
+        stamp: String,
+        rel: String,
+        content: String,
+    ) -> Result<crate::fsx::WriteResult, String> {
+        let root = crate::root_for(&session_id, "写撤销快照")?;
+        crate::fsx::undo_write(&root, &stamp, &rel, content)
+    }
 }
 
 /// 受控命令执行 IPC 壳：白名单、超时、输出上限都在 runx 里，壳只做参数转发。
@@ -137,6 +153,7 @@ pub fn run() {
             fs_cmds::fs_read,
             fs_cmds::fs_exists,
             fs_cmds::fs_write,
+            fs_cmds::undo_write,
             run_cmds::run_allowed
         ])
         .setup(|_app| {

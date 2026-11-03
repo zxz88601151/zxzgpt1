@@ -168,6 +168,22 @@ export async function fsWrite(sessionId: string, rel: string, content: string): 
   }
 }
 
+/**
+ * 撤销快照专用通道：只写 `.zxz/undo/<stamp>/<rel>`。
+ *
+ * 为什么单独开一条：`fsWrite` 现在整目录拒绝 `.zxz/undo`，因为模型手上的
+ * `write_file` 走的正是那条通道——撤销快照是覆盖写失败时唯一的退路，
+ * 它能被模型改写等于这张安全网不存在。备份与恢复的写入改到这里，
+ * 落点、stamp 形状、是否越出 undo 区都在 Rust 侧（`fsx::undo_write`）校验。
+ */
+export async function undoWrite(sessionId: string, stamp: string, rel: string, content: string): Promise<WriteResult> {
+  try {
+    return await call<WriteResult>("undo_write", { sessionId, stamp, rel, content });
+  } catch (e) {
+    throw new Error(errText(e));
+  }
+}
+
 export interface RunResult {
   exit_code: number | null;
   stdout: string;

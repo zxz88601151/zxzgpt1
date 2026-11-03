@@ -300,18 +300,41 @@ pub fn exists(root: &Path, rel: &str) -> Result<bool, String> {
     Ok(target.exists())
 }
 
-/// 仓库元数据：这些路径一旦被改写，git 的行为就被改写了
-/// （`.git/config` 的 `core.fsmonitor`、`diff.*.textconv`，`.git/hooks/*`，
-/// `.git/info/attributes`），而 `run_command` 恰恰允许只读 git——
-/// 「模型能写 .git」+「git 会执行配置里的命令」= 受控执行变成任意执行。
-/// 所以整目录拒绝写入，不做「只挡 config」这种半开的口子。
-fn is_repo_metadata(rel: &str) -> bool {
-    rel.split(['/', '\\']).next().is_some_and(|seg| seg.eq_ignore_ascii_case(".git"))
+/// 受保护目录：程序自己的内部资产，模型与普通写通道一律不可写。
+///
+/// - `.git/**`：这些路径一旦被改写，git 的行为就被改写了（`.git/config` 的
+///   `core.fsmonitor`、`diff.*.textconv`，`.git/hooks/*`，`.git/info/attributes`），
+///   而 `run_command` 恰恰允许只读 git。「模型能写 .git」+「git 会执行配置里的命令」
+///   = 受控执行变成任意执行。整目录拒绝，不做「只挡 config」这种半开的口子。
+/// - `.zxz/undo/**`：撤销快照是覆盖写失败时唯一的安全网。它能被写入 = 这张网可以被
+///   改写，用户点「恢复」拿到的就是模型准备好的内容。快照只能经 `undo_write` 落盘。
+///
+/// 判定必须基于 **safe_rel 之后** 的路径：`.` 段会被 safe_rel 吃掉，所以
+/// `./.git/config` 的字符串首段是 `.` 而不是 `.git`——基于原始字符串判定会放行，
+/// 而实际落点就是 `<root>/.git/config`。这个绕过真实存在过（见 dot_prefix 用例）。
+fn protected_area(relp: &Path) -> Option<&'static str> {
+    let mut segs = relp.components().filter_map(|c| match c {
+        Component::Normal(s) => s.to_str(),
+        _ => None,
+    });
+    let first = segs.next()?;
+    if first.eq_ignore_ascii_case(".git") {
+        return Some(".git");
+    }
+    if first.eq_ignore_ascii_case(".zxz") {
+        // `.zxz/` 下只有 undo 是安全资产；`.zxz/audit` 是模型自己产的报告，不挡。
+        let second = segs.next().unwrap_or("");
+        if second.eq_ignore_ascii_case("undo") {
+            return Some(".zxz/undo");
+        }
+    }
+    None
 }
 
 pub fn write(root: &Path, rel: &str, content: String) -> Result<WriteResult, String> {
-    if is_repo_metadata(rel) {
-        return Err(format!("{rel} 落在 .git 目录内：仓库元数据不允许被写入"));
+    let relp = safe_rel(rel)?;
+    if let Some(area) = protected_area(&relp) {
+        return Err(format!("{rel} 落在 {area} 目录内：程序内部资产不允许经写文件通道改动"));
     }
     let target = resolve(root, rel)?;
 
@@ -329,6 +352,65 @@ pub fn write(root: &Path, rel: &str, content: String) -> Result<WriteResult, Str
 
     let created = !target.exists();
     fs::write(&target, content.as_bytes()).map_err(|e| format!("写入失败（{rel}）：{e}"))?;
+    Ok(WriteResult {
+        path: target.to_string_lossy().to_string(),
+        bytes: content.len(),
+        created,
+    })
+}
+
+/// 快照标识的合法形状：`2026-11-01T02-49-32`（19 字符，数字与固定分隔符）。
+///
+/// 严格到位是刻意的：这个值是撤销通道唯一由外部传入的「目录名」，
+/// 只要放过一个 `/` 或 `..`，整条通道就又变回任意路径写入。
+fn valid_stamp(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 19 {
+        return false;
+    }
+    const VERIFY_DIGITS: [usize; 14] = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
+    const VERIFY_SEPS: [(usize, u8); 5] = [(4, b'-'), (7, b'-'), (10, b'T'), (13, b'-'), (16, b'-')];
+    VERIFY_DIGITS.iter().all(|&i| b[i].is_ascii_digit()) && VERIFY_SEPS.iter().all(|&(i, c)| b[i] == c)
+}
+
+/// 撤销快照专用写入通道：模型侧工具够不到它，通用写通道又拒绝 `.zxz/undo`，
+/// 于是「谁能写快照」被收敛成「谁持有这条 IPC」——而它不在工具清单里。
+///
+/// 纵深防御不止于「换一个命令名」：
+/// 1) stamp 必须是严格时间戳，堵掉用 `/`、`..` 把目录名变成路径；
+/// 2) rel 走 safe_rel，且不得再落进受保护目录（快照里套快照没有意义，只会自我覆盖）；
+/// 3) 落点用 canonicalize 复核两次——`undo` 目录本身必须真在工程内，
+///    父目录必须真在 `undo/<stamp>` 之下。这样即使 `.zxz/undo` 被人换成指向
+///    `src/` 的 junction，写入也不会顺着链接落到源码上。
+pub fn undo_write(root: &Path, stamp: &str, rel: &str, content: String) -> Result<WriteResult, String> {
+    if !valid_stamp(stamp) {
+        return Err(format!("快照标识不合法（要求形如 2026-11-01T02-49-32）：{stamp}"));
+    }
+    let relp = safe_rel(rel)?;
+    if let Some(area) = protected_area(&relp) {
+        return Err(format!("{rel} 落在 {area} 内：快照里不能再放快照"));
+    }
+    if !root.is_absolute() {
+        return Err("工程根目录必须是绝对路径".into());
+    }
+
+    let undo_root = root.join(".zxz").join("undo");
+    fs::create_dir_all(&undo_root).map_err(|e| format!("无法创建撤销目录：{e}"))?;
+    let undo_canon = fs::canonicalize(&undo_root).map_err(|e| format!("撤销目录不可用：{e}"))?;
+    if !path_inside(root, &undo_canon) {
+        return Err("撤销目录指向工程目录之外，拒绝写入快照".into());
+    }
+
+    let target = undo_root.join(stamp).join(&relp);
+    let parent = target.parent().ok_or_else(|| "快照路径没有父目录".to_string())?;
+    fs::create_dir_all(parent).map_err(|e| format!("无法创建快照目录：{e}"))?;
+    let parentc = fs::canonicalize(parent).map_err(|e| format!("快照目录不可用：{e}"))?;
+    if !parentc.starts_with(&undo_canon) {
+        return Err("快照落点不在 .zxz/undo 之下，拒绝写入".into());
+    }
+
+    let created = !target.exists();
+    fs::write(&target, content.as_bytes()).map_err(|e| format!("写入快照失败（{stamp}/{rel}）：{e}"))?;
     Ok(WriteResult {
         path: target.to_string_lossy().to_string(),
         bytes: content.len(),
@@ -479,6 +561,82 @@ mod tests {
         assert!(r.created);
         assert_eq!(fs::read_to_string(dir.join("a/b/c.txt")).unwrap(), "hello");
         assert!(!dir.parent().unwrap().join("c.txt").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 复现：`.git` 拒绝表是基于**原始字符串**判定的，而 `safe_rel` 会把 `.` 段吃掉。
+    /// 于是 `./.git/config` 的首段是 `.`、不是 `.git`，字符串判定放行，落点却是
+    /// `<root>/.git/config`——上一轮那道 .git 写保护可以被一个 `.` 前缀整个绕过。
+    #[test]
+    fn dot_prefix_must_not_bypass_git_protection() {
+        let dir = std::env::temp_dir().join(format!("zxz-fsx-dotgit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        let rootc = fs::canonicalize(&dir).unwrap();
+        for bad in ["./.git/config", ".git/./config", "./.git/hooks/pre-commit", ".//.git/config"] {
+            assert!(write(&rootc, bad, "malicious".into()).is_err(), "应拒绝：{bad}");
+        }
+        assert!(!dir.join(".git/config").exists(), "被拒绝的写入不能真的落盘");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 撤销快照是「覆盖写失败时的唯一退路」，而它落在工程内的普通路径下。
+    /// 修复前：模型手里的 write_file 与备份写入走的是同一条 fs_write，
+    /// 于是模型可以改写自己的安全网——用户点「恢复」拿到模型准备好的内容。
+    #[test]
+    fn model_channel_cannot_touch_undo_snapshots() {
+        let dir = std::env::temp_dir().join(format!("zxz-fsx-undo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let rootc = fs::canonicalize(&dir).unwrap();
+
+        // 先用专用通道放一份合法快照（证明这条通道本身可用）
+        let r = undo_write(&rootc, "2026-11-01T02-49-32", "src/a.ts", "ORIGINAL".into()).unwrap();
+        assert!(r.created);
+        assert_eq!(fs::read_to_string(dir.join(".zxz/undo/2026-11-01T02-49-32/src/a.ts")).unwrap(), "ORIGINAL");
+
+        // 被测：通用写通道（模型可达）必须连整个 .zxz/undo 都写不进去，
+        // 大小写、分隔符、`.` 前缀三种变形一起测——判定基于规范化路径才挡得住
+        for bad in [
+            ".zxz/undo/2026-11-01T02-49-32/src/a.ts",
+            ".ZXZ/UNDO/2026-11-01T02-49-32/src/a.ts",
+            ".zxz\\undo\\2026-11-01T02-49-32\\src\\a.ts",
+            "./.zxz/undo/2026-11-01T02-49-32/src/a.ts",
+            ".zxz/undo/2026-11-01T02-49-32/evil.ts",
+        ] {
+            let e = write(&rootc, bad, "TAMPERED".into()).unwrap_err();
+            assert!(e.contains(".zxz/undo"), "{bad} 应被拒绝：{e}");
+        }
+        // 快照内容必须一个字节都没变
+        assert_eq!(
+            fs::read_to_string(dir.join(".zxz/undo/2026-11-01T02-49-32/src/a.ts")).unwrap(),
+            "ORIGINAL",
+            "模型通道居然改掉了撤销快照"
+        );
+
+        // 对照组：.zxz/audit 是模型自己的报告产物，不该被顺手挡掉
+        assert!(write(&rootc, ".zxz/audit/report.md", "ok".into()).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_write_rejects_bad_stamp_and_nested_path() {
+        let dir = std::env::temp_dir().join(format!("zxz-fsx-undostamp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let rootc = fs::canonicalize(&dir).unwrap();
+
+        // stamp 是撤销通道唯一由外部给的「目录名」：放过一个分隔符就回到任意路径写入
+        for bad in ["", "2026-11-01", "../..", "../../etc", "2026-11-01T02-49", "2026-11-01T02-49-32/x", "2026_11_01T02_49_32"] {
+            assert!(undo_write(&rootc, bad, "a.ts", "x".into()).is_err(), "stamp 应被拒绝：{bad:?}");
+        }
+        // rel 不能把快照写到别处，也不能在快照里套快照
+        for bad in ["../evil.ts", "/etc/passwd", ".zxz/undo/x", ".git/config", ""] {
+            assert!(undo_write(&rootc, "2026-11-01T02-49-32", bad, "x".into()).is_err(), "rel 应被拒绝：{bad:?}");
+        }
+        // 合法落点必须在 undo/<stamp>/ 之下
+        let ok = undo_write(&rootc, "2026-11-01T02-49-32", "src/lib/b.ts", "y".into()).unwrap();
+        assert!(ok.path.replace('\\', "/").ends_with(".zxz/undo/2026-11-01T02-49-32/src/lib/b.ts"), "{}", ok.path);
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -140,6 +140,7 @@ describe("目录树与撤销栈走会话通道", () => {
 
   it("撤销栈按 sessionId 列出快照，rel 仍是工程内路径", async () => {
     installDesktop({
+      fs_exists: () => true,
       fs_list_in: (args) => {
         const rel = String(args?.rel ?? "");
         if (rel === ".zxz/undo") return [{ name: "2026-11-01T02-49-32", path: "/p/.zxz/undo/2026-11-01T02-49-32", dir: true, size: 0 }];
@@ -154,23 +155,79 @@ describe("目录树与撤销栈走会话通道", () => {
     expect(snaps).toHaveLength(1);
     expect(snaps[0].stamp).toBe("2026-11-01T02-49-32");
     expect(snaps[0].files).toEqual([{ rel: "src/a.ts", bytes: 21 }]);
-    for (const c of calls) {
-      expect(c.cmd).toBe("fs_list_in");
-      expect(c.args?.sessionId).toBe("ws-1");
-    }
-  });
-
-  it("恢复某一版也只走 sessionId", async () => {
-    installDesktop({
-      fs_read: () => "old",
-      fs_write: () => ({ path: "/p/src/a.ts", bytes: 3, created: false }),
-    });
-    const r = await restoreUndo("ws-1", "2026-11-01T02-49-32", "src/a.ts");
-    expect(r.bytes).toBe(3);
+    const listed = calls.filter((c) => c.cmd === "fs_list_in");
+    expect(listed.length).toBeGreaterThan(0);
     for (const c of calls) {
       expect(c.args?.sessionId).toBe("ws-1");
       expect("root" in (c.args ?? {})).toBe(false);
     }
+  });
+
+  it("撤销目录不存在时返回空栈，不算故障", async () => {
+    installDesktop({ fs_exists: () => false });
+    expect(await listUndo("ws-1")).toEqual([]);
+    expect(calls.map((c) => c.cmd)).toEqual(["fs_exists"]);
+  });
+
+  it("撤销目录存在却列不出来必须报错，不能装作没有快照", async () => {
+    installDesktop({
+      fs_exists: () => true,
+      fs_list_in: () => {
+        throw new Error("权限不足");
+      },
+    });
+    await expect(listUndo("ws-1")).rejects.toThrow("权限不足");
+  });
+
+  it("恢复某一版走 undo_write 备份，正文仍走 fs_write", async () => {
+    installDesktop({
+      fs_exists: () => true,
+      fs_read: () => "old",
+      undo_write: () => ({ path: "/p/.zxz/undo/x/src/a.ts", bytes: 3, created: true }),
+      fs_write: () => ({ path: "/p/src/a.ts", bytes: 3, created: false }),
+    });
+    const r = await restoreUndo("ws-1", "2026-11-01T02-49-32", "src/a.ts");
+    expect(r.bytes).toBe(3);
+    expect(r.safety).not.toBeNull();
+    // 备份必须走专用通道：普通写通道在 Rust 侧已经拒绝 .zxz/undo
+    const backupCall = calls.find((c) => c.cmd === "undo_write");
+    expect(backupCall).toBeTruthy();
+    expect(backupCall?.args?.rel).toBe("src/a.ts");
+    expect(String(backupCall?.args?.stamp)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}$/);
+    // 正文写回不能也走 undo_write
+    expect(calls.filter((c) => c.cmd === "fs_write")).toHaveLength(1);
+    for (const c of calls) {
+      expect(c.args?.sessionId).toBe("ws-1");
+      expect("root" in (c.args ?? {})).toBe(false);
+    }
+  });
+
+  it("备份写不进去时恢复必须中止，不能覆盖成不可撤销", async () => {
+    installDesktop({
+      fs_exists: () => true,
+      fs_read: () => "old",
+      undo_write: () => {
+        throw new Error("磁盘满了");
+      },
+      fs_write: () => ({ path: "/p/src/a.ts", bytes: 3, created: false }),
+    });
+    await expect(restoreUndo("ws-1", "2026-11-01T02-49-32", "src/a.ts")).rejects.toThrow("已中止恢复");
+    // 关键：正文一个字节都不能被写出去
+    expect(calls.some((c) => c.cmd === "fs_write")).toBe(false);
+  });
+
+  it("当前内容读不出来（超大/二进制）时同样中止，不静默跳过备份", async () => {
+    installDesktop({
+      fs_exists: () => true,
+      fs_read: (args) => {
+        const rel = String(args?.rel ?? "");
+        // 快照本身读得到，工程里的当前文件读不到——这才是要测的那个分支
+        if (rel.startsWith(".zxz/undo/")) return "SNAPSHOT";
+        throw new Error("超过 4MB");
+      },
+    });
+    await expect(restoreUndo("ws-1", "2026-11-01T02-49-32", "src/a.ts")).rejects.toThrow("已中止");
+    expect(calls.some((c) => c.cmd === "fs_write" || c.cmd === "undo_write")).toBe(false);
   });
 });
 

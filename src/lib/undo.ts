@@ -9,7 +9,7 @@
  */
 
 import { UNDO_DIR } from "./files";
-import { fsListIn, fsRead, fsWrite, type FsEntry } from "./fsapi";
+import { fsExists, fsListIn, fsRead, fsWrite, undoWrite, type FsEntry } from "./fsapi";
 
 export interface UndoFile {
   /** 工程内相对路径，如 `src/main.js` */
@@ -67,12 +67,12 @@ const UNDO_PREFIX = `${UNDO_DIR}/`;
 
 /** 列出所有快照，新的在前；单个快照里按路径排序 */
 export async function listUndo(sessionId: string): Promise<UndoSnapshot[]> {
-  let top: FsEntry[];
-  try {
-    top = await fsListIn(sessionId, UNDO_DIR);
-  } catch {
-    return []; // 还没写过任何文件时目录不存在，正常情况
-  }
+  // 目录不存在是正常情况（还没覆盖过任何文件）；存在却列不出来是真故障。
+  // 旧实现把这两种都 `catch` 成空数组，界面就显示「没有快照」——
+  // 用户会以为备份不存在，而实际上可能是权限或会话出了问题。
+  const hasUndo = await fsExists(sessionId, UNDO_DIR);
+  if (!hasUndo) return [];
+  const top = await fsListIn(sessionId, UNDO_DIR);
 
   const snapshots: UndoSnapshot[] = [];
   for (const dir of top.filter((e) => e.dir)) {
@@ -118,18 +118,39 @@ export interface RestoreResult {
 /**
  * 把某个文件的某一版写回去。
  * 写之前先把当前内容再备份一份，所以「恢复」本身也能再恢复。
+ *
+ * 备份失败必须抛错中止，不能沿用旧的「读不到就跳过」：
+ * 旧写法在一个 5MB 文件上（超过读取上限）会静默跳过备份，然后照样覆盖——
+ * 用户看到「已恢复」，实际这次恢复不可撤销。恢复是一条数据改写操作，
+ * 它的失败语义必须和写入一致：拿不到可回滚点，就不动手。
  */
 export async function restoreUndo(sessionId: string, stamp: string, rel: string): Promise<RestoreResult> {
   const content = await readUndoFile(sessionId, stamp, rel);
 
-  let safety: string | null = null;
+  // 「确认不存在」与「校验失败」必须分开：后者意味着我们根本不知道当前状态
+  let exists: boolean;
   try {
-    const current = await fsRead(sessionId, rel);
+    exists = await fsExists(sessionId, rel);
+  } catch (e) {
+    throw new Error(`无法确认当前文件状态，已中止恢复：${(e as Error).message}`);
+  }
+
+  let safety: string | null = null;
+  if (exists) {
+    let current: string;
+    try {
+      current = await fsRead(sessionId, rel);
+    } catch (e) {
+      throw new Error(`当前内容读不出来（二进制或超过 4MB），恢复将不可撤销，已中止：${(e as Error).message}`);
+    }
     const now = stampNow();
-    await fsWrite(sessionId, `${UNDO_DIR}/${now}/${rel}`, current);
+    try {
+      // 专用通道：普通 fsWrite 拒绝 .zxz/undo，模型不可达
+      await undoWrite(sessionId, now, rel, current);
+    } catch (e) {
+      throw new Error(`恢复前的备份没有写成，已中止恢复：${(e as Error).message}`);
+    }
     safety = now;
-  } catch {
-    // 当前文件不存在（比如它在别的分支被删了）就没有可备份的东西
   }
 
   const r = await fsWrite(sessionId, rel, content);
