@@ -310,7 +310,7 @@ node tools/e2e.cjs                       # 24 项，2026-11-03 实测 24/24
 纯逻辑单测（Markdown / 高亮 / 上下文窗口 / 会话过滤）不需要浏览器：
 
 ```bash
-npm test                  # vitest run，437 条（18 个文件），2026-11-03 实测
+npm test                  # vitest run，441 条（19 个文件），2026-11-03 实测
 ```
 
 **两个本机踩过的坑，写下来省得再踩**：
@@ -325,9 +325,9 @@ npm test                  # vitest run，437 条（18 个文件），2026-11-03 
   以前五个脚本各自写死 `channel: 'msedge'`，在没装 Edge 的机器/CI 上会直接
   `Chromium distribution 'msedge' is not found`——那个报错跟用例内容毫无关系，
   看着像测试坏了，其实是环境缺浏览器。全都不行时的报错会把每次的真实原因列出来。
-- **`playwright` 目前不在 `package.json` 里**（只是在 `node_modules` 中），
-  `npm ci` 之后会消失。这是 e2e 进不了 CI 的最后一个原因，属「新增第三方依赖」，
-  需要业主批准后才能补进 `devDependencies`。
+- **`playwright` 已进 `devDependencies`**（业主批准），`npm ci` 之后仍然可用。
+  浏览器仍按上面那条逐级回落，**不会强制下载 chromium**；CI 里要跑 e2e 的话
+  需要额外一步 `npx playwright install chromium`。
 
 ### 9.3 本机代理模式（走真实 Rust 转发）
 
