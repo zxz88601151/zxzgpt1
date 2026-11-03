@@ -15,6 +15,10 @@ desktop.ini
 .zxz/
 .tmp-ws/
 .tmp-live/
+.tmp-audit/
+# 外部仓库快照：193MB 第三方源码，只用于审计取证，绝不入库
+.refs/
+.tmp-skills/
 # 全流程测试时模型新建的工程目录
 skilltest-*/
 webtest-*/
