@@ -46,6 +46,7 @@ import {
   isAllowedCommand,
   npmScriptName,
   MAX_TEST_ROUNDS,
+  runResultHead,
   testLoopDecision,
   TOOL_DEFS,
   truncateToolOutput,
@@ -529,7 +530,8 @@ export default function App() {
             }
           }
           const r = await runAllowed(ws.sessionId, argv);
-          const head = `退出码：${r.exit_code === null ? "未知（进程被终止）" : r.exit_code}${r.timed_out ? "（60 秒超时，已终止）" : ""}`;
+          // 截断与超时必须显式告诉模型：截断后「没看到报错」不等于测试通过。
+          const head = runResultHead(r);
           const body = [r.stdout, r.stderr ? `--- stderr ---\n${r.stderr}` : ""].filter(Boolean).join("\n");
           return { ...base, result: truncateToolOutput(`${head}\n${body || "(无输出)"}`) };
         }

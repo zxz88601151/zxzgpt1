@@ -310,6 +310,108 @@ mod runx_tests {
         String::from_utf8_lossy(&o.stdout).contains(&pid.to_string())
     }
 
+    /// 这些键不是「从宿主环境继承」来的，而是执行器/沙箱在子进程里自己加的：
+    /// - `npm_*` / `NPM_*` / `INIT_CWD` / `EDITOR`：npm 执行 scripts 时自设
+    ///   （脚本名、包名、execpath、默认编辑器）；
+    /// - `NODE*`：node --test runner 与 npm.cmd 里的 SET 语句（NODE_EXE 等）；
+    /// - `PROMPT` / `COLOR`：Windows 上 .cmd 由 cmd.exe 执行，cmd 会补自己的默认值；
+    /// - `LSBOX_*` / `SANDBOX_IPC_TRACE_*` / `MSYSTEM`：本机沙箱在进程启动时注入。
+    ///   依据：`env -i PATH=… node -e 'Object.keys(process.env)'` 在**完全清空**
+    ///   的环境下仍然打印出这四个键——它不走环境块，应用层的 env_clear 管不到。
+    ///
+    /// 把它们排除不是为了让断言变松：真正的判据是「宿主继承面必须为空」，
+    /// 下面用对照组（直接 spawn）证明宿主确实有一批可继承的变量，
+    /// 再用被测组证明同样这批一个都没传进去。
+    fn not_inherited(k: &str) -> bool {
+        k.starts_with("npm_")
+            || k.starts_with("NPM_")
+            || k.starts_with("NODE")
+            || matches!(k, "INIT_CWD" | "EDITOR" | "PROMPT" | "COLOR" | "MSYSTEM")
+            || k.starts_with("LSBOX_")
+            || k.starts_with("SANDBOX_IPC_TRACE_")
+    }
+
+    /// 子进程的环境必须是「白名单 + 执行器注入」，不该带上宿主的任何东西。
+    ///
+    /// 这条路径跑的是模型提议的命令，npm 脚本 / vite 插件 / node --test 文件
+    /// 都是会在子进程里执行的代码——继承宿主环境等于把 API Key、代理口令、
+    /// CI token 交给模型侧能读到输出的代码（`console.log(process.env)` 就够）。
+    ///
+    /// 不用「往宿主塞哨兵」的写法：set_var 是进程级全局状态，会和并发跑的
+    /// 其它用例互相污染。这里让子进程自报键名，再比集合。
+    #[test]
+    fn child_env_is_whitelist_not_a_copy_of_host() {
+        let dir = npm_project("envkeys", "console.log('ENV_KEYS:' + Object.keys(process.env).sort().join(','));\n");
+        let allowed = runx::allowed_env_keys();
+
+        // 对照组：同一份脚本直接 spawn。它必须能拿到一批「白名单外的宿主变量」，
+        // 否则说明本机环境本来就干净，这条用例证明不了隔离。
+        let direct = Command::new("node").args(["--test", "emit.js"]).current_dir(&dir).output().expect("对照组：本机必须能跑 node");
+        let direct_out = String::from_utf8_lossy(&direct.stdout).to_string();
+        let direct_inherited: Vec<String> = env_keys_of(&direct_out)
+            .into_iter()
+            .filter(|k| !allowed.contains(k) && !not_inherited(k))
+            .map(String::from)
+            .collect();
+        assert!(
+            !direct_inherited.is_empty(),
+            "对照组失效：直接 spawn 也拿不到白名单外的宿主变量，本机环境太干净，这条用例说明不了问题"
+        );
+
+        // 被测组：经 run_allowed，同样这批变量必须一个都不剩
+        let r = runx::run_allowed(&dir, &argv(&["npm", "run", "build"])).unwrap();
+        assert!(r.stdout.contains("ENV_KEYS:"), "脚本没跑起来，断言无意义：{:?}", r.stdout.chars().take(300).collect::<String>());
+        let keys: Vec<String> = env_keys_of(&r.stdout).into_iter().map(String::from).collect();
+        assert!(!keys.is_empty(), "没解析到子进程环境键名");
+        let leftover: Vec<&String> = keys.iter().filter(|k| !allowed.contains(&k.as_str()) && !not_inherited(k)).collect();
+        assert!(leftover.is_empty(), "宿主环境变量被继承进去了（泄漏面，对照组里同样存在）：{leftover:?}");
+
+        // 威胁面断言：高危项一个都不能有，哪怕宿主里设了
+        for banned in ["NODE_OPTIONS", "npm_config_script_shell", "NPM_CONFIG_SCRIPT_SHELL"] {
+            assert!(!keys.iter().any(|k| k == banned), "{banned} 出现在子进程环境里：启动即执行面");
+        }
+        assert!(!keys.iter().any(|k| {
+            let u = k.to_ascii_uppercase();
+            u.contains("TOKEN") || u.contains("SECRET") || u.contains("PASSWORD") || u.ends_with("_KEY")
+        }), "子进程环境里出现疑似凭据变量：{keys:?}");
+
+        // 反之，工具链自己要用的必须还在——不然不是「隔离」而是「跑不起来」
+        for need in ["PATH", "APPDATA", "SYSTEMROOT"] {
+            assert!(keys.iter().any(|k| k.eq_ignore_ascii_case(need)), "白名单把工具链依赖的 {need} 也挡掉了");
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 从 node --test 的 TAP 输出里取出 `ENV_KEYS:a,b,c` 那一行的键集合
+    fn env_keys_of(stdout: &str) -> Vec<&str> {
+        for line in stdout.lines() {
+            if let Some(pos) = line.find("ENV_KEYS:") {
+                let raw = &line[pos + "ENV_KEYS:".len()..];
+                // TAP 会给子进程输出加 `# ` 前缀或尾随内容，取到非标识符字符为止
+                let end = raw.find(|c: char| !(c.is_alphanumeric() || c == '_' || c == ',')).unwrap_or(raw.len());
+                return raw[..end].split(',').filter(|s| !s.is_empty()).collect();
+            }
+        }
+        Vec::new()
+    }
+
+    /// 捕获上限是**内存**上限，不是展示上限：限流前读线程会把子进程吐的一切
+    /// 都 extend 进 Vec，然后才截断到 20000 字符——先吃满再削，等于没限。
+    #[test]
+    fn oversized_output_is_capped_and_still_finishes() {
+        let dir = npm_project("capout", "process.stdout.write('X'.repeat(2 * 1024 * 1024));\n");
+        let t0 = Instant::now();
+        let r = runx::run_allowed(&dir, &argv(&["npm", "run", "build"])).unwrap();
+        let spent = t0.elapsed();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(spent < Duration::from_secs(45), "2MB 输出花了 {spent:?}，疑似管道堵死");
+        assert!(r.truncated, "超限输出必须标记 truncated");
+        assert_eq!(r.stdout.chars().count(), 20000, "展示层截断失败");
+        assert!(r.exit_code.is_some(), "超限不能把退出码弄丢——那会让测试回路误判通过");
+    }
+
     /// 相对路径不能当工作目录：cwd 只认会话登记出来的绝对路径
     #[test]
     fn run_allowed_rejects_relative_cwd() {

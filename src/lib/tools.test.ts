@@ -7,6 +7,7 @@ import {
   npmScriptName,
   MAX_TEST_ROUNDS,
   parseToolCallsFromMessage,
+  runResultHead,
   testLoopDecision,
   truncateToolOutput,
   validateToolArgs,
@@ -205,5 +206,27 @@ describe("npmScriptName / checkNpmCommandScript", () => {
     expect(checkNpmCommandScript(["npm", "test"], "{}")).not.toBeNull();
     expect(checkNpmCommandScript(["npm", "test"], "not-json")).not.toBeNull();
     expect(checkNpmCommandScript(["git", "status"], "not-json")).toBeNull();
+  });
+});
+
+describe("runResultHead", () => {
+  it("正常结束只报退出码", () => {
+    const head = runResultHead({ exit_code: 0, timed_out: false, truncated: false });
+    expect(head).toBe("退出码：0");
+  });
+
+  it("截断必须明说，否则模型会把半截日志当成通过", () => {
+    const head = runResultHead({ exit_code: 0, timed_out: false, truncated: true });
+    expect(head).toContain("已截断");
+    expect(head).toMatch(/不要把「没看到报错」当成测试通过/);
+  });
+
+  it("超时与进程被杀的退出码都要能读出来", () => {
+    expect(runResultHead({ exit_code: null, timed_out: true, truncated: false })).toContain("未知（进程被终止）");
+    expect(runResultHead({ exit_code: 1, timed_out: true, truncated: false })).toContain("60 秒超时");
+    // 两个标记同时出现时都要在，不能互相顶掉
+    const both = runResultHead({ exit_code: 1, timed_out: true, truncated: true });
+    expect(both).toContain("60 秒超时");
+    expect(both).toContain("已截断");
   });
 });

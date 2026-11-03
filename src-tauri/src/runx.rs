@@ -24,9 +24,72 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub const RUN_TIMEOUT_SECS: u64 = 60;
+/// 回传给模型的字符上限（截断点）
 const MAX_OUTPUT_CHARS: usize = 20000;
+/// 读管道时的**内存硬上限**。
+///
+/// 原来只有 MAX_OUTPUT_CHARS，而它是「全部读完之后」才截断的：读线程无条件
+/// `extend_from_slice`，子进程吐多少就吃多少。一个死循环 console.log 能在
+/// 被截断之前先把宿主内存吃光——限制展示长度不等于限制内存。
+///
+/// 这里取 256KB：展示上限 20000 字符，UTF-8 最坏 4 字节/字符 = 80KB，
+/// 留三倍余量就够；超出部分注定不会进上下文，再留着只是占内存。
+const MAX_CAPTURE_BYTES: usize = 256 * 1024;
 /// 子进程退出后等管道 EOF 的宽限上限：超时了就拿已收到的部分收尾，不再傻等
 const PIPE_DRAIN_GRACE_SECS: u64 = 5;
+
+/// 子进程能继承的环境变量（其余一律清空）。
+///
+/// 为什么必须清空：这条路径跑的是「模型提议、白名单放行」的命令，而 npm 脚本、
+/// vite 插件、node 的 `--test` 文件都是会在子进程里执行的代码。宿主进程环境里
+/// 有 API Key、代理口令、CI token，继承等于把这些秘密交给模型侧能读到输出的代码
+/// ——脚本 `console.log(process.env)` 就全回传到上下文了。
+///
+/// 白名单只留「让 node / npm / git 启得起来」的最小集，刻意**不含**：
+/// - `NODE_OPTIONS`：`--require` 可以直接加载任意模块，等于启动即执行；
+/// - `NPM_CONFIG_*`：能改写 npm 行为（含 `script-shell`，把执行器换掉）；
+/// - 所有 `GIT_*`：git 隔离参数由 effective_argv / 下面的显式注入说了算，
+///   不能让宿主环境里一个 `GIT_CONFIG_GLOBAL` 把它们顶掉。
+const ENV_KEEP: [&str; 19] = [
+    "PATH",
+    "PATHEXT",
+    "COMSPEC",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "HOME",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+];
+
+/// 子进程最终能看到的环境变量键（白名单 + 下面显式注入的 git 隔离项）。
+///
+/// 对外暴露只为一件事：让测试能判定「子进程有没有多拿到东西」。
+/// 有了它，隔离性就是可判定的——不用往宿主环境里塞哨兵（那会污染并发测试），
+/// 直接比「子进程报上来的键集合」和「应该有的键集合」即可。
+pub fn allowed_env_keys() -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = ENV_KEEP.to_vec();
+    v.extend([
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_TERMINAL_PROMPT",
+        "GIT_PAGER",
+        "GIT_OPTIONAL_LOCKS",
+    ]);
+    v
+}
 
 #[derive(Debug, Serialize)]
 pub struct RunResult {
@@ -356,61 +419,58 @@ pub fn run_allowed(root: &Path, argv: &[String]) -> Result<RunResult, String> {
     let spawn_name = resolve_spawn_name(argv[0].as_str());
     let spawn_argv = effective_argv(argv);
     let mut cmd = Command::new(&spawn_name);
-    let mut child: Child = cmd
-        .args(&spawn_argv[1..])
-        .current_dir(dir)
-        // 单命令执行，env 只在本次 spawn 生效：git 向上找仓库到工程根即停
-        // （ceiling 列出的目录本身不再被当作仓库）。
-        // 不改变白名单命令的正常语义（npm/node 忽略它；工程根内/下的仓库照常只读）。
-        .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap_or(dir))
-        // 只读 git 的三道环境隔离：不读系统级配置、不读用户级配置、不许交互提示、
-        // 不落 pager（pager 是可执行程序）、不抢 index.lock。
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", null_device())
-        .env("GIT_CONFIG_SYSTEM", null_device())
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_PAGER", "cat")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("启动命令失败（{}）：{e}", spawn_argv.join(" ")))?;
+    let mut child: Child = {
+        cmd.args(&spawn_argv[1..]).current_dir(dir);
+        // 先清空再按白名单加回来：继承 = 把宿主环境里的密钥交给模型侧代码
+        cmd.env_clear();
+        for key in ENV_KEEP {
+            if let Some(v) = std::env::var_os(key) {
+                cmd.env(key, v);
+            }
+        }
+        cmd
+            // 单命令执行，env 只在本次 spawn 生效：git 向上找仓库到工程根即停
+            // （ceiling 列出的目录本身不再被当作仓库）。
+            // 不改变白名单命令的正常语义（npm/node 忽略它；工程根内/下的仓库照常只读）。
+            .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap_or(dir))
+            // 只读 git 的三道环境隔离：不读系统级配置、不读用户级配置、不许交互提示、
+            // 不落 pager（pager 是可执行程序）、不抢 index.lock。
+            // 这些都在 env_clear 之后写入，所以用户环境里同名的变量顶不掉它们。
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", null_device())
+            .env("GIT_CONFIG_SYSTEM", null_device())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_PAGER", "cat")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("启动命令失败（{}）：{e}", spawn_argv.join(" ")))?
+    };
 
     // 两个读线程并发排空管道，否则输出一多就会把子进程堵死在管道缓冲区里。
+    // 排空与「存不存」是两件事：管道必须读空（不然子进程写不进去），
+    // 但超过 MAX_CAPTURE_BYTES 的部分读完就丢。
     let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     let mut drain_signals = 0usize;
-    if let Some(mut out) = child.stdout.take() {
+    if let Some(out) = child.stdout.take() {
         let buf = stdout_buf.clone();
         let tx = done_tx.clone();
         drain_signals += 1;
         thread::spawn(move || {
-            let mut chunk = [0u8; 8192];
-            loop {
-                match out.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => buf.lock().unwrap().extend_from_slice(&chunk[..n]),
-                    Err(_) => break,
-                }
-            }
+            drain_capped(out, buf);
             let _ = tx.send(());
         });
     }
-    if let Some(mut err) = child.stderr.take() {
+    if let Some(err) = child.stderr.take() {
         let buf = stderr_buf.clone();
         let tx = done_tx.clone();
         drain_signals += 1;
         thread::spawn(move || {
-            let mut chunk = [0u8; 8192];
-            loop {
-                match out_read(&mut err, &mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => buf.lock().unwrap().extend_from_slice(&chunk[..n]),
-                    Err(_) => break,
-                }
-            }
+            drain_capped(err, buf);
             let _ = tx.send(());
         });
     }
@@ -488,8 +548,26 @@ fn kill_tree(child: &mut Child) {
     let _ = child.kill();
 }
 
-fn out_read<R: Read>(r: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
-    r.read(buf)
+/// 把管道读空，但最多只留 `MAX_CAPTURE_BYTES` 字节。
+///
+/// 关键点：**继续 read，只是不存**。读到上限就停止 read 的话，子进程会因为
+/// 管道写满而阻塞——那是死锁不是限流，而且超时保护也救不回来（进程活着，
+/// 只是永远写不出去）。所以这里只限制「留多少」，不限制「读多少」。
+fn drain_capped<R: Read>(mut r: R, buf: Arc<Mutex<Vec<u8>>>) {
+    let mut chunk = [0u8; 8192];
+    loop {
+        match r.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let mut b = buf.lock().unwrap();
+                let room = MAX_CAPTURE_BYTES.saturating_sub(b.len());
+                if room > 0 {
+                    b.extend_from_slice(&chunk[..n.min(room)]);
+                }
+            }
+            Err(_) => break,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -595,6 +673,31 @@ mod tests {
         assert!(!marker.exists(), "run_allowed 仍然被 textconv 劫持：加固参数没生效");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 捕获上限必须只限制「留多少」，不限制「读多少」。
+    ///
+    /// 两个断言缺一不可：只测「留了 256KB」的话，一个读满即停的实现也能过，
+    /// 而那个实现在真实管道上会让子进程永远写不出去——死锁，不是限流。
+    /// 所以第二个断言检查游标确实读到了 EOF。
+    #[test]
+    fn drain_capped_keeps_cap_but_reads_to_eof() {
+        let total = MAX_CAPTURE_BYTES * 3;
+        let mut cur = std::io::Cursor::new(vec![b'A'; total]);
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        drain_capped(&mut cur, buf.clone());
+
+        assert_eq!(buf.lock().unwrap().len(), MAX_CAPTURE_BYTES, "捕获必须停在上限");
+        assert_eq!(cur.position() as usize, total, "必须读到 EOF，提前停读会让子进程堵死在管道上");
+    }
+
+    /// 小输出必须原样保留：上限只该削掉超出的部分，不能把正常输出也削了
+    #[test]
+    fn drain_capped_keeps_small_output_intact() {
+        let data = b"hello\n".to_vec();
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        drain_capped(std::io::Cursor::new(data), buf.clone());
+        assert_eq!(&*buf.lock().unwrap(), b"hello\n");
     }
 
     #[test]

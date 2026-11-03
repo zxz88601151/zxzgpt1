@@ -349,6 +349,27 @@ if (completedRounds >= MAX_TEST_ROUNDS) return "give_up";
 return "retry";
 }
 
+export interface RunSummary {
+  exit_code: number | null;
+  timed_out: boolean;
+  truncated: boolean;
+}
+
+/**
+* 把一次命令执行的结果头部写成给模型看的一行。
+*
+* 为什么截断必须显式说出来：输出被截断后，「日志里没有报错」和「测试通过」
+* 看起来一模一样，而模型只能看到日志。不告诉它被截断了，它就会把半截日志
+* 当成绿灯继续往下走——这正是「静默误判成功」。
+*/
+export function runResultHead(r: RunSummary): string {
+  const notes: string[] = [];
+  if (r.timed_out) notes.push("60 秒超时，已终止");
+  if (r.truncated) notes.push("输出过长已截断，只保留了开头部分，不要把「没看到报错」当成测试通过");
+  const code = r.exit_code === null ? "未知（进程被终止）" : String(r.exit_code);
+  return `退出码：${code}${notes.length ? `（${notes.join("；")}）` : ""}`;
+}
+
 /** 给模型看的工具说明：放在工作区提示词之后、计划提示词之前 */
 export function buildToolsPrompt(planMode: boolean, confirmWrites: boolean): string {
 const lines = [
