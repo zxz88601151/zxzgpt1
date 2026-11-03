@@ -10,7 +10,7 @@
 | 项 | 值 |
 |---|---|
 | 仓库 | `F:/zhuomian/zxz`（product `zxz` / `com.zxz.desktop`） |
-| 分支 / HEAD | `main` / `16cc883`（`fix(e2e): 不再写死 Edge、不再要求先设 ZXZ_BASE`） |
+| 分支 / HEAD | `main` / `cb2d523`（`ci(e2e): 把端到端接进流水线`） |
 | 远端 | `origin` 内网 Gitea `192.168.3.200:3000/zxzjxx/zxzgpt.git`（与本地同步）；`github` 备用 |
 | 版本号 | `package.json` / `tauri.conf.json` / `Cargo.toml` 三处均 `0.3.0`（一致） |
 | 技术栈 | Tauri 2 + Rust（fsx / runx / wsx / proxy / api / perms）＋ React 18 + TS + Vite 6；测试用 vitest（node 环境为主，DOM 用文件头 `@vitest-environment jsdom` 单文件声明） |
