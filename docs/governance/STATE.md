@@ -21,9 +21,9 @@
 
 | 命令 | 结果 |
 |---|---|
-| `npm test` | **396 passed / 17 files**（本轮起点 328） |
+| `npm test` | **397 passed / 17 files**（本轮起点 328） |
 | `npm run build` | 成功；`dist/assets/index-BUPLjQ7F.js` 335.02 kB |
-| `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **79 passed / 1 ignored**（GNU 工具链；msvc 必失败） |
+| `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **82 passed / 1 ignored**（GNU 工具链；msvc 必失败） |
 | `cargo check --manifest-path src-tauri/Cargo.toml` | 通过，**0 warning**（B10 收口时实测） |
 | e2e（当日实跑） | `e2e.cjs` 24/24、`workspace-e2e` 39/39、`skill-e2e` 69/69、`proxy-e2e` 接口 11/11 + 前端 24/24 |
 
@@ -44,7 +44,7 @@
 
 ## 3. 当前结论（不夸大）
 
-- 代码级质量：**良好**。396 条前端单测、79 条 Rust 单测全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。
+- 代码级质量：**良好**。397 条前端单测、82 条 Rust 单测全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。
 - 安全态势：**PARTIAL → 明显改善**。P0 三条 + 本轮 2 条（npm `pre`/`post` 钩子绕过、`.npmrc` 改脚本 shell）+ 执行授权闸门（P0-4）已落地；其余已登记项见 §5 与 `TECHNICAL_DEBT.md`。
 - 交付状态：**NOT_READY**。无安装包；CI 不编译 `src-tauri` 本体；e2e 无法在 CI 复现；release exe 已落后于 HEAD。
 - 架构状态：**PARTIAL**。编排仍是 1520 行 `App.tsx` 内的闭包循环；`src/orchestration/` 已存在但只有一个 `round.ts`（B7 切片），`send()` 本体未搬。工具五处手写已收成注册表（B6 完成）。ADR 0001 的 5 条验收标准 1.5 条达成（详见该 ADR 的"实施进度"小节，未勾的不勾）。
@@ -75,6 +75,7 @@
 | B7 · 轮末判定抽取 | `src/orchestration/round.ts`：`nextRound` / `stopNotice` / `shouldAutoTest` 三个纯函数；`MAX_ROUNDS` 导出；App 只剩执行 | **PASS**（切片） | 前端 **396**（25 条新断言）；已过独立复审（4 条 P2 + 4 条 P3，全部处置）；`docs/adr/0001` 进度小节 |
 | B8 · 证据对账 | README 全部 e2e 数字按当日实测重写；7 个未跑脚本标 `NOT_TESTED`；修掉假 IPC 落后与过期断言 | **PASS** | 24/39/69/11+24 全过；`docs/audit/B8_EVIDENCE_RECONCILIATION_20261103.md` |
 | B15 · 代理鉴权前置 | `read_request` 拆成 `read_head` + `read_body`；Host / token 校验全部前移到读 body 之前 | **PASS** | 新增裸 socket 断言（不发 body 也必须立刻 401）；接口 11/11 + 前端 24/24 |
+| B13 · 停止真的停 | `run_cancel` + 会话级取消位；`RunResult.cancelled` 与 `timed_out` 分开；测试断言**耗时**而非标志位 | **PASS** | Rust **82**（新增 3 条取消用例，含真起 60 秒 npm test 再取消）；前端 397 |
 
 ### 下一批（按优先级，已排定，不再请示）
 
@@ -83,8 +84,7 @@
 
 | # | 任务 | 为什么现在 | 验收 |
 |---|---|---|---|
-| B13 | `AbortController` 管不到正在跑的 `npm test`（D-01） | 界面显示"已停止"而命令还在跑——**界面在说谎**，且"停止"正是用户出问题时按的那个键 | 点停止后子进程被收树终止 |
-| B12 | `send()` 整轮重放测试设施（D-02） | 唯一的 P1 级质量缺口：1520 行编排零覆盖，396 条绿灯照不到那片区域 | 至少 1 类（上游错误）在 CI 跑 |
+| B12 | `send()` 整轮重放测试设施（D-02） | 唯一的 P1 级质量缺口：1520 行编排零覆盖，397 条绿灯照不到那片区域 | 至少 1 类（上游错误）在 CI 跑 |
 | B11 | undo 子目录列举失败静默跳过（D-04） | 会产出"看起来完整"的快照 | 打不开时快照带 `incomplete` 标记 |
 | B14 | e2e 进 CI 的三个前置（D-08） | R3 三个成因已逐个实测确认，都可修 | CI 上 `e2e.cjs` 能跑 |
 

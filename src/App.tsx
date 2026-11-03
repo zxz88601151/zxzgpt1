@@ -13,6 +13,7 @@ import {
   permList,
   permRevoke,
   runAllowed,
+  runCancel,
   sessionFor,
   undoWrite,
   wsClose,
@@ -860,6 +861,12 @@ export default function App() {
               // 脚本审计已下沉到 Rust 执行层（runx）：npm test 真正跑的脚本不是
               // 受信任运行器时直接拒绝，这里不再前端预判，拒绝原因走 catch 报出来。
               const r = await runAllowed(ws.sessionId, ["npm", "test"]);
+              // 用户点了停止：命令是被我们杀掉的，不是测试没过。
+              // 这时候既不能回传"未通过"给模型，也不能再走重试——直接收摊。
+              if (r.cancelled) {
+                toast("已停止自动测试", "");
+                break;
+              }
               testRounds += 1;
               const combined = [r.stdout, r.stderr ? `--- stderr ---\n${r.stderr}` : ""].filter(Boolean).join("\n");
               const decision = testLoopDecision(r.exit_code, testRounds);
@@ -952,6 +959,10 @@ export default function App() {
       pendingResolveRef.current(null);
       pendingResolveRef.current = null;
     }
+    // 光 abort 掉 fetch 管不到已经起的子进程（npm test 在 Rust 里跑）。
+    // 点停止就该真的停：通知 Rust 终止，没在跑的时候它什么也不做。
+    const ws = stateRef.current.settings.workspace;
+    if (ws) void runCancel(ws.sessionId);
   }, []);
 
   const regenerate = useCallback(async () => {

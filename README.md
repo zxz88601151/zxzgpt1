@@ -39,7 +39,7 @@ zxz/
 │   │   ├── tools.ts            工具定义、白名单、tool_calls 合并、测试回路决策（纯逻辑）
 │   │   ├── pending.ts          写入前确认：待批清单（纯逻辑，不碰 IPC）
 │   │   ├── fsapi.ts            本机文件 IPC 封装（列目录 / 读 / 写 / 拼目录树）
-│   │   └── *.test.ts           本目录 13 个单测文件（全仓 17 个 / 396 条，见 §9.6）
+│   │   └── *.test.ts           本目录 13 个单测文件（全仓 17 个 / 397 条，见 §9.6）
 │   ├── skills/
 │   │   ├── index.ts            内建技能装配（?raw 导入，与外部技能同一套解析）
 │   │   ├── sources.ts          外部来源登记表（29 条）+ 分组汇总 + 审计清单生成
@@ -299,7 +299,7 @@ ZXZ_BASE=http://localhost:1420 node tools/e2e.cjs   # 24 项，2026-11-03 实测
 纯逻辑单测（Markdown / 高亮 / 上下文窗口 / 会话过滤）不需要浏览器：
 
 ```bash
-npm test                  # vitest run，396 条（17 个文件），2026-11-03 实测
+npm test                  # vitest run，397 条（17 个文件），2026-11-03 实测
 ```
 
 **两个本机踩过的坑，写下来省得再踩**：
@@ -362,7 +362,7 @@ node tools/desktop-workspace-e2e.cjs   # 静态 34 项，本轮未跑（见 9.6�
 Rust 侧路径校验与真实写入（不依赖 tauri，`#[path]` 引用 `fsx.rs` 原文）：
 
 ```bash
-cd tools/fs-harness && cargo test      # 79 条（另 1 条 60 秒超时用例默认 ignore，用 --ignored 跑）
+cd tools/fs-harness && cargo test      # 82 条（另 1 条 60 秒超时用例默认 ignore，用 --ignored 跑）
 ```
 
 > 必须带 GNU 工具链：`RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu`。
@@ -404,8 +404,8 @@ node tools/desktop-skill-e2e.cjs    # 静态 21 项，本轮未跑（见 9.6，�
 | `tools/workspace-e2e.cjs`（假 IPC 工程模式） | 39 | **39 PASS / 0 FAIL** |
 | `tools/skill-e2e.cjs`（假 IPC 技能库） | 69 | **69 PASS / 0 FAIL** |
 | `tools/proxy-e2e.cjs`（真实 Rust 代理，重编后） | 11 + 24 | **11/11 接口 + 24/24 前端** |
-| `cargo test --manifest-path tools/fs-harness/Cargo.toml` | 79 + 1 ignored | **79 PASS** |
-| `npx vitest run` | 396 / 17 文件 | **396 PASS** |
+| `cargo test --manifest-path tools/fs-harness/Cargo.toml` | 82 + 1 ignored | **82 PASS** |
+| `npx vitest run` | 397 / 17 文件 | **397 PASS** |
 
 **当日没跑，只有静态计数**（下表数字是脚本里 `check(...)` 的调用点数量，
 不是运行结果；未跑的原因逐个写在最后一列）：
@@ -845,6 +845,27 @@ shell 却会再执行一条命令。所以先做构造级拒绝（`$`、反引�
 再按 `&& || ; | &` 全部切段。Rust `runx.rs` 与前端 `tools.ts` 用的是同一套规则，
 执行时以 Rust 为准。
 
+**点「停止」要真的停下来**（2026-11-03 补，B13）：`AbortController` 只能中断
+`fetch`，而 `npm test` 是 Rust 侧起的子进程，abort 对它没有任何作用——界面显示"已停止"、
+命令还在跑，这是界面在说谎。现在停止按钮会额外调一次 `run_cancel(sessionId)`：
+Rust 侧给这个会话的取消位置位，等待循环每 50ms 看一眼，置位就 `taskkill /T` 收树
+并返回 `cancelled: true`。
+
+三个细节都是刻意的：
+
+- **取消位每次执行新建、用完注销**。复用同一个位的话，上一次点停止留下的 `true`
+  会把下一次刚开始的命令直接杀掉——表现就是"点过一次停止，之后所有命令都起不来"。
+- **没在跑的时候点停止什么也不做**（`cancel_running` 返回 `false`，不报错）。
+  停止按钮随时可点，留下一个将来才生效的标记是最糟的行为。
+- **`cancelled` 与 `timed_out` 分开报**。两者都是"进程被我们杀了"，但含义相反：
+  超时是命令自己没跑完（该改代码），取消是人叫停的（别当失败再试一遍）。
+  混成一个字段，测试回路会在用户点停止后回传"第 1/3 轮 npm test 未通过"——
+  把人的操作写成代码的错，模型于是接着改根本没问题的代码。
+
+端到端测试不看标志位只看**耗时**：起一条挂 60 秒的 `npm test`，2.5 秒后取消，
+必须 15 秒内返回且 `cancelled=true`。只断言标志位是不够的——标志位可以置对而进程还活着，
+那正是这条缺陷最初的样子。
+
 **还要审 `pre` / `post` 钩子**（2026-11-03 补，实测可绕过）：`npm test` 实际会依次跑
 `pretest` → `test` → `posttest`，只审 `scripts.test` 等于只看了三步里的中间那一步。
 实测这套配置能过审并写出文件：
@@ -866,11 +887,11 @@ shell 却会再执行一条命令。所以先做构造级拒绝（`$`、反引�
 
 | 项目 | 结果 |
 | --- | --- |
-| `npx vitest run` | **396 passed / 17 files** |
+| `npx vitest run` | **397 passed / 17 files** |
 | `npx tsc --noEmit` | **0 error** |
 | `npm run build` | 成功 |
 | `cargo check --manifest-path src-tauri/Cargo.toml` | **通过，0 warning**（含 lib.rs 的 IPC 注册、api.rs 转发） |
-| `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **79 passed / 1 ignored**（GNU 工具链） |
+| `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **82 passed / 1 ignored**（GNU 工具链） |
 | `run_allowed` 在本机真 spawn `npm --version` | 退出码 0，输出 10.9.7 |
 | `node tools/e2e.cjs` / `workspace-e2e` / `skill-e2e` / `proxy-e2e` | 24/24、39/39、69/69、10+24 全过（见 9.6） |
 
@@ -923,7 +944,7 @@ shell 却会再执行一条命令。所以先做构造级拒绝（`$`、反引�
 | 目录逃逸 | 指名让模型用 `read_file` 读 `../.tmp-edge-outside.txt` | 工具返回 error，没有任何一条工具结果带出根目录外内容 |
 | 项目记忆 | 明令“不许用工具、不许读文件”，问 CLAUDE.md 里的约定 | 答出了 `ZXZ-MEMO-7742`，且** 0 次工具调用**，证明确实是随请求注入而非临时去读 |
 
-Rust 侧另补了边界用例（`tools/fs-harness`，当日 **79 条全过**，另有 1 条 `#[ignore]`）：
+Rust 侧另补了边界用例（`tools/fs-harness`，当日 **82 条全过**，另有 1 条 `#[ignore]`）：
 
 - **非零退出码必须透传**：自动测试回路靠它判断“过没过”，掉了就会把失败误判成通过。
 - **超大输出不死锁**：两个流都必须读到 EOF（提前停读会把子进程堵死在管道缓冲区），

@@ -171,7 +171,25 @@ mod run_cmds {
     pub fn run_allowed(session_id: String, argv: Vec<String>) -> Result<crate::runx::RunResult, String> {
         let root = crate::root_for(&session_id, "执行命令")?;
         crate::gate_exec(&session_id, &argv)?;
-        crate::runx::run_allowed(&root, &argv)
+        // 取消位只覆盖这次执行：登记 → （可能被 run_cancel 置位）→ 注销。
+        // 注销必须发生，否则位会一直挂在会话上，下次点停止就指向一条早不在跑的命令。
+        let slot = crate::runx::begin_run(&session_id);
+        let out = crate::runx::run_allowed_cancellable(&root, &argv, &slot);
+        crate::runx::end_run(&session_id);
+        out
+    }
+
+    /// 终止这个会话正在跑的命令（用户点「停止」）。
+    ///
+    /// 不过授权闸门：取消是**收窄**权限的动作，不需要再批准一次。
+    /// 也不查白名单——它不启动任何进程，只是给已经跑着的那条置一个位。
+    ///
+    /// 返回值表示"当时确实有命令在跑"，让前端能区分"停了"和"本来就没在跑"。
+    #[tauri::command]
+    pub fn run_cancel(session_id: String) -> Result<bool, String> {
+        // 会话必须还有效：关掉的工程不该还能被点名
+        crate::root_for(&session_id, "终止命令")?;
+        Ok(crate::runx::cancel_running(&session_id))
     }
 }
 
@@ -224,6 +242,7 @@ pub fn run() {
             fs_cmds::undo_list,
             fs_cmds::undo_read,
             run_cmds::run_allowed,
+            run_cmds::run_cancel,
             perm_cmds::perm_grant,
             perm_cmds::perm_revoke,
             perm_cmds::perm_list

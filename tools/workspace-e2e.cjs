@@ -148,6 +148,8 @@ function check(name, ok, detail) {
         }
         // 执行授权：本脚本不跑命令，但打开工程时会拉一次授权列表，不能让它抛
         if (cmd === 'perm_list' || cmd === 'perm_grant' || cmd === 'perm_revoke') return [];
+        // 停止按钮会顺手通知 Rust 终止正在跑的命令；这里没有子进程，返回 false
+        if (cmd === 'run_cancel') return false;
         throw new Error('unknown cmd: ' + cmd);
       },
     };

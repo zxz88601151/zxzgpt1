@@ -166,6 +166,7 @@ mod runx_tests {
     use std::path::Path;
     use std::path::PathBuf;
     use std::process::Command;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     fn argv(v: &[&str]) -> Vec<String> {
@@ -524,15 +525,32 @@ mod runx_tests {
             hits.len()
         );
         let i = hits[0];
-        // 按字符边界回退：直接 i-300 可能切在一个多字节汉字中间，panic 起来像测试坏了
-        let mut start = i.saturating_sub(300);
-        while start > 0 && !lib.is_char_boundary(start) {
-            start -= 1;
-        }
-        let before = &lib[start..i];
+        // 按"所在函数的起点"取上下文，而不是往回数 300 字节。
+        // 数固定长度会随着函数体里加几行（这次加了 begin_run / end_run）就失效——
+        // 那种失败说明的是测试写脆了，不是约束被破坏，但报错文字一模一样，很容易被误读。
+        let fn_start = lib[..i]
+            .rfind("pub fn run_allowed")
+            .expect("找不到 run_allowed 的函数定义，测试与代码结构已不匹配");
+        let before = &lib[fn_start..i];
         assert!(
             before.contains("gate_exec"),
             "唯一的执行调用点前面没有 gate_exec —— exec 默认 ask 被绕开了"
+        );
+        // 取消位必须在这同一个函数里登记并在返回前注销，
+        // 否则位会一直挂在会话上，下次"停止"会指向一条早就不在跑的命令。
+        assert!(
+            before.contains("begin_run"),
+            "执行入口没有登记取消位，点停止杀不掉正在跑的命令"
+        );
+        // 切尾边界同样要退到字符边界上，否则会在多字节汉字中间 panic
+        let mut end = (i + 400).min(lib.len());
+        while end > i && !lib.is_char_boundary(end) {
+            end -= 1;
+        }
+        let after = &lib[i..end];
+        assert!(
+            after.contains("end_run"),
+            "执行入口没有注销取消位，取消会残留到下一次执行"
         );
     }
 
@@ -540,5 +558,86 @@ mod runx_tests {
     #[test]
     fn run_allowed_rejects_relative_cwd() {
         assert!(runx::run_allowed(Path::new("relative/nope"), &argv(&["git", "status"])).is_err());
+    }
+
+    // ------------------------------------------------------------ 取消
+
+    /// 没在跑的时候点停止：什么也不该发生，更不能留下一个"下次执行才生效"的标记。
+    #[test]
+    fn cancel_without_a_running_command_is_a_noop() {
+        assert!(!runx::cancel_running("no-such-session"), "没有在跑却报告取消成功");
+        // 之后再登记，取消位必须是干净的
+        let slot = runx::begin_run("fresh-session");
+        assert!(!slot.load(std::sync::atomic::Ordering::SeqCst), "新登记的取消位一开始就是置起的");
+        runx::end_run("fresh-session");
+    }
+
+    /// 注销之后不能再被点名：否则上一轮的取消会落到下一轮头上。
+    #[test]
+    fn cancel_targets_only_the_run_that_is_registered() {
+        let a = runx::begin_run("sess-a");
+        assert!(runx::cancel_running("sess-a"), "登记中的会话应当可以被取消");
+        assert!(a.load(std::sync::atomic::Ordering::SeqCst));
+        runx::end_run("sess-a");
+
+        assert!(!runx::cancel_running("sess-a"), "注销之后仍然报告取消成功");
+        // 换一个新的执行，位必须是新的
+        let b = runx::begin_run("sess-a");
+        assert!(!b.load(std::sync::atomic::Ordering::SeqCst), "取消位跨执行串了");
+        runx::end_run("sess-a");
+    }
+
+    /// 端到端：真的 spawn 一条会挂很久的 `npm test`，然后取消。
+    ///
+    /// 这条盯的是「点停止之后进程真的死了」——只断言 cancelled 标志位不够，
+    /// 因为标志位可以置对而进程还活着（那正是 D-01 的原始症状）。
+    /// 所以除了 `cancelled`，还断言**耗时**：60 秒的命令必须在两三秒内返回。
+    #[test]
+    fn cancel_actually_stops_a_running_command() {
+        let dir = temp_dir("cancel-run");
+        // `node --test` 是受信任运行器，审计能过；用例本身挂 60 秒
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"p","version":"1.0.0","scripts":{"test":"node --test"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("hang.test.mjs"),
+            "import test from 'node:test';\ntest('hang', async () => { await new Promise((r) => setTimeout(r, 60000)); });\n",
+        )
+        .unwrap();
+
+        let slot = runx::begin_run("cancel-e2e");
+        let slot_for_thread = Arc::clone(&slot);
+        let dir_for_thread = dir.clone();
+        let started = Instant::now();
+        let worker = std::thread::spawn(move || {
+            runx::run_allowed_cancellable(&dir_for_thread, &argv(&["npm", "test"]), &slot_for_thread)
+        });
+
+        // 给 npm 一点时间真的把 node 拉起来，再取消——太早取消测的是"启动前取消"，
+        // 那是另一条路径，不能代替这条。
+        std::thread::sleep(Duration::from_millis(2500));
+        assert!(runx::cancel_running("cancel-e2e"), "发起取消时命令应当还在跑");
+
+        let out = worker.join().expect("执行线程 panic").expect("执行返回错误");
+        let elapsed = started.elapsed();
+        runx::end_run("cancel-e2e");
+
+        assert!(out.cancelled, "被取消的执行没有标记 cancelled（会被测试回路当成失败回传给模型）");
+        assert!(!out.timed_out, "取消被记成了超时");
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "取消后 {elapsed:?} 才返回：进程没被杀掉，只是标志位置上了"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+
+        fn temp_dir(tag: &str) -> PathBuf {
+            let p = std::env::temp_dir().join(format!("zxz-{tag}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&p);
+            fs::create_dir_all(&p).unwrap();
+            p
+        }
     }
 }

@@ -229,4 +229,13 @@ describe("runResultHead", () => {
     expect(both).toContain("60 秒超时");
     expect(both).toContain("已截断");
   });
+
+  // 取消和超时都是"进程被我们杀了"，但对模型的含义相反：
+  // 超时=命令自己没跑完（该改代码），取消=人叫停的（别当成失败再试一遍）。
+  it("用户取消要说成「人叫停的」，不能和超时混为一谈", () => {
+    const cancelled = runResultHead({ exit_code: null, timed_out: false, truncated: false, cancelled: true });
+    expect(cancelled).toContain("用户已停止");
+    expect(cancelled).toContain("不是命令自己的结果");
+    expect(cancelled).not.toContain("60 秒超时");
+  });
 });

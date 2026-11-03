@@ -15,11 +15,13 @@
 // （见 tools/fs-harness/src/main.rs 的 #[path] 引用，与 fsx.rs 同一套做法）。
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -100,6 +102,57 @@ pub struct RunResult {
     pub stderr: String,
     pub timed_out: bool,
     pub truncated: bool,
+    /// 被 `run_cancel` 主动终止（用户点了停止）。
+    ///
+    /// 必须和 `timed_out` 分开：两者都是「进程被我们杀了」，但含义完全相反——
+    /// 超时是失败，用户主动停止不是。混成一个字段，测试回路就会在用户点停止后
+    /// 回传一条"第 1/3 轮 npm test 未通过"，把人的操作说成代码的错。
+    pub cancelled: bool,
+}
+
+// ---------------------------------------------------------------- 取消
+
+/// 正在跑的会话 → 取消位。
+///
+/// 为什么记「会话 + 一个布尔位」而不是 pid：`Child` 已经被 `run_allowed` 独占，
+/// 想从另一个线程杀它就得共享所有权，写起来容易出竞态。位只有两种状态，
+/// 等待循环每 50ms 看一眼，最坏延迟 50ms —— 对"点停止"这个动作足够了。
+static RUNNING: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+
+fn running() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    RUNNING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 开始一次可取消的执行，返回本次的取消位。
+///
+/// 取消位**每次新建**，不复用：如果复用同一个，上一次点停止留下的 `true`
+/// 会把下一次刚开始的命令直接杀掉——那是"点了停止，之后所有命令都起不来"。
+pub fn begin_run(session: &str) -> Arc<AtomicBool> {
+    let slot = Arc::new(AtomicBool::new(false));
+    running().lock().unwrap().insert(session.to_string(), slot.clone());
+    slot
+}
+
+/// 结束一次执行。必须调用，否则取消位会一直挂在这个会话上。
+pub fn end_run(session: &str) {
+    running().lock().unwrap().remove(session);
+}
+
+/// 请求终止这个会话正在跑的命令。没有正在跑的就什么也不做。
+///
+/// 「没有就不做」是有意的：停止按钮随时可点，没在跑的时候点一下不该留下
+/// 一个会在将来某次执行时才生效的标记。
+///
+/// 返回 true 表示当时确实有命令在跑（已经置位）。
+pub fn cancel_running(session: &str) -> bool {
+    let map = running().lock().unwrap();
+    match map.get(session) {
+        Some(slot) => {
+            slot.store(true, Ordering::SeqCst);
+            true
+        }
+        None => false,
+    }
 }
 
 // 5) Windows 上 npm / npx 是批处理（npm.cmd / npx.cmd）：CreateProcess 只自动补
@@ -434,7 +487,26 @@ fn null_device() -> &'static str {
 ///
 /// `root` 只能来自 `wsx::root_of(session_id)`：前端不能指定 cwd，
 /// 命令落在哪个目录由 Rust 登记的会话说了算（见 lib.rs 的 run_cmds）。
+/// 不需要取消能力的入口。
+///
+/// 生产路径一律走 `run_allowed_cancellable`（IPC 那边要能点停止），
+/// 这个包装只留给单测与 harness——它们不需要模拟"用户点停止"，
+/// 传一个永不置位的位反而是噪音。
+#[cfg(test)]
 pub fn run_allowed(root: &Path, argv: &[String]) -> Result<RunResult, String> {
+    // 不写成 Option：\"没有取消位\"和\"取消位永远为 false\"行为完全一样，
+    // 多一个分支只会多一处能写错的地方。
+    let never = AtomicBool::new(false);
+    run_allowed_cancellable(root, argv, &never)
+}
+
+/// 与 `run_allowed` 相同，但可以被 `cancel(session)` 从另一个线程点名终止。
+/// IPC 入口走这一条；harness 与单测走上面那条。
+pub fn run_allowed_cancellable(
+    root: &Path,
+    argv: &[String],
+    cancel_flag: &AtomicBool,
+) -> Result<RunResult, String> {
     is_allowed(argv)?;
     if !root.is_absolute() {
         return Err("工程目录必须是绝对路径".into());
@@ -508,7 +580,7 @@ pub fn run_allowed(root: &Path, argv: &[String]) -> Result<RunResult, String> {
     }
     drop(done_tx);
 
-    let timed_out = self::run_timeout_watch(&mut child)?;
+    let outcome = self::run_watch(&mut child, cancel_flag)?;
 
     // 读线程等 EOF：正常情况下子进程一死管道就关，线程随即结束。但万一有孙进程攥着
     // 句柄（这条路径 manchmal 也会遇到），join 会一直挂住，把超时保护整个拖垮，
@@ -531,22 +603,39 @@ pub fn run_allowed(root: &Path, argv: &[String]) -> Result<RunResult, String> {
         exit_code: status.and_then(|s| s.code()),
         stdout,
         stderr,
-        timed_out,
+        timed_out: outcome == WaitOutcome::TimedOut,
         truncated: t1 || t2,
+        cancelled: outcome == WaitOutcome::Cancelled,
     })
 }
 
-/// 轮询等待子进程：到点就杀掉并标记超时。抽成单独函数后等待循环只管超时，
-/// 管道与退出的处理留在 run_allowed 里，改一处不会误伤另一处。
-fn run_timeout_watch(child: &mut Child) -> Result<bool, String> {
+/// 等待的三种结局。
+///
+/// 用枚举而不是 `(bool, bool)`：两个布尔会有四种组合，其中"既超时又取消"不可能存在，
+/// 但它会被写出来，而且没人知道该按哪个处理。
+#[derive(Debug, PartialEq, Eq)]
+pub enum WaitOutcome {
+    Exited,
+    TimedOut,
+    Cancelled,
+}
+
+/// 轮询等待子进程：到点杀树并标记超时，取消位被置起就杀树并标记取消。
+///
+/// 取消的检查放在超时之前：取消是人的动作，比一个计时器优先。
+fn run_watch(child: &mut Child, cancel_flag: &AtomicBool) -> Result<WaitOutcome, String> {
     let start = Instant::now();
     loop {
+        if cancel_flag.load(Ordering::SeqCst) {
+            kill_tree(child);
+            return Ok(WaitOutcome::Cancelled);
+        }
         match child.try_wait().map_err(|e| format!("等待命令失败：{e}"))? {
-            Some(_) => return Ok(false),
+            Some(_) => return Ok(WaitOutcome::Exited),
             None => {
                 if start.elapsed() >= Duration::from_secs(RUN_TIMEOUT_SECS) {
                     kill_tree(child);
-                    return Ok(true);
+                    return Ok(WaitOutcome::TimedOut);
                 }
                 thread::sleep(Duration::from_millis(50));
             }

@@ -208,6 +208,17 @@ export interface RunResult {
   stderr: string;
   timed_out: boolean;
   truncated: boolean;
+  /**
+   * 被用户点「停止」终止。
+   *
+   * 与 `timed_out` 分开：两者都是"进程被我们杀了"，但含义相反——
+   * 超时是失败，用户主动停止不是。合在一起，测试回路会在用户点停止后
+   * 回传一条"第 1/3 轮 npm test 未通过"，把人的操作说成代码的错。
+   *
+   * 可选是因为测试桩里构造 RunResult 的地方很多，缺字段按"没取消"处理
+   * （Rust 侧总是会发这个字段）。
+   */
+  cancelled?: boolean;
 }
 
 /** 一条执行授权：作用域是「命令 + 子命令」，例如 ["npm","test"] */
@@ -270,6 +281,23 @@ export async function runAllowed(sessionId: string, argv: string[]): Promise<Run
     return await call<RunResult>("run_allowed", { sessionId, argv });
   } catch (e) {
     throw toExecError(e);
+  }
+}
+
+/**
+ * 终止这个会话正在跑的命令（用户点「停止」）。
+ *
+ * 返回 true 表示当时确实有命令在跑。**不弹错**：点停止的时候出任何问题都不该
+ * 用第二个错误提示盖住"已经停了"这件事；真正需要知道的是"没停成"，
+ * 而那种情况会在 `run_allowed` 那一侧以正常结果（没被取消）暴露出来。
+ *
+ * 不经过授权闸门：取消是收窄权限的动作，不需要再批一次。
+ */
+export async function runCancel(sessionId: string): Promise<boolean> {
+  try {
+    return await call<boolean>("run_cancel", { sessionId });
+  } catch {
+    return false;
   }
 }
 

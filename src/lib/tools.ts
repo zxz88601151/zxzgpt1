@@ -266,6 +266,8 @@ export interface RunSummary {
   exit_code: number | null;
   timed_out: boolean;
   truncated: boolean;
+  /** 用户点「停止」终止的（与超时区分：一个是被动失败，一个是人的操作） */
+  cancelled?: boolean;
 }
 
 /**
@@ -277,6 +279,8 @@ export interface RunSummary {
 */
 export function runResultHead(r: RunSummary): string {
   const notes: string[] = [];
+  // 取消排在最前：它解释了"为什么退出码是空的"，比后面两条都更根本
+  if (r.cancelled) notes.push("用户已停止，进程被终止，这不是命令自己的结果");
   if (r.timed_out) notes.push("60 秒超时，已终止");
   if (r.truncated) notes.push("输出过长已截断，只保留了开头部分，不要把「没看到报错」当成测试通过");
   const code = r.exit_code === null ? "未知（进程被终止）" : String(r.exit_code);
