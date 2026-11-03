@@ -149,12 +149,15 @@ export async function fsRead(sessionId: string, rel: string): Promise<string> {
   return call<string>("fs_read", { sessionId, rel });
 }
 
+/** 目标是否存在。
+ *
+ * 不吞错：`fs_exists` 报错有两种完全不同的含义——「确认不存在」和「校验失败」
+ * （越过工程根、会话失效、目标是指到工程外的链接）。把它们都当成 `false`，
+ * 覆盖写入就会以为"这是新建文件"从而跳过备份，等于把一次校验失败变成一次
+ * 不可撤销的覆盖。错误必须抛给调用方决定。
+ */
 export async function fsExists(sessionId: string, rel: string): Promise<boolean> {
-  try {
-    return await call<boolean>("fs_exists", { sessionId, rel });
-  } catch {
-    return false;
-  }
+  return call<boolean>("fs_exists", { sessionId, rel });
 }
 
 export async function fsWrite(sessionId: string, rel: string, content: string): Promise<WriteResult> {

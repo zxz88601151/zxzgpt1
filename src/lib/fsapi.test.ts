@@ -64,6 +64,17 @@ beforeEach(() => {
 });
 
 describe("文件与命令 IPC 只带 sessionId", () => {
+  it("fs_exists 报错必须抛出，不能当成「不存在」", async () => {
+    // 「确认不存在」和「校验失败」是两件事：后者被吞成 false，覆盖写入就会
+    // 以为这是新建文件、跳过备份，把一次越界校验失败变成一次不可撤销的覆盖。
+    installDesktop({
+      fs_exists: () => {
+        throw new Error("越出了工程目录");
+      },
+    });
+    await expect(fsExists("ws-1", "../outside.txt")).rejects.toThrow("越出了工程目录");
+  });
+
   it("读 / 写 / 查 / 列目录 / 跑命令都不再出现 root", async () => {
     installDesktop({
       fs_read: () => "content",

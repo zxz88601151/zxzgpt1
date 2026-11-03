@@ -278,15 +278,26 @@ export default function App() {
         try {
           let oldText = "";
           let backup: string | undefined;
-          if (await fsExists(ws.sessionId, b.path)) {
-            try {
-              oldText = await fsRead(ws.sessionId, b.path);
-              backup = backupRelPath(stamp, b.path);
-              await fsWrite(ws.sessionId, backup, oldText);
-              backedUp += 1;
-            } catch {
-              /* 备份失败不阻断写入 */
-            }
+          // 「确认不存在」与「校验失败」必须分开：fsExists 现在会把后者抛出来。
+          // 抛了就不能往下写——不然等于把一次越界/链接校验失败当成"新建文件"，
+          // 静默跳过备份，覆盖就变成不可撤销的操作。
+          let exists: boolean;
+          try {
+            exists = await fsExists(ws.sessionId, b.path);
+          } catch (e) {
+            results.push({
+              path: b.path,
+              ok: false,
+              error: `无法确认目标是否存在，已中止写入：${(e as Error).message}`,
+            });
+            continue;
+          }
+          if (exists) {
+            // 备份失败必须阻断写入：没有备份的覆盖不可撤销，不能"先写了再说"。
+            oldText = await fsRead(ws.sessionId, b.path);
+            backup = backupRelPath(stamp, b.path);
+            await fsWrite(ws.sessionId, backup, oldText);
+            backedUp += 1;
           }
           const r = await fsWrite(ws.sessionId, b.path, b.content);
           // 写完回读校验：Claude Code 那套“改完要验证”在本工具里没有终端可跑，
