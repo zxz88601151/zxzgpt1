@@ -332,7 +332,7 @@ node tools/desktop-workspace-e2e.cjs   # 13 项
 Rust 侧路径校验与真实写入（不依赖 tauri，`#[path]` 引用 `fsx.rs` 原文）：
 
 ```bash
-cd tools/fs-harness && cargo test      # 13 条
+cd tools/fs-harness && cargo test      # 58 条（另 1 条 60 秒超时用例默认 ignore，用 --ignored 跑）
 ```
 
 真模型全流程（选文件夹 → 真读 → 写代码落盘；打的是你在界面里接的模型，不是模拟上游）：
@@ -362,7 +362,11 @@ node tools/desktop-skill-e2e.cjs    # 17 项（同样需要先开 CDP 端口编�
 
 ### 9.6 覆盖范围
 
-前端直连 24 项、真实代理 10 项接口断言 + 24 项前端、工程模式 34 项、真机读写 25 项、技能库 47 项、真机技能 17 项、Rust 单测 34 条、纯逻辑单测 **326 条**（15 个 `.test.ts`：`src/lib` 12 + `src/skills` 2 + `src/state.test.ts` 1，2026-11-02 `npx vitest run` 实测；改测试后以 `Tests` 行为准）。覆盖：通道探测、设置抽屉、拉取模型、测试连接、流式逐字输出、Markdown（标题/列表/嵌套/表格/引用/行内代码/加粗/删除线/外链）、代码高亮与复制按钮、长文本完整渲染、usage 回显、思维链折叠、停止生成、重新生成不重复追加用户消息、上下文轮数窗口、多会话/搜索/主题、刷新后持久化、上游 401/404 错误提示、无 JS 运行时错误；技能库另含 frontmatter 解析、分类分组、触发词自动匹配、3 个上限、外部目录扫描与坏技能报错、29 条来源清单与审计清单导出（无工程时下载、有工程时写进 `.zxz/audit/`）。
+> 口径说明（2026-11-03）：本节 vitest 与 Rust 单测条数是当日实测；**e2e 的“项数”是历史记录，
+> 未在当日重测**，与 9.2–9.5 各小节的数字存在互相矛盾（同一脚本在两处写成不同值），
+> 以脚本实际跑出来的退出码与断言输出为准，不以本行数字为准。重测后统一订正（见 `docs/governance/STATE.md` D-DOC-1）。
+
+前端直连 24 项、真实代理 10 项接口断言 + 24 项前端、工程模式 34 项、真机读写 25 项、技能库 47 项、真机技能 17 项、Rust 单测 **58 条**（另 1 条超时用例默认 ignore）、纯逻辑单测 **327 条**（15 个 `.test.ts`：`src/lib` 12 + `src/skills` 2 + `src/state.test.ts` 1，2026-11-03 `npx vitest run` 实测；改测试后以 `Tests` 行为准）。覆盖：通道探测、设置抽屉、拉取模型、测试连接、流式逐字输出、Markdown（标题/列表/嵌套/表格/引用/行内代码/加粗/删除线/外链）、代码高亮与复制按钮、长文本完整渲染、usage 回显、思维链折叠、停止生成、重新生成不重复追加用户消息、上下文轮数窗口、多会话/搜索/主题、刷新后持久化、上游 401/404 错误提示、无 JS 运行时错误；技能库另含 frontmatter 解析、分类分组、触发词自动匹配、3 个上限、外部目录扫描与坏技能报错、29 条来源清单与审计清单导出（无工程时下载、有工程时写进 `.zxz/audit/`）。
 
 ## 10. 本地工程模式（让模型直接在你电脑上读写代码）
 
@@ -693,6 +697,17 @@ Rust 侧对每一次调用重新校验，绝不信任前端传进来的参数；
 argv 数组原样传给子进程。因为 `.cmd` 最终由 COMSPEC 执行，元字符黑名单比 unix 侧更严，
 把 `% ^ ! " ' ( )` 和反斜杠一并挡掉（`has_shell_meta` 里可以看到完整清单）。
 
+**只读 git 的三道不可关闭加固**（2026-11-03 补）：仓库自己也能决定 git 跑什么——
+`.git/config` 的 `diff.<driver>.textconv` / `diff.external` 会在 `git diff` 时执行命令，
+`core.fsmonitor` 会在 `git status` 时执行 hook。所以 `run_allowed` 在 spawn 前**强制**
+插入用户参数里关不掉的东西：git 命令统一前置 `-c core.fsmonitor=false`，
+`diff` 再追加 `--no-textconv --no-ext-diff`；同时注入
+`GIT_CONFIG_NOSYSTEM=1`、`GIT_CONFIG_GLOBAL=<空设备>`、`GIT_CONFIG_SYSTEM=<空设备>`、
+`GIT_TERMINAL_PROMPT=0`、`GIT_PAGER=cat`、`GIT_OPTIONAL_LOCKS=0`。
+配套的写侧闸门：`fsx::write` **整目录拒绝** `.git/**`（config / hooks / info / attributes 全在内），
+不做“只挡 config”这种半开口子。0.3.0 及之前这两条都缺，等于“能写 .git”+“git 会执行配置”
+= 受控执行变成任意执行。
+
 ### 14.3 测试回路
 
 写完文件（工具写入或 `file:` 写入都算）且自动测试回路开启、且在桌面端时，
@@ -709,6 +724,12 @@ argv 数组原样传给子进程。因为 `.cmd` 最终由 COMSPEC 执行，元�
 - 就算开关打开了，程序也会先读工程的 `package.json`，只有当 `scripts.test` 是受信任的
   测试运行器（`vitest` / `jest` / `mocha` / `node --test` / `tsc`）时才真的跑；
   认不出来就只提示“未运行”，不动手。判据在 `src/lib/tools.ts` 的 `isSafeTestScript`。
+
+**判据不只看首词**（2026-11-03 补）：只按 `&& || ;` 切段会漏掉 `vitest run | sh`、
+`vitest run & curl x`、`vitest run $(curl x)`、反引号与换行续接——首词都是受信任运行器，
+shell 却会再执行一条命令。所以先做构造级拒绝（`$`、反引号、`>`、`<`、换行、NUL），
+再按 `&& || ; | &` 全部切段。Rust `runx.rs` 与前端 `tools.ts` 用的是同一套规则，
+执行时以 Rust 为准。
 
 ### 14.4 本版验证状态（先说清楚，再谈功能）
 
@@ -728,7 +749,7 @@ argv 数组原样传给子进程。因为 `.cmd` 最终由 COMSPEC 执行，元�
 | --- | --- |
 | `cargo check`（含 runx.rs、lib.rs IPC 注册、api.rs 工具转发） | 通过，0 warning |
 | fs-harness Rust 单测 | 通过（含 runx 白名单与真实 spawn） |
-| vitest | 通过（补丁 237 + 本次修复补的用例） |
+| vitest | 通过（327 条，2026-11-03 实测） |
 | `run_allowed` 在本机真 spawn `npm --version` | 退出码 0，输出 10.9.7 |
 
 **集成过程中修掉的两个缺陷**（都是原补丁在 Windows 上的真问题）：

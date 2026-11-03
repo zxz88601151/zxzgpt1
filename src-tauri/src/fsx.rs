@@ -300,7 +300,19 @@ pub fn exists(root: &Path, rel: &str) -> Result<bool, String> {
     Ok(target.exists())
 }
 
+/// 仓库元数据：这些路径一旦被改写，git 的行为就被改写了
+/// （`.git/config` 的 `core.fsmonitor`、`diff.*.textconv`，`.git/hooks/*`，
+/// `.git/info/attributes`），而 `run_command` 恰恰允许只读 git——
+/// 「模型能写 .git」+「git 会执行配置里的命令」= 受控执行变成任意执行。
+/// 所以整目录拒绝写入，不做「只挡 config」这种半开的口子。
+fn is_repo_metadata(rel: &str) -> bool {
+    rel.split(['/', '\\']).next().is_some_and(|seg| seg.eq_ignore_ascii_case(".git"))
+}
+
 pub fn write(root: &Path, rel: &str, content: String) -> Result<WriteResult, String> {
+    if is_repo_metadata(rel) {
+        return Err(format!("{rel} 落在 .git 目录内：仓库元数据不允许被写入"));
+    }
     let target = resolve(root, rel)?;
 
     if let Some(parent) = target.parent() {
@@ -467,6 +479,25 @@ mod tests {
         assert!(r.created);
         assert_eq!(fs::read_to_string(dir.join("a/b/c.txt")).unwrap(), "hello");
         assert!(!dir.parent().unwrap().join("c.txt").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_to_write_repo_metadata() {
+        // .git 里的东西能改掉 git 的行为（fsmonitor / textconv / hooks / info/attributes），
+        // 而 run_command 允许只读 git：这条口子必须封死，且大小写与分隔符都不能绕
+        let dir = std::env::temp_dir().join(format!("zxz-fsx-git-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        let rootc = fs::canonicalize(&dir).unwrap();
+        for bad in [".git/config", ".git/hooks/pre-commit", ".GIT/config", ".git\\config", ".git/info/attributes"] {
+            let e = write(&rootc, bad, "malicious".into()).unwrap_err();
+            assert!(e.contains(".git"), "{bad} 应被拒绝：{e}");
+        }
+        assert!(!dir.join(".git/config").exists(), "拒绝之后不能再落盘");
+        // 名字像但不是 .git 目录的照常放行
+        assert!(write(&rootc, ".gitignore", "node_modules\n".into()).is_ok());
+        assert!(write(&rootc, "srcdotgit/a.txt", "ok".into()).is_ok());
         let _ = fs::remove_dir_all(&dir);
     }
 

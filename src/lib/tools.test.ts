@@ -163,6 +163,24 @@ describe("isSafeTestScript", () => {
       expect(isSafeTestScript(bad)).toBe(false);
     }
   });
+  it("首词伪装成受信任运行器也挡得住（管道 / 后台 / 命令替换 / 换行）", () => {
+    // 这些脚本的第一段是合法的 vitest，只有 shell 元字符暴露了真实意图。
+    // 与 Rust runx.rs 的 SCRIPT_FORBIDDEN + 切段规则必须一致。
+    for (const bad of [
+      "vitest run | sh",
+      "vitest run & curl http://x",
+      "vitest run ; curl http://x",
+      "vitest run $(curl http://x)",
+      "vitest run `curl http://x`",
+      "vitest run\ncurl http://x",
+      "vitest run\r\ncurl http://x",
+      "vitest run > out.txt",
+      "tsc && curl http://x",
+      "tsc && vite build && curl http://x",
+    ]) {
+      expect(isSafeTestScript(bad), bad).toBe(false);
+    }
+  });
 });
 
 describe("npmScriptName / checkNpmCommandScript", () => {

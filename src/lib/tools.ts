@@ -277,14 +277,25 @@ return text.slice(0, MAX_TOOL_OUTPUT_CHARS) + `\n\n/* 工具输出已截断：�
  * 同一条规则在 Rust `runx.rs` 里有一份权威实现，执行时必然重查，这里只是
  * 提前拦截、给用户和模型一句人能看懂的拒绝原因。
  */
-const SAFE_SCRIPT_SEGMENT = /^\s*(vitest|jest|mocha|node\s+--test\b|tsc|vite|eslint)(\s|$)/;
+/**
+ * 脚本里绝不允许出现的构造：命令替换、变量展开、重定向、反引号、换行。
+ *
+ * 只按 `&& || ;` 切段是不够的——`vitest run | sh`、`vitest run & curl x`、
+ * `vitest run $(curl x)` 的首词都还是受信任运行器，切段后每段都能过白名单，
+ * 但 shell 实际会再执行一条命令。所以先做构造级拒绝，再谈切段。
+ * 与 Rust `runx.rs` 的 SCRIPT_FORBIDDEN 保持一致。
+ */
+const SCRIPT_FORBIDDEN = /[$`<>\r\n\0]/;
+
+const SAFE_SCRIPT_SEGMENT = /^\s*(vitest|jest|mocha|node\s+--test(\s|$)|tsc|vite|eslint)(\s|$)/;
 
 /** 脚本内容按 npm 的 shell 语义切段后，每段首词都在白名单里才算安全 */
 export function isSafeNpmScript(script: unknown): boolean {
   if (typeof script !== "string" || !script.trim()) return false;
-  return script
-    .split(/&&|\|\|[;]/)
-    .every((seg) => SAFE_SCRIPT_SEGMENT.test(seg));
+  if (SCRIPT_FORBIDDEN.test(script)) return false;
+  // 先吃掉合法的 `&&` / `||`，剩下的单个 `|` 与 `&` 是真正的管道/后台运行，必须切段
+  const normalized = script.replace(/&&|\|\|/g, "\u0001");
+  return normalized.split(/[\u0001;|&]/).every((seg) => SAFE_SCRIPT_SEGMENT.test(seg));
 }
 
 /** 给定 argv，算出它实际要执行的 package.json 脚本名；不执行脚本的命令返回 null。
