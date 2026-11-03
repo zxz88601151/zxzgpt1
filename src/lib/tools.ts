@@ -12,8 +12,6 @@
 * `;`、`|`、`&`、`$`、反引号这类 shell 元字符，带这些字符的参数直接拒绝。
 */
 
-import { relPathError} from "./files";
-
 export type ToolName = "read_file" | "list_dir" | "search_files" | "write_file" | "run_command";
 
 export interface ToolDefinition {
@@ -25,81 +23,9 @@ parameters: Record<string, unknown>;
 };
 }
 
-export const TOOL_DEFS: ToolDefinition[] = [
-{
-type: "function",
-function: {
-name: "read_file",
-description: "读取工程内一个文件的真实内容。路径相对工程根目录，不带盘符、不出现..。返回内容可能被截断，截断时会注明。",
-parameters: {
-type: "object",
-properties: { path: { type: "string", description: "工程内相对路径"}},
-required: ["path"],
-additionalProperties: false,
-},
-},
-},
-{
-type: "function",
-function: {
-name: "list_dir",
-description: "列出工程内一个目录的条目（目录在前）。不传 path 时列工程根目录。深度只列一层，不要用它遍历整棵树。",
-parameters: {
-type: "object",
-properties: { path: { type: "string", description: "工程内相对目录，空串表示根目录"}},
-required: [],
-additionalProperties: false,
-},
-},
-},
-{
-type: "function",
-function: {
-name: "search_files",
-description: "在工程内按字面子串搜索文件内容，返回 path:行号 命中。不要用它当正则引擎，query 就是字面文本。",
-parameters: {
-type: "object",
-properties: {
-query: { type: "string", description: "要找的字面文本"},
-path: { type: "string", description: "限定搜索的相对目录，空串表示整棵树"},
-},
-required: ["query"],
-additionalProperties: false,
-},
-},
-},
-{
-type: "function",
-function: {
-name: "write_file",
-description: "把完整内容写入工程内一个文件（新建或整文件覆盖）。覆盖前程序会自动备份旧内容。计划模式下此工具会被拦截，写入前确认开启时需要用户在面板里批复。",
-parameters: {
-type: "object",
-properties: {
-path: { type: "string", description: "工程内相对路径"},
-content: { type: "string", description: "该文件的完整内容，禁止用省略号占位"},
-},
-required: ["path", "content"],
-additionalProperties: false,
-},
-},
-},
-{
-type: "function",
-function: {
-name: "run_command",
-description: "在工程根目录运行一条白名单命令。只允许测试、构建和只读 Git，且 npm/npx 将要执行的 package.json 脚本必须在受信任运行器清单里（vitest / jest / mocha / node --test / tsc / vite / eslint），否则程序拒绝。超时 60 秒，输出会被截断。不要用它安装、发布、推送、删除或改写历史，那些命令会被直接拒绝。",
-parameters: {
-type: "object",
-properties: {
-argv: { type: "array", items: { type: "string"}, description: "命令参数数组，例如 [\"npm\", \"test\"]，不要拼成一条 shell 字符串"},
-},
-required: ["argv"],
-additionalProperties: false,
-},
-},
-},
-];
+// 工具清单、参数 Schema、参数校验与系统提示里的工具说明都在 `registry.ts`。
+// 这里只留下白名单与脚本审计这些「与具体工具无关的判定原语」——
+// registry 单向依赖本文件，本文件不反向依赖 registry（否则 state.ts 会绕出环）。
 
 /** 单个工具结果回传给模型时的字符上限，超了截断并注明（不是静默丢） */
 export const MAX_TOOL_OUTPUT_CHARS = 20000;
@@ -181,37 +107,8 @@ return "git 只允许 status、diff、diff --stat、--version";
 return "不在白名单里的命令：只允许 npm、npx、node、git 的测试/构建/只读子命令";
 }
 
-/** 校验一次工具调用的参数，返回 null 表示合法，否则返回中文原因 */
-export function validateToolArgs(name: string, args: Record<string, unknown>): string | null {
-if (name === "read_file") {
-if (typeof args.path!== "string") return "read_file 需要 path";
-return relPathError(args.path);
-}
-if (name === "list_dir") {
-if (args.path === undefined || args.path === "") return null;
-if (typeof args.path!== "string") return "list_dir 的 path 必须是字符串";
-return relPathError(args.path);
-}
-if (name === "search_files") {
-if (typeof args.query!== "string" ||!args.query.trim()) return "search_files 需要非空 query";
-if (args.query.length > 200) return "search_files 的 query 太长（上限 200 字符）";
-if (args.path === undefined || args.path === "") return null;
-if (typeof args.path!== "string") return "search_files 的 path 必须是字符串";
-return relPathError(args.path);
-}
-if (name === "write_file") {
-if (typeof args.path!== "string") return "write_file 需要 path";
-const bad = relPathError(args.path);
-if (bad) return bad;
-if (typeof args.content!== "string") return "write_file 需要 content（完整文件内容）";
-return null;
-}
-if (name === "run_command") {
-if (!Array.isArray(args.argv)) return "run_command 需要 argv 数组";
-return isAllowedCommand(args.argv as string[]);
-}
-return `未知工具：${name}`;
-}
+// 参数校验已随工具定义搬到 `registry.ts`（每个工具自带 validate）。
+// 这里不 re-export：那会让 tools → registry → tools 绕成运行时环。
 
 export interface ToolCallFragment {
 index: number;
@@ -370,16 +267,3 @@ export function runResultHead(r: RunSummary): string {
   return `退出码：${code}${notes.length ? `（${notes.join("；")}）` : ""}`;
 }
 
-/** 给模型看的工具说明：放在工作区提示词之后、计划提示词之前 */
-export function buildToolsPrompt(planMode: boolean, confirmWrites: boolean): string {
-const lines = [
-"",
-"优先用工具，不要再用 ```file: 代码块和 @@read: 行写文件、读文件——工具调用才是本轮的正式通道，旧的文本协议只作不支持工具的兼容端回退。",
-"工具：read_file（读文件）、list_dir（列一层目录）、search_files（字面子串搜索）、write_file（整文件写入，覆盖前自动备份）、run_command（白名单命令）。",
-"run_command 只允许：npm test、npm run build、npm run lint、npx vitest run、git status、git diff、git diff --stat、以及 --version 类查询；安装、发布、推送、删除、改写历史一律会被程序拒绝，不要尝试。npm/npx 还会审计 package.json 里对应脚本的内容，不是受信任运行器（vitest / jest / mocha / node --test / tsc / vite / eslint）会被拒。",
-"写完文件后程序会自动跑一次 npm test，把结果回传给你；测试失败时先看报错、改代码、再等下一轮测试，不要在测试还没通过时宣称完成；3 轮测试不过程序会停下并报给人。",
-];
-if (planMode) lines.push("计划模式：本轮只出方案，write_file 和 run_command 会被程序拦截，不要调用它们；read_file、list_dir、search_files 仍可用。");
-if (confirmWrites) lines.push("写入前确认已开启：write_file 会先弹差异面板，等用户批复后才真正落盘，批复前不要把写入当成已完成。");
-return lines.join("\n");
-}

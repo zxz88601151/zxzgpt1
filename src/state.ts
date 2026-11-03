@@ -7,7 +7,7 @@
 import { DEFAULT_SETTINGS } from "./presets";
 import { buildWorkspacePrompt } from "./lib/files";
 import { buildPlanPrompt, buildProjectMemoryPrompt } from "./lib/project";
-import { buildToolsPrompt } from "./lib/tools";
+import { buildToolsPrompt } from "./lib/registry";
 import { clamp, sliceContext, uid } from "./lib/text";
 import type { AppState, Conversation, Message, Settings, WireMessage } from "./types";
 

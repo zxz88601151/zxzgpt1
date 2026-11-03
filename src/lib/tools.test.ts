@@ -10,8 +10,8 @@ import {
   runResultHead,
   testLoopDecision,
   truncateToolOutput,
-  validateToolArgs,
 } from "./tools";
+import { validateToolArgs } from "./registry";
 
 describe("isAllowedCommand", () => {
   it("放行测试、构建与只读 Git", () => {

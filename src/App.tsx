@@ -36,22 +36,17 @@ import {
   parseFileBlocks,
   parseReadRequests,
   relPathError,
-  shouldSkipDir,
   UNDO_DIR,
   type FileBlock,
   type ReadOutcome,
 } from "./lib/files";
 import {
-  checkNpmCommandScript,
-  isAllowedCommand,
-  npmScriptName,
   MAX_TEST_ROUNDS,
   runResultHead,
   testLoopDecision,
-  TOOL_DEFS,
   truncateToolOutput,
-  validateToolArgs,
 } from "./lib/tools";
+import { findTool, planModeBlocks, TOOL_DEFS, type ToolContext } from "./lib/registry";
 import type { AppState, Conversation, FileWriteResult, Message, Settings, Theme, ToolCallRecord, Transport, Usage } from "./types";
 import type { ToastKind } from "./components/ui";
 
@@ -433,13 +428,47 @@ export default function App() {
   }, []);
 
   /**
+   * 工具执行上下文：把「当前会话」和几个副作用通道包成一个对象交给注册表。
+   *
+   * 用 stateRef 取会话而不是闭包捕获 workspace，所以 ctx 不随工作区切换重建；
+   * 真正让不同工具表现得不同的是 registry 里的 spec，不是这里的分支。
+   */
+  const ctx = useMemo<ToolContext>(
+    () => ({
+      readFile: async (rel) => {
+        const ws = stateRef.current.settings.workspace;
+        if (!ws) throw new Error("未接入工程目录");
+        return fsRead(ws.sessionId, rel);
+      },
+      listDir: async (rel) => {
+        const ws = stateRef.current.settings.workspace;
+        if (!ws) throw new Error("未接入工程目录");
+        return fsListIn(ws.sessionId, rel);
+      },
+      writeFile: (rel, content) => requestApplyFiles([{ path: rel, content }]),
+      runCommand: async (argv) => {
+        const ws = stateRef.current.settings.workspace;
+        if (!ws) throw new Error("未接入工程目录");
+        return runAllowed(ws.sessionId, argv);
+      },
+    }),
+    [requestApplyFiles]
+  );
+
+  /**
    * 执行一次模型发起的工具调用。顺序执行、不并行，避免两个写操作互相覆盖。
-   * 计划模式只放行读、列目录、搜索；写文件和跑命令在计划模式下直接拦截，
-   * 不走到磁盘和子进程。写文件复用 requestApplyFiles，所以确认开关同样生效。
+   *
+   * 这里只做四件事：查注册表 → 按权限等级拦 → 校验参数 → 交给工具自己执行。
+   * 具体怎么读、怎么写、怎么跑都在 `lib/registry.ts` 的 spec 里，所以新增工具
+   * 不需要碰这个函数，也不会出现「某个工具忘了写权限判断」这种漏。
    */
   const executeTool = useCallback(
     async (call: { id: string; name: string; arguments: string }): Promise<ToolCallRecord> => {
       const base: ToolCallRecord = { id: call.id, name: call.name, arguments: call.arguments };
+      // 精确匹配，不做归一化：`Run_Command`、`run_command ` 这类变形一律落到「未知工具」，
+      // 不允许它绕过下面按 spec.access 做的拦截。
+      const spec = findTool(call.name);
+      if (!spec) return { ...base, error: `未知工具：${call.name}` };
       const ws = stateRef.current.settings.workspace;
       if (!ws) return { ...base, error: "未接入工程目录，工具不可用" };
       let args: Record<string, unknown>;
@@ -448,99 +477,22 @@ export default function App() {
       } catch {
         return { ...base, error: "工具参数不是合法 JSON" };
       }
-      const bad = validateToolArgs(call.name, args);
-      if (bad) return { ...base, error: bad };
-      const planMode = Boolean(stateRef.current.settings.planMode);
-      if (planMode && (call.name === "write_file" || call.name === "run_command")) {
+      if (Boolean(stateRef.current.settings.planMode) && planModeBlocks(spec.access)) {
         return { ...base, error: "计划模式已拦截：本轮只出方案，不写文件、不跑命令" };
       }
+      const bad = spec.validate(args);
+      if (bad) return { ...base, error: bad };
+      if (spec.access === "exec" && !fsAvailable()) {
+        return { ...base, error: "跑命令只在桌面端可用，浏览器直开时不可用" };
+      }
       try {
-        if (call.name === "read_file") {
-          const content = await fsRead(ws.sessionId, args.path as string);
-          return { ...base, result: truncateToolOutput(content) };
-        }
-        if (call.name === "list_dir") {
-          // 走 fsListIn（sessionId+rel）而不是 fsList（任意绝对路径）：
-          // 模型给绝对路径或 .. 时 Rust 侧直接拒绝，不能借列目录越出工程根
-          const rel = (args.path as string) || "";
-          const entries = await fsListIn(ws.sessionId, rel);
-          const lines = entries.map((e) => (e.dir ? `${e.name}/` : `${e.name} (${e.size} bytes)`));
-          return { ...base, result: lines.length ? lines.join("\n") : "(空目录)" };
-        }
-        if (call.name === "search_files") {
-          const query = (args.query as string).toLowerCase();
-          const startRel = (args.path as string) || "";
-          const matches: string[] = [];
-          let visited = 0;
-          const walk = async (rel: string, depth: number): Promise<void> => {
-            if (matches.length >= 100 || visited >= 100 || depth > 3) return;
-            let entries;
-            try {
-              // 同样走工程内通道：搜索不能借相对路径拼绝对路径逃出去
-              entries = await fsListIn(ws.sessionId, rel);
-            } catch {
-              return; // 无权限的目录直接跳过
-            }
-            for (const e of entries) {
-              if (matches.length >= 100 || visited >= 100) return;
-              if (e.dir) {
-                if (!shouldSkipDir(e.name)) await walk(rel ? `${rel}/${e.name}` : e.name, depth + 1);
-                continue;
-              }
-              visited += 1;
-              let content: string;
-              try {
-                content = await fsRead(ws.sessionId, rel ? `${rel}/${e.name}` : e.name);
-              } catch {
-                continue; // 读不到（二进制、超大）就跳过，不阻断搜索
-              }
-              content.split("\n").forEach((line, i) => {
-                if (matches.length < 100 && line.toLowerCase().includes(query)) {
-                  matches.push(`${rel ? `${rel}/` : ""}${e.name}:${i + 1}: ${line.trim().slice(0, 200)}`);
-                }
-              });
-            }
-          };
-          await walk(startRel, 0);
-          return { ...base, result: matches.length ? matches.join("\n") : "(没有命中)" };
-        }
-        if (call.name === "write_file") {
-          const results = await requestApplyFiles([{ path: args.path as string, content: args.content as string }]);
-          if (!results.length) return { ...base, error: "用户放弃写入，磁盘没有改动" };
-          const r = results[0];
-          if (!r.ok) return { ...base, error: r.error || "写入失败" };
-          return {
-            ...base,
-            result: `已写入 ${r.path}（${r.bytes ?? 0} bytes，${r.created ? "新建" : "覆盖"}，回读校验 ${r.verified ? "通过" : "不一致"}${r.backup ? `，旧版备份在 ${r.backup}` : ""}）`,
-          };
-        }
-        if (call.name === "run_command") {
-          if (!fsAvailable()) return { ...base, error: "跑命令只在桌面端可用，浏览器直开时不可用" };
-          const argv = args.argv as string[];
-          const denied = isAllowedCommand(argv);
-          if (denied) return { ...base, error: denied };
-          // argv 白名单只审到 argv[0]；npm/npx 真正跑的是 package.json 里的脚本，
-          // 那个文件可能正是模型写的。执行前先看脚本内容（Rust 侧还会再查一次）。
-          if (npmScriptName(argv)) {
-            try {
-              const scriptDenied = checkNpmCommandScript(argv, await fsRead(ws.sessionId, "package.json"));
-              if (scriptDenied) return { ...base, error: scriptDenied };
-            } catch (e) {
-              return { ...base, error: `无法读取 package.json 审计 npm 脚本：${(e as Error).message}` };
-            }
-          }
-          const r = await runAllowed(ws.sessionId, argv);
-          // 截断与超时必须显式告诉模型：截断后「没看到报错」不等于测试通过。
-          const head = runResultHead(r);
-          const body = [r.stdout, r.stderr ? `--- stderr ---\n${r.stderr}` : ""].filter(Boolean).join("\n");
-          return { ...base, result: truncateToolOutput(`${head}\n${body || "(无输出)"}`) };
-        }
-        return { ...base, error: `未知工具：${call.name}` };
+        const out = await spec.run(args, ctx);
+        return { ...base, ...(out.error ? { error: out.error } : { result: out.result ?? "" }) };
       } catch (e) {
         return { ...base, error: (e as Error).message };
       }
     },
-    [requestApplyFiles]
+    [ctx]
   );
 
   /* ------------------------------------------------------------ 发送 */
@@ -745,8 +697,10 @@ export default function App() {
               toolRecords.push(await executeTool(call));
             }
           }
+          // 按权限等级判断"这一轮动过磁盘"，而不是按工具名：
+          // 将来新增任何 write 级工具都会自动纳入测试回路，不会漏跑。
           const wroteSomething =
-            Boolean(files?.some((f) => f.ok)) || toolRecords.some((r) => r.name === "write_file" && !r.error);
+            Boolean(files?.some((f) => f.ok)) || toolRecords.some((r) => findTool(r.name)?.access === "write" && !r.error);
 
           const finalMsg: Message = {
             ...assist,
@@ -789,7 +743,7 @@ export default function App() {
               } else if (decision === "retry") {
                 const testMsg: Message = {
                   role: "user",
-                  content: `[测试回路] 第 ${testRounds}/${MAX_TEST_ROUNDS} 轮 npm test 未通过，退出码：${r.exit_code === null ? "未知" : r.exit_code}${r.timed_out ? "（60 秒超时，已终止）" : ""}\n${truncateToolOutput(combined || "(无输出)")}\n请根据上面报错改代码，不要在测试通过前宣称完成。`,
+                  content: `[测试回路] 第 ${testRounds}/${MAX_TEST_ROUNDS} 轮 npm test 未通过，${runResultHead(r)}\n${truncateToolOutput(combined || "(无输出)")}\n请根据上面报错改代码，不要在测试通过前宣称完成。`,
                   createdAt: Date.now(),
                   hidden: true,
                 };
