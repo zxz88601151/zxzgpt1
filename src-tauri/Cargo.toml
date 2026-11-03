@@ -13,8 +13,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# Tauri 核心；devtools 便于调试期使用右键检查元素
-tauri = { version = "2", features = ["devtools"] }
+# Tauri 核心。
+#
+# 这里**故意不开** devtools 特性：tauri 与 tauri-runtime-wry 的门控都是
+# `#[cfg(any(debug_assertions, feature = "devtools"))]`，所以
+#   · `cargo build`（debug，debug_assertions 对依赖同样为真）→ 右键检查元素照常可用
+#   · `cargo build --release` → 不带 devtools
+# 以前无条件写 `features = ["devtools"]`，等于给发布物附赠一个调试接口（D-09）。
+# 真需要给某个发布版排障时，显式加 --features devtools，别改回默认值。
+tauri = { version = "2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }
@@ -25,6 +32,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 [features]
 # 生产构建（frontendDist 走本地资源）需要此特性，勿删
 custom-protocol = ["tauri/custom-protocol"]
+# 只给"发布版临时排障"用：cargo build --release --features devtools
+# 不放进任何默认构建路径。
+devtools = ["tauri/devtools"]
 
 [profile.release]
 codegen-units = 1

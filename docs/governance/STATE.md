@@ -1,6 +1,6 @@
 # 项目状态板（唯一权威）
 
-最后更新：2026-11-03 22:0x　｜　维护者：Project Director（Agent 小队）
+最后更新：2026-11-03 23:38　｜　维护者：Project Director（Agent 小队）
 状态判定用词：`PASS` `PARTIAL` `FAIL` `ABSENT` `NOT_TESTED` `BLOCKED`
 
 ---
@@ -10,7 +10,7 @@
 | 项 | 值 |
 |---|---|
 | 仓库 | `F:/zhuomian/zxz`（product `zxz` / `com.zxz.desktop`） |
-| 分支 / HEAD | `main` / `3f6fbba`（`docs(e2e): 全量重测 e2e 项数…`） |
+| 分支 / HEAD | `main` / `8919e3f`（`fix(undo): 快照清单列不全时明确标出来…`） |
 | 远端 | `origin` 内网 Gitea `192.168.3.200:3000/zxzjxx/zxzgpt.git`（与本地同步）；`github` 备用 |
 | 版本号 | `package.json` / `tauri.conf.json` / `Cargo.toml` 三处均 `0.3.0`（一致） |
 | 技术栈 | Tauri 2 + Rust（fsx / runx / wsx / proxy / api / perms）＋ React 18 + TS + Vite 6 |
@@ -22,9 +22,9 @@
 | 命令 | 结果 |
 |---|---|
 | `npm test` | **400 passed / 17 files**（本轮起点 328） |
-| `npm run build` | 成功；`dist/assets/index-BUPLjQ7F.js` 335.02 kB |
+| `npm run build` | 成功；`dist/assets/index-C_jjb0nX.js` 335.51 kB（2026-11-03 23:34 实测） |
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **82 passed / 1 ignored**（GNU 工具链；msvc 必失败） |
-| `cargo check --manifest-path src-tauri/Cargo.toml` | 通过，**0 warning**（B10 收口时实测） |
+| `cargo check --manifest-path src-tauri/Cargo.toml` | 通过，**0 warning**（`--all-targets` 亦 0，2026-11-03 23:36 实测） |
 | e2e（当日实跑） | `e2e.cjs` 24/24、`workspace-e2e` 39/39、`skill-e2e` 69/69、`proxy-e2e` 接口 11/11 + 前端 24/24 |
 
 `[FACT]` 本机 msvc 默认工具链会在链接期被 Git for Windows 的 coreutils `link.exe` 抢占，
@@ -38,7 +38,7 @@
 | Phase 0 接管 | **COMPLETE** | 上表；与 `C1D_BASELINE_AND_GATE.md` 的基线差异已核对（HEAD 前移 3 个提交、版本号已统一） |
 | Phase 1 诊断 | **COMPLETE** | 三组独立只读审计（安全 / 架构 / 质量），见 §4 |
 | Phase 2 规划 | **COMPLETE** | 本文件 §5 队列 |
-| Phase 3 研发 | **IN PROGRESS** | P0-3 第一轮 + B4/B5/B6/B10 已落地并验证 |
+| Phase 3 研发 | **IN PROGRESS** | B1/B3/B4/B5/B6/B7/B8/B10/B11/B13/B15/B16 已落地并验证 |
 | Phase 4 独立审查 | IN PROGRESS | B10 一批已做独立复审（11 条发现，逐条验证后 9 条成立、2 条驳回） |
 | Phase 5/6 验收交付 | NOT_STARTED | 交付物未重编、未打安装包 |
 
@@ -76,6 +76,8 @@
 | B8 · 证据对账 | README 全部 e2e 数字按当日实测重写；7 个未跑脚本标 `NOT_TESTED`；修掉假 IPC 落后与过期断言 | **PASS** | 24/39/69/11+24 全过；`docs/audit/B8_EVIDENCE_RECONCILIATION_20261103.md` |
 | B15 · 代理鉴权前置 | `read_request` 拆成 `read_head` + `read_body`；Host / token 校验全部前移到读 body 之前 | **PASS** | 新增裸 socket 断言（不发 body 也必须立刻 401）；接口 11/11 + 前端 24/24 |
 | B13 · 停止真的停 | `run_cancel` + 会话级取消位；`RunResult.cancelled` 与 `timed_out` 分开；测试断言**耗时**而非标志位 | **PASS** | Rust **82**（新增 3 条取消用例，含真起 60 秒 npm test 再取消）；前端 400 |
+| B11 · 清单不完整要说出来 | `listUndo` 的 `walk()` 返回 `boolean`；子目录抛错 / 撞 400 条 / 超 8 层 → `snapshot.incomplete`；界面标「清单不完整」 | **PASS** | 提交 `8919e3f`；前端 **400**（新增 3 条：抛错 / 撞上限 / 全可读） |
+| B16 · devtools 只给 debug | `tauri` 依赖去掉 `features=["devtools"]`，改为可选特性；release 不再带右键检查元素 | **PASS** | 源码门控 `#[cfg(any(debug_assertions, feature="devtools"))]`；`cargo tree -e features` 中 devtools 边为空；`cargo check --all-targets` 0 warning；Rust 82 全绿 |
 
 ### 下一批（按优先级，已排定，不再请示）
 
@@ -85,8 +87,11 @@
 | # | 任务 | 为什么现在 | 验收 |
 |---|---|---|---|
 | B12 | `send()` 整轮重放测试设施（D-02） | 唯一的 P1 级质量缺口：1520 行编排零覆盖，400 条绿灯照不到那片区域 | 至少 1 类（上游错误）在 CI 跑 |
-| B11 | undo 子目录列举失败静默跳过（D-04） | 会产出"看起来完整"的快照 | 打不开时快照带 `incomplete` 标记 |
 | B14 | e2e 进 CI 的三个前置（D-08） | R3 三个成因已逐个实测确认，都可修 | CI 上 `e2e.cjs` 能跑 |
+
+> **B12 卡在甲方保留权限上**：原方案要装 `jsdom` + mock provider，属于「新增第三方依赖」，按宪章 §3 需业主批准。
+> 不装依赖的替代路线是把 `send()` 的副作用改成注入式后整体搬进 `src/orchestration/`（纯函数、node 环境可测，
+> 顺带解决 D-06），但要动的是全仓最热且零覆盖的 320 行闭包——需要业主选。两条都写进了请示，未擅自开工。
 
 ## 6. 风险与阻断
 
@@ -95,7 +100,7 @@
 | R1 | release exe 落后于 HEAD | 高 | `src-tauri/target/release/zxz.exe` 内嵌的仍是 `index-CQlZK13B.js`，而当前构建产物是 `index-BUPLjQ7F.js`（相差 B3–B8 共 6 批改动）。**未重编前不得声称交付物含任何本轮修复** |
 | R2 | 无安装包 | 高 | `bundle.targets: "all"` 配置存在但从未产出；`WebView2` 走 `downloadBootstrapper`，离线不可用 |
 | R3 | e2e 不可复现 | 中 | 三个成因 2026-11-03 全部实测确认：playwright 未入依赖（`npm ci` 后消失）、硬编码 `channel:"msedge"`、默认端口 5173 与 vite 1420 冲突（`proxy-e2e.cjs` 拉起子进程时不传 `ZXZ_BASE`，会退回 5173 并报 `waiting for locator('#btnNew')`，看着像前端崩了）。修法见 B14 |
-| R4 | release 无条件带 devtools | 中 | `tauri/Cargo.toml` 的 `features=["devtools"]` 无 `cfg(debug_assertions)` 门控 |
+| R4 | ~~release 无条件带 devtools~~ | ~~中~~ | **已解除**（B16）：`tauri` 依赖不再带 devtools 特性；debug 构建行为不变 |
 | R5 | 推送/发布未授权 | — | 按宪章 §3，push / 打安装包需业主显式授权 |
 
 ## 7. 决策记录（ADR 级，追加式）

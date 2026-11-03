@@ -41,7 +41,7 @@
 | D-06 | P2 | `App.tsx` 1520 行上帝组件 + `stateRef` 手工双写 | ADR 0001 验收项 `App.tsx < 500 行` 仍为 `[ ]` | 任何 UI 改动的回归面都很大 | 未修（ADR 0001 未完成） |
 | D-07 | P2 | 存档单键、无 `schemaVersion` | `zxz.state.v1` 一把梭；`250ms` 全量写，含 `streaming` 中间态 | 字段语义变更无法迁移；写放大 | 未修 |
 | D-08 | P2 | e2e 进不了 CI | R3 三个成因（playwright 未入依赖、`channel:"msedge"` 硬编码、端口 5173 vs 1420）本轮全部实测确认 | e2e 只能人工跑，回归靠自觉 | 未修（B14） |
-| D-09 | P2 | release 无条件带 devtools | `tauri/Cargo.toml` 的 `features=["devtools"]` 无 `cfg(debug_assertions)` 门控 | 发布物给用户附赠一个调试接口 | 未修 |
+| D-09 | ~~P2~~ | ~~release 无条件带 devtools~~ | `tauri/Cargo.toml` 的 `features=["devtools"]` 无 `cfg(debug_assertions)` 门控 | 发布物给用户附赠一个调试接口 | **已修**，见 §4 第 19 条 |
 | D-10 | P3 | 一次性授权在闸门处即扣，spawn 失败也扣 | `perms::decide` 在 `runx` 之前扣 `uses_left` | 用户要再批一次。失败方向是**更严**，不是更松 | 取舍，已写入 README 14.2.1 |
 | D-11 | P3 | `GIT_CONFIG_GLOBAL=<空设备>` 同时丢掉用户的 `safe.directory` | `runx.rs` 的 git 隔离项 | 仓库属主不同时报 `dubious ownership`。报错明确，不是静默错误结果；保留用户配置等于重新打开 `textconv` 那扇门 | 取舍（DEC-003 的直接后果） |
 | D-12 | P3 | 熵注释口径不一致（128 vs 256 位） | `proxy.rs` 的 `RandomState` | 纯注释问题 | 未修 |
@@ -84,6 +84,7 @@ D-01（停止按钮）和 D-02（编排零覆盖）曾是仅有的两条"用户�
 | 16 | proxy 鉴权在读 body 之后 | 本轮（见 §1 第 7 条） |
 | 17 | 点"停止"杀不掉正在跑的 `npm test` | 本轮（B13）：`run_cancel` + 会话级取消位 + 进程树终止；端到端测试断言的是**耗时**而不只是标志位 |
 | 18 | 撤销快照"打不开"被吞成"就这几个文件" | 本轮（B11）：`walk()` 返回 `boolean`，失败即置 `incomplete`；界面显式标「清单不完整」。这是**结论正确性**修复而非数据安全修复（恢复本身会报错）——所以标记必须出现在界面上，不能只存在类型里 |
+| 19 | release 无条件带 devtools | `tauri` 依赖去掉 `features=["devtools"]`，改为可选 `devtools` 特性。源码门控是 `#[cfg(any(debug_assertions, feature="devtools"))]`（`tauri-2.12.5/src/webview/mod.rs:2263`、`tauri-runtime-wry-2.12.3/src/lib.rs:3937`），故 debug 构建不受影响。证据：`cargo tree -e features` 中已无 devtools 边 |
 
 ## 5. 维护规则
 

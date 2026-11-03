@@ -80,7 +80,12 @@ const ENV_KEEP: [&str; 19] = [
 /// 有了它，隔离性就是可判定的——不用往宿主环境里塞哨兵（那会污染并发测试），
 /// 直接比「子进程报上来的键集合」和「应该有的键集合」即可。
 /// 生产代码不需要这个键表：真正生效的是下面 spawn 处那份显式 `.env()` 列表。
+///
+/// 真正调用它的是 `tools/fs-harness`（用 `#[path]` 把本文件原样引进一个独立
+/// 二进制 crate，在那里 `cfg(test)` 为真）。所以本 crate 自己的测试构建里
+/// 它没人调用，会报 dead_code——用 allow 而不是删掉，否则那条环境隔离用例失去判据。
 #[cfg(test)]
+#[allow(dead_code)]
 pub fn allowed_env_keys() -> Vec<&'static str> {
     let mut v: Vec<&'static str> = ENV_KEEP.to_vec();
     v.extend([

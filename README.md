@@ -156,6 +156,16 @@ sudo apt install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
 3. **想临时开调试端口，别改配置。** 用 `npx tauri build` 打好的包若要从 Playwright/CDP 连进去，
    在 `tauri.conf.json` 的窗口里加 `additionalBrowserArgs: "--remote-debugging-port=9223"` 再编一次即可；
    注意 WebView2 的 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 环境变量**对 Tauri 无效**（它自己设了参数，会覆盖）。
+4. **发布版默认不带 devtools（右键"检查元素"）。** `src-tauri/Cargo.toml` 里 `tauri` 依赖不写
+   `features = ["devtools"]`。tauri 与 tauri-runtime-wry 的门控都是
+   `#[cfg(any(debug_assertions, feature = "devtools"))]`（`tauri-2.12.5/src/webview/mod.rs:2263`、
+   `tauri-runtime-wry-2.12.3/src/lib.rs:3937`），所以：
+   - `cargo build` / `npm run tauri dev` → 照常有 devtools（`debug_assertions` 对依赖同样为真）
+   - `cargo build --release` / `tauri build` → 没有 devtools
+
+   真要给某个发布版排障，用 `--features devtools` 显式打开，**不要**把它改回默认依赖特性——
+   那等于给每个用户附赠一个调试接口。
+   验证方式（不产出发布物即可确认）：`cargo tree -e features | grep -i devtools` 输出为空。
 
 另外，mingw 链接大 exe 会打印 `warning: linker stderr: .rsrc merge failure: multiple non-default manifests`，
 这是 mingw `ld` 合并资源段的已知告警，产物照常运行，不用管。
