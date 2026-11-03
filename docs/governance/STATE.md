@@ -10,7 +10,7 @@
 | 项 | 值 |
 |---|---|
 | 仓库 | `F:/zhuomian/zxz`（product `zxz` / `com.zxz.desktop`） |
-| 分支 / HEAD | `main` / `c351694`（`docs(audit): O1 重编宿主真机实测…`） |
+| 分支 / HEAD | `main` / `3f6fbba`（`docs(e2e): 全量重测 e2e 项数…`） |
 | 远端 | `origin` 内网 Gitea `192.168.3.200:3000/zxzjxx/zxzgpt.git`（与本地同步）；`github` 备用 |
 | 版本号 | `package.json` / `tauri.conf.json` / `Cargo.toml` 三处均 `0.3.0`（一致） |
 | 技术栈 | Tauri 2 + Rust（fsx / runx / wsx / proxy / api / perms）＋ React 18 + TS + Vite 6 |
