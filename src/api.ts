@@ -110,9 +110,15 @@ export async function chatStream({ settings, transport, messages, signal, onEven
   }
 
   const contentType = res.headers.get("content-type") || "";
+  // 判「这条响应是不是 SSE」只能看 content-type，不能看我们**请求**的是什么：
+  // 网关不认 stream 参数、或 200 带一个 JSON 错误体（国内厂商常见）时，
+  // 要了流式也照样收到整段 JSON。老代码只判 `!wantStream`，于是把 JSON 当 SSE
+  // 一行行解析——每行都不以 `data:` 开头，一个 delta 都没有、也不报错，
+  // 用户看到的是空回答。这里把「上游明确说是 JSON」单独拎出来。
+  const isJson = contentType.includes("json");
 
-  // 非流式，或代理返回一次性 JSON
-  if (!res.body || (!wantStream && !contentType.includes("event-stream"))) {
+  // 非流式，或上游/代理返回一次性 JSON
+  if (!res.body || isJson || (!wantStream && !contentType.includes("event-stream"))) {
     const json = (await res.json().catch(() => null)) as {
       error?: { message?: string };
       choices?: {
@@ -188,6 +194,11 @@ export async function chatStream({ settings, transport, messages, signal, onEven
         });
         return;
       }
+      // 代理自己会在流末发一条 done（proxy.rs 无条件发）。原样转发出去，
+      // 界面就会收到两条 done，而且第一条排在 tool_calls **之前**——任何按
+      // done 收尾的消费者都会在拿到工具调用之前结束本轮，整轮工具执行被丢掉。
+      // 统一由本函数在最后发唯一的一条 done，代理那条就不透传。
+      if (json.type === "done") return;
       onEvent(json as StreamEvent); // Rust 侧已经转成统一事件
       return;
     }

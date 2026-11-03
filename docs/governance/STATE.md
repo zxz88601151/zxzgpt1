@@ -21,7 +21,7 @@
 
 | 命令 | 结果 |
 |---|---|
-| `npm test` | **431 passed / 18 files**（本轮起点 328；B12-A 新增 `src/api.test.ts` 31 条） |
+| `npm test` | **437 passed / 18 files**（本轮起点 328；B12-A 新增 `src/api.test.ts` 37 条） |
 | `npm run build` | 成功；`dist/assets/index-C_jjb0nX.js` 335.51 kB（2026-11-03 23:34 实测） |
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **82 passed / 1 ignored**（GNU 工具链；msvc 必失败） |
 | `cargo check --manifest-path src-tauri/Cargo.toml` | 通过，**0 warning**（`--all-targets` 亦 0，2026-11-03 23:36 实测） |
@@ -45,7 +45,7 @@
 
 ## 3. 当前结论（不夸大）
 
-- 代码级质量：**良好**。431 条前端单测、82 条 Rust 单测全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。新增的传输层用例做过变异检验（改坏生产代码 → 对应用例必须变红），不是只看绿灯。
+- 代码级质量：**良好**。437 条前端单测、82 条 Rust 单测全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。新增的传输层用例做过变异检验（改坏生产代码 → 对应用例必须变红），不是只看绿灯。
 - 安全态势：**PARTIAL → 明显改善**。P0 三条 + 本轮 2 条（npm `pre`/`post` 钩子绕过、`.npmrc` 改脚本 shell）+ 执行授权闸门（P0-4）已落地；其余已登记项见 §5 与 `TECHNICAL_DEBT.md`。
 - 交付状态：**NOT_READY**。无安装包；CI 不编译 `src-tauri` 本体；e2e 无法在 CI 复现；release exe 已落后于 HEAD。
 - 架构状态：**PARTIAL**。编排仍是 1520 行 `App.tsx` 内的闭包循环；`src/orchestration/` 已存在但只有一个 `round.ts`（B7 切片），`send()` 本体未搬。工具五处手写已收成注册表（B6 完成）。ADR 0001 的 5 条验收标准 1.5 条达成（详见该 ADR 的"实施进度"小节，未勾的不勾）。
@@ -79,7 +79,7 @@
 | B13 · 停止真的停 | `run_cancel` + 会话级取消位；`RunResult.cancelled` 与 `timed_out` 分开；测试断言**耗时**而非标志位 | **PASS** | Rust **82**（新增 3 条取消用例，含真起 60 秒 npm test 再取消）；前端 400 |
 | B11 · 清单不完整要说出来 | `listUndo` 的 `walk()` 返回 `boolean`；子目录抛错 / 撞 400 条 / 超 8 层 → `snapshot.incomplete`；界面标「清单不完整」 | **PASS** | 提交 `8919e3f`；前端 **400**（新增 3 条：抛错 / 撞上限 / 全可读） |
 | B16 · devtools 只给 debug | `tauri` 依赖去掉 `features=["devtools"]`，改为可选特性；release 不再带右键检查元素 | **PASS** | 源码门控 `#[cfg(any(debug_assertions, feature="devtools"))]`；`cargo tree -e features` 中 devtools 边为空；`cargo check --all-targets` 0 warning；Rust 82 全绿 |
-| B12-A · 传输层判据 | 新增 `src/api.test.ts` 31 条：上游错误 / SSE 分帧 / 断流 / 工具增量 / Key 不进 URL 与请求头。**零新增依赖** | **PASS** | 前端 **431**；4 次变异检验各自精确变红一条；CI `ci.yml:18` 的 `npm test` 直接覆盖 |
+| B12-A · 传输层判据 | 新增 `src/api.test.ts` 37 条：上游错误 / SSE 分帧 / 断流 / 工具增量 / Key 不进 URL 与请求头；独立复审后补 JSON 兜底与 `done` 唯一性两组 | **PASS** | 前端 **437**；8 次变异检验各自精确变红一条；CI `ci.yml:18` 直接覆盖；e2e 24/39/69 + 代理接口 11 全绿 |
 
 ### 下一批（按优先级）
 
@@ -90,6 +90,7 @@
 |---|---|---|---|
 | B14 | e2e 进 CI 的三个前置（D-08） | 唯一能覆盖真实 WebView 的手段；R3 三个成因已逐个实测确认，都可修 | CI 上 `e2e.cjs` 能跑 |
 | B12-B | `send()` 接线层判据（D-02 剩余） | 两层纯函数都有判据了，接线层仍靠人眼 | 需业主选路线，见下 |
+| D-16 | 代理把「用户点停止」记成「连接处理失败」 | 日志在说谎的方向是「平时天天报错，真故障时反而不显眼」 | 中断时不再打错误 |
 
 > **B14 有一步撞甲方保留权限**：三个前置里「playwright 入依赖」要改 `package.json`（新增第三方依赖）。
 > 另两个（去掉 `channel:"msedge"` 硬编码、端口 5173 vs 1420 对齐）不涉及依赖，可以先做。

@@ -37,7 +37,13 @@ function settings(patch: Partial<Settings> = {}): Settings {
 const DIRECT_T: Transport = { mode: "direct", port: 0, token: "" };
 const PROXY_T: Transport = { mode: "proxy", port: 43210, token: "tok-abc" };
 
-/** 造一个假的 Response；只实现被测代码真正用到的成员 */
+/** 造一个假的 Response；只实现被测代码真正用到的成员。
+ *
+ * 注意 `body` 默认 null 是简化：真实 Response 的 body 只在 204/304/HEAD 时为 null。
+ * 所以"靠 !res.body 走一次性 JSON 分支"的用例证明的不是生产路径。真正接近真实的
+ * 情形（有 body、content-type: application/json、stream:true）在
+ * 「上游没按 SSE 回」那一组里单独覆盖。
+ */
 function res(opts: {
   ok?: boolean;
   status?: number;
@@ -102,6 +108,9 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  // 不还原 window 会留下顺序依赖：目前每个用例都自带赋值所以还没出事，
+  // 但只要有人在文件尾追加一条读 window 的用例，就会变成"看谁先跑"。
+  delete (globalThis as { window?: unknown }).window;
 });
 
 // ───────────────────────────── describeError ─────────────────────────────
@@ -144,8 +153,8 @@ describe("请求怎么发：Key 不能跑到 URL 或请求行上", () => {
       onEvent: (e) => evts.push(e),
     });
     const { url, init } = lastCall();
+    // url 精确相等已经蕴含"Key 没拼进 URL"，不另写一条永不独立失败的断言
     expect(url).toBe("https://api.example.com/v1/chat/completions");
-    expect(url).not.toContain("sk-test");
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer sk-test");
   });
 
@@ -421,7 +430,11 @@ describe("SSE 解析：手写的分帧逻辑在最难看的输入下也不能崩
       signal: new AbortController().signal,
       onEvent: (e) => evts.push(e),
     });
-    expect(evts[0]).toEqual({ type: "usage", usage: { prompt_tokens: 3, completion_tokens: 5, total_tokens: 8 } });
+    // 整段断言，不是只看第一条：只查 evts[0] 的话，重复发同一个事件也照样绿
+    expect(evts).toEqual([
+      { type: "usage", usage: { prompt_tokens: 3, completion_tokens: 5, total_tokens: 8 } },
+      { type: "done" },
+    ]);
   });
 });
 
@@ -551,11 +564,134 @@ describe("流式工具调用：参数被切碎时合成一次完整调用", () =
       onEvent: (e) => evts.push(e),
     });
     // 中间态不出现在界面上：App 收到半截参数会执行一个错调用
+    // 并且 done 只能有一个、且必须是最后一个——代理自己会发一条 done，
+    // 原样转发就会出现「done 在 tool_calls 之前」，任何按 done 收尾的消费者
+    // 都会在拿到工具调用之前结束本轮。
     expect(evts).toEqual([
-      { type: "done" }, // 代理自己转发的 done
       { type: "tool_calls", calls: [{ id: "c1", name: "list", arguments: "{}" }] },
-      { type: "done" }, // api.ts 收尾（两条 done 是现状，不是本测试引入的）
+      { type: "done" },
     ]);
+  });
+});
+
+// ───────────────────────────── 一次性 JSON ─────────────────────────────
+
+describe("上游没按 SSE 回：内容不能静默丢掉", () => {
+  it("要了流式、上游却返回整段 JSON：照样要吐出正文", async () => {
+    // 真实场景：网关不认 stream 参数、或 200 + JSON 错误体（国内厂商常见）。
+    // 老代码只判 `!wantStream` 才走一次性 JSON 分支，于是把 JSON 当 SSE 行解析，
+    // 每行都不以 data: 开头 → 一个 delta 都没有，也没有报错 → 用户看到空回答。
+    const payload = JSON.stringify({
+      choices: [{ message: { content: "完整回答" } }],
+      usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+    });
+    installFetch(async () =>
+      res({
+        contentType: "application/json",
+        body: streamOf([payload]),
+        json: JSON.parse(payload),
+      }),
+    );
+    const evts: StreamEvent[] = [];
+    await chatStream({
+      settings: settings({ stream: true }), // 默认就是 true
+      transport: DIRECT_T,
+      messages: [{ role: "user", content: "yo" }],
+      signal: new AbortController().signal,
+      onEvent: (e) => evts.push(e),
+    });
+    expect(evts).toEqual([
+      { type: "delta", text: "完整回答" },
+      { type: "usage", usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 } },
+      { type: "done" },
+    ]);
+  });
+
+  it("非流式的四类事件要按顺序全出：reasoning → delta → tool_calls → usage → done", async () => {
+    installFetch(async () =>
+      res({
+        contentType: "application/json",
+        json: {
+          choices: [
+            {
+              message: {
+                content: "正文",
+                reasoning_content: "思考",
+                tool_calls: [{ id: "c9", function: { name: "read", arguments: '{"path":"a"}' } }],
+              },
+            },
+          ],
+          usage: { prompt_tokens: 4, completion_tokens: 5, total_tokens: 9 },
+        },
+      }),
+    );
+    const evts: StreamEvent[] = [];
+    await chatStream({
+      settings: settings({ stream: false }),
+      transport: DIRECT_T,
+      messages: [{ role: "user", content: "yo" }],
+      signal: new AbortController().signal,
+      onEvent: (e) => evts.push(e),
+    });
+    expect(evts).toEqual([
+      { type: "reasoning", text: "思考" },
+      { type: "delta", text: "正文" },
+      { type: "tool_calls", calls: [{ id: "c9", name: "read", arguments: '{"path":"a"}' }] },
+      { type: "usage", usage: { prompt_tokens: 4, completion_tokens: 5, total_tokens: 9 } },
+      { type: "done" },
+    ]);
+  });
+});
+
+// ───────────────────────────── 参数传导 ─────────────────────────────
+
+describe("参数怎么传下去：静默吞掉一个都是故障", () => {
+  it("给了工具就要在两种模式下都传到上游，直连还要带 tool_choice=auto", async () => {
+    const tools = [{ type: "function" as const, function: { name: "read", description: "读文件", parameters: {} } }];
+    for (const t of [DIRECT_T, PROXY_T]) {
+      installFetch(async () => res({ body: null, json: { choices: [{ message: { content: "x" } }] } }));
+      await chatStream({
+        settings: settings({ stream: false }),
+        transport: t,
+        messages: [{ role: "user", content: "yo" }],
+        signal: new AbortController().signal,
+        onEvent: () => {},
+        tools,
+      });
+      const sent = JSON.parse(String(lastCall().init.body));
+      // 传不下去 = 模型永远不发起工具调用，且界面上看不出为什么
+      expect(sent.tools, `${t.mode} 模式丢了 tools`).toEqual(tools);
+      if (t.mode === "direct") expect(sent.tool_choice).toBe("auto");
+    }
+  });
+
+  it("maxTokens 设了就两种模式都要带（不带就是用户设的上限被静默吞掉）", async () => {
+    for (const t of [DIRECT_T, PROXY_T]) {
+      installFetch(async () => res({ body: null, json: { choices: [{ message: { content: "x" } }] } }));
+      await chatStream({
+        settings: settings({ stream: false, maxTokens: 256 }),
+        transport: t,
+        messages: [{ role: "user", content: "yo" }],
+        signal: new AbortController().signal,
+        onEvent: () => {},
+      });
+      const sent = JSON.parse(String(lastCall().init.body));
+      expect(sent.max_tokens, `${t.mode} 模式丢了 max_tokens`).toBe(256);
+    }
+  });
+
+  it("maxTokens 为 null 或 0 时不发 max_tokens（由上游决定，而不是发个 0 把回答掐死）", async () => {
+    for (const bad of [null, 0]) {
+      installFetch(async () => res({ body: null, json: { choices: [{ message: { content: "x" } }] } }));
+      await chatStream({
+        settings: settings({ stream: false, maxTokens: bad }),
+        transport: DIRECT_T,
+        messages: [{ role: "user", content: "yo" }],
+        signal: new AbortController().signal,
+        onEvent: () => {},
+      });
+      expect("max_tokens" in JSON.parse(String(lastCall().init.body))).toBe(false);
+    }
   });
 });
 
@@ -574,6 +710,16 @@ describe("探测与旁路接口", () => {
     installFetch(async () => {
       throw new TypeError("connect ECONNREFUSED");
     });
+    await expect(detectTransport()).resolves.toEqual(DIRECT);
+  });
+
+  it("/health 活着但返回非 2xx（代理起来了但状态不对），也要回落直连", async () => {
+    // 上一条走的是 fetch 抛错（服务没起来）；这条走的是 res.ok === false，
+    // 两个分支不同：只测前者的话，把 `if (res.ok)` 改成无条件返回代理也照样绿。
+    (globalThis as unknown as { window: unknown }).window = {
+      __TAURI_INTERNALS__: { invoke: async () => ({ port: 43210, token: "t" }) },
+    };
+    installFetch(async () => res({ ok: false, status: 500 }));
     await expect(detectTransport()).resolves.toEqual(DIRECT);
   });
 

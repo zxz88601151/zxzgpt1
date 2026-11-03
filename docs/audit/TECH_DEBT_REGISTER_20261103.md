@@ -45,9 +45,10 @@
 | D-10 | P3 | 一次性授权在闸门处即扣，spawn 失败也扣 | `perms::decide` 在 `runx` 之前扣 `uses_left` | 用户要再批一次。失败方向是**更严**，不是更松 | 取舍，已写入 README 14.2.1 |
 | D-11 | P3 | `GIT_CONFIG_GLOBAL=<空设备>` 同时丢掉用户的 `safe.directory` | `runx.rs` 的 git 隔离项 | 仓库属主不同时报 `dubious ownership`。报错明确，不是静默错误结果；保留用户配置等于重新打开 `textconv` 那扇门 | 取舍（DEC-003 的直接后果） |
 | D-12 | P3 | 熵注释口径不一致（128 vs 256 位） | `proxy.rs` 的 `RandomState` | 纯注释问题 | 未修 |
-| D-13 | P3 | 测试覆盖结构失衡 | 431 条集中在 `src/lib` + `src/skills` + `src/api.ts` + `orchestration`；`App.tsx` 与组件层仍基本 0 | 与 D-02 同源（组件层没有 DOM 就没法测） | 未修 |
+| D-13 | P3 | 测试覆盖结构失衡 | 437 条集中在 `src/lib` + `src/skills` + `src/api.ts` + `orchestration`；`App.tsx` 与组件层仍基本 0 | 与 D-02 同源（组件层没有 DOM 就没法测） | 未修 |
 | D-14 | P3 | e2e 假 IPC 需手工跟随真 IPC | `tools/workspace-e2e.cjs` 的 `__TAURI_INTERNALS__` 桩本轮才补齐 `undo_*` / `perm_*` | 新增一条 IPC 就忘一次，失效方式是**误导性超时**而不是报错 | 机制性风险，未根治 |
 | D-15 | P3 | 样式变量 `--warn` 被引用 4 次、从未定义 | `src/styles.css` 全文无 `--warn:` 声明；4 处引用各带不同 fallback（`#e3b341` / `#d08a2a` / `#b8860b`） | 每个 `var(--warn, X)` 都在用自己的 X，同一个语义在不同位置是三种颜色。改主题时改不动 | 未修（B11 只做记录，不动别人的颜色） |
+| D-16 | P3 | 用户点「停止」会让代理日志报"连接处理失败" | `proxy.rs:98-100` 把 `handle_conn` 的**任何**错误都打成 `连接处理失败`，而前端中断连接就是其中最常见的一种（e2e 跑「中断生成」时实测打出 `os error 10053`） | 日志在说谎的方向是"平时天天报错"，真出故障时反而分不出来 | 未修（本轮记录；属日志口径问题，不影响协议） |
 
 ### 2.1 为什么 D-02 从 P1 降到 P2（而不是「已修」）
 
@@ -117,6 +118,8 @@ D-06 排第一不代表马上动手：它要动全仓最热、零覆盖的 320 �
 | 18 | 撤销快照"打不开"被吞成"就这几个文件" | 本轮（B11）：`walk()` 返回 `boolean`，失败即置 `incomplete`；界面显式标「清单不完整」。这是**结论正确性**修复而非数据安全修复（恢复本身会报错）——所以标记必须出现在界面上，不能只存在类型里 |
 | 19 | release 无条件带 devtools | `tauri` 依赖去掉 `features=["devtools"]`，改为可选 `devtools` 特性。源码门控是 `#[cfg(any(debug_assertions, feature="devtools"))]`（`tauri-2.12.5/src/webview/mod.rs:2263`、`tauri-runtime-wry-2.12.3/src/lib.rs:3937`），故 debug 构建不受影响。证据：`cargo tree -e features` 中已无 devtools 边 |
 | 20 | 编排层零覆盖（B12-A） | `src/api.test.ts` 31 条，覆盖四类：①上游错误（401/503/body 读不出/网络层/AbortError 直抛/非流式 error 字段/非 JSON/流内 error）②SSE 分帧（注释行、半截 JSON、无换行收尾、中文被字节切开、最后一行）③断流（保留已收内容、断在半路不许发 `done`、cancel 抛错不掩盖原错）④Key 不进 URL（直连走头、代理走体）。**4 次变异检验**（撤 AbortError 直抛 / 撤 `{stream:true}` / 撤 cancel 的 try / 把 Key 塞回代理头）各自精确变红一条 |
+| 21 | **要了流式、上游返回整段 JSON → 静默空回答**（独立复审揪出） | `api.ts:115` 的条件只判 `!wantStream`，注释却写着"或代理返回一次性 JSON"。`stream` 默认 true，于是 JSON 被当 SSE 逐行解析、一行都不以 `data:` 开头 → 零 delta、零报错，用户看到空回答。改成 `isJson = contentType.includes("json")` 参与判定：上游明确说是 JSON 就走一次性分支。**复现**：先加用例（红：`[{"type":"done"}]`）→ 再改代码（绿）。变异检验：撤掉 `isJson` → 恰好 1 条红 |
+| 22 | **代理模式下 `done` 发两条、且第一条排在 `tool_calls` 之前**（独立复审揪出） | `proxy.rs:295` 无条件发 `done`，`api.ts:191` 原样转发，`api.ts:242` 再补一条。断言它"就是两条"等于把缺陷固化成契约。现改为 `if (json.type === "done") return;`，统一由 `api.ts` 在流末发唯一一条。**当前对 App 无可见后果**（`grep '"done"' src/App.tsx` 为 0，没有消费者），属预防性修复——但顺序错误会让将来任何按 `done` 收尾的消费者整轮丢掉工具调用，所以不留 |
 
 ## 5. 维护规则
 
