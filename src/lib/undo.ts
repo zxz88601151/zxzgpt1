@@ -17,9 +17,18 @@ export interface UndoFile {
 }
 
 export interface UndoSnapshot {
-  /** `2026-11-01T02-49-32`（目录名） */
+  /** `2026-11-01T02-49-32-123`（目录名，UTC、毫秒精度） */
   stamp: string;
   files: UndoFile[];
+  /**
+   * 这份清单**不完整**：某个子目录列不出来，或者撞上了条数/深度上限。
+   *
+   * 为什么要这个标记：逐层 `catch` 会把"打不开"吞成"就这么几个文件"，
+   * 于是一份残缺的清单看起来和完整的一模一样。用户据此判断"这版没改过某文件"
+   * 就会判断错。恢复操作本身不会因此出错（`undo_read` 会明确报错），
+   * 所以这不算数据安全问题——但它是**结论正确性**问题，必须说出来。
+   */
+  incomplete?: boolean;
 }
 
 const MAX_FILES = 400;
@@ -76,29 +85,44 @@ export async function listUndo(sessionId: string): Promise<UndoSnapshot[]> {
   const snapshots: UndoSnapshot[] = [];
   for (const dir of top.filter((e) => e.dir)) {
     const files: UndoFile[] = [];
-    await walk(sessionId, dir.name, "", files, 0);
-    snapshots.push({ stamp: dir.name, files: files.sort((x, y) => x.rel.localeCompare(y.rel)) });
+    const complete = await walk(sessionId, dir.name, "", files, 0);
+    const snap: UndoSnapshot = { stamp: dir.name, files: files.sort((x, y) => x.rel.localeCompare(y.rel)) };
+    if (!complete) snap.incomplete = true;
+    snapshots.push(snap);
   }
   return snapshots.sort((x, y) => y.stamp.localeCompare(x.stamp));
 
-  /** rel 是相对快照目录（`.zxz/undo/<stamp>`）的路径，空串表示快照根 */
-  async function walk(sid: string, stamp: string, rel: string, out: UndoFile[], depth: number): Promise<void> {
-    if (depth > MAX_DEPTH || out.length >= MAX_FILES) return;
+  /**
+   * rel 是相对快照目录（`.zxz/undo/<stamp>`）的路径，空串表示快照根。
+   *
+   * 返回 false 表示「这份清单不完整」：子目录打不开，或者到了条数/深度上限。
+   * 不再静默 `return`——那会让残缺的列表看起来是完整的。
+   */
+  async function walk(
+    sid: string,
+    stamp: string,
+    rel: string,
+    out: UndoFile[],
+    depth: number
+  ): Promise<boolean> {
+    if (depth > MAX_DEPTH || out.length >= MAX_FILES) return false;
     let entries: FsEntry[];
     try {
       entries = await undoList(sid, stamp, rel);
     } catch {
-      return;
+      return false;
     }
+    let complete = true;
     for (const e of entries) {
-      if (out.length >= MAX_FILES) return;
+      if (out.length >= MAX_FILES) return false;
       const childRel = rel ? `${rel}/${e.name}` : e.name;
       if (e.dir) {
-        await walk(sid, stamp, childRel, out, depth + 1);
+        if (!(await walk(sid, stamp, childRel, out, depth + 1))) complete = false;
       } else {
         out.push({ rel: childRel, bytes: e.size });
       }
     }
+    return complete;
   }
 }
 

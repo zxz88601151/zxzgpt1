@@ -126,6 +126,11 @@ export function UndoPanel({ open, sessionId, onClose, onRestored }: UndoPanelPro
                   <Icon name="history" size={13} />
                   <span className="undo-stamp">{stampLabel(snap.stamp)}</span>
                   <span className="undo-count">{snap.files.length} 个文件</span>
+                  {snap.incomplete ? (
+                    <span className="undo-partial" title="有子目录列不出来，或超出了条数/深度上限">
+                      清单不完整
+                    </span>
+                  ) : null}
                 </button>
                 {openNow ? (
                   <ul className="undo-files">

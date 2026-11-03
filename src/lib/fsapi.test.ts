@@ -187,6 +187,67 @@ describe("目录树与撤销栈走会话通道", () => {
     await expect(listUndo("ws-1")).rejects.toThrow("权限不足");
   });
 
+  // 逐层 catch 会把"打不开"吞成"就这么几个文件"——残缺清单看起来和完整的一模一样，
+  // 用户据此判断"这版没改过某文件"就会判断错。所以要显式标 incomplete。
+  it("某个子目录列不出来时，快照要标「清单不完整」而不是装作完整", async () => {
+    installDesktop({
+      undo_list: (args) => {
+        if (args?.stamp == null) {
+          return [{ name: "2026-11-01T02-49-32-123", path: "/p/.zxz/undo/2026-11-01T02-49-32-123", dir: true, size: 0 }];
+        }
+        if (args.rel === "") {
+          return [
+            { name: "src", path: "/p/.zxz/undo/x/src", dir: true, size: 0 },
+            { name: "ok.txt", path: "/p/.zxz/undo/x/ok.txt", dir: false, size: 5 },
+          ];
+        }
+        throw new Error("这个子目录读不了");
+      },
+    });
+    const snaps = await listUndo("ws-1");
+    expect(snaps).toHaveLength(1);
+    expect(snaps[0].incomplete).toBe(true);
+    // 能读到的部分仍要列出来，不能因为一处失败就整份丢掉
+    expect(snaps[0].files.map((f) => f.rel)).toEqual(["ok.txt"]);
+  });
+
+  // 撞上限和打不开是同一类问题：截断后的清单看起来也像完整的。
+  it("文件数撞上 400 条上限时同样要标「清单不完整」", async () => {
+    const many = Array.from({ length: 450 }, (_, i) => ({
+      name: `f${String(i).padStart(3, "0")}.txt`,
+      path: `/p/.zxz/undo/s/f${i}.txt`,
+      dir: false,
+      size: 1,
+    }));
+    installDesktop({
+      undo_list: (args) => {
+        if (args?.stamp == null) {
+          return [{ name: "2026-11-01T02-49-32-123", path: "/p/.zxz/undo/s", dir: true, size: 0 }];
+        }
+        return args.rel === "" ? many : [];
+      },
+    });
+    const snaps = await listUndo("ws-1");
+    expect(snaps[0].files).toHaveLength(400);
+    expect(snaps[0].incomplete).toBe(true);
+  });
+
+  it("全部子目录都读得到时不带 incomplete 标记", async () => {
+    installDesktop({
+      undo_list: (args) => {
+        if (args?.stamp == null) {
+          return [{ name: "2026-11-01T02-49-32-123", path: "/p/.zxz/undo/s", dir: true, size: 0 }];
+        }
+        if (args.rel === "") {
+          return [{ name: "ok.txt", path: "/p/.zxz/undo/s/ok.txt", dir: false, size: 5 }];
+        }
+        return [];
+      },
+    });
+    const snaps = await listUndo("ws-1");
+    expect(snaps[0].incomplete).toBeUndefined();
+  });
+
   it("恢复某一版走 undo_write 备份、undo_read 读正文，正文写回仍走 fs_write", async () => {
     installDesktop({
       fs_exists: () => true,

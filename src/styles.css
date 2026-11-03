@@ -1345,6 +1345,16 @@ body:not(.collapsed) #btnOpenSidebar { display: none; }
 .undo-stamp { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .undo-count { color: var(--muted); font-size: 12px; }
 
+/* 「清单不完整」：它不是装饰，是在说"别拿这份列表当完整证据" */
+.undo-partial {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--warn, #d08a2a);
+  color: var(--warn, #d08a2a);
+  white-space: nowrap;
+}
+
 .undo-files { list-style: none; margin: 0; padding: 4px 11px 8px; display: flex; flex-direction: column; gap: 2px; }
 .undo-files li { display: flex; align-items: center; gap: 10px; font-size: 12px; padding: 3px 0; }
 .undo-files li code {

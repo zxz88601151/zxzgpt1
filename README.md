@@ -39,7 +39,7 @@ zxz/
 │   │   ├── tools.ts            工具定义、白名单、tool_calls 合并、测试回路决策（纯逻辑）
 │   │   ├── pending.ts          写入前确认：待批清单（纯逻辑，不碰 IPC）
 │   │   ├── fsapi.ts            本机文件 IPC 封装（列目录 / 读 / 写 / 拼目录树）
-│   │   └── *.test.ts           本目录 13 个单测文件（全仓 17 个 / 397 条，见 §9.6）
+│   │   └── *.test.ts           本目录 13 个单测文件（全仓 17 个 / 400 条，见 §9.6）
 │   ├── skills/
 │   │   ├── index.ts            内建技能装配（?raw 导入，与外部技能同一套解析）
 │   │   ├── sources.ts          外部来源登记表（29 条）+ 分组汇总 + 审计清单生成
@@ -299,7 +299,7 @@ ZXZ_BASE=http://localhost:1420 node tools/e2e.cjs   # 24 项，2026-11-03 实测
 纯逻辑单测（Markdown / 高亮 / 上下文窗口 / 会话过滤）不需要浏览器：
 
 ```bash
-npm test                  # vitest run，397 条（17 个文件），2026-11-03 实测
+npm test                  # vitest run，400 条（17 个文件），2026-11-03 实测
 ```
 
 **两个本机踩过的坑，写下来省得再踩**：
@@ -405,7 +405,7 @@ node tools/desktop-skill-e2e.cjs    # 静态 21 项，本轮未跑（见 9.6，�
 | `tools/skill-e2e.cjs`（假 IPC 技能库） | 69 | **69 PASS / 0 FAIL** |
 | `tools/proxy-e2e.cjs`（真实 Rust 代理，重编后） | 11 + 24 | **11/11 接口 + 24/24 前端** |
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | 82 + 1 ignored | **82 PASS** |
-| `npx vitest run` | 397 / 17 文件 | **397 PASS** |
+| `npx vitest run` | 400 / 17 文件 | **400 PASS** |
 
 **当日没跑，只有静态计数**（下表数字是脚本里 `check(...)` 的调用点数量，
 不是运行结果；未跑的原因逐个写在最后一列）：
@@ -887,7 +887,7 @@ Rust 侧给这个会话的取消位置位，等待循环每 50ms 看一眼，置
 
 | 项目 | 结果 |
 | --- | --- |
-| `npx vitest run` | **397 passed / 17 files** |
+| `npx vitest run` | **400 passed / 17 files** |
 | `npx tsc --noEmit` | **0 error** |
 | `npm run build` | 成功 |
 | `cargo check --manifest-path src-tauri/Cargo.toml` | **通过，0 warning**（含 lib.rs 的 IPC 注册、api.rs 转发） |
