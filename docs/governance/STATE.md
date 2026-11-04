@@ -1,33 +1,35 @@
 # 项目状态板（唯一权威）
 
-最后更新：2026-11-04 09:40　｜　维护者：Project Director（Agent 小队）
+最后更新：2026-11-04 10:20　｜　维护者：Project Director（Agent 小队）
 状态判定用词：`PASS` `PARTIAL` `FAIL` `ABSENT` `NOT_TESTED` `BLOCKED`
 
 ---
 
-## 1. 身份基线（FACT，2026-11-03 实测）
+## 1. 身份基线（FACT，2026-11-04 10:18 B12-B5 实测）
 
 | 项 | 值 |
 |---|---|
 | 仓库 | `F:/zhuomian/zxz`（product `zxz` / `com.zxz.desktop`） |
-| 分支 / HEAD | `main` / `6d1cf46` + 本轮未提交的 B12-B3 |
-| 远端 | `origin` 内网 Gitea `192.168.3.200:3000/zxzjxx/zxzgpt.git`（与本地同步）；`github` 备用 |
+| 分支 / HEAD | `main` / `8142815`（B12-B3 已提交；ahead `origin/main` 与 `github/main` 各 **26**，**未推送**） |
+| 远端 | `origin` 内网 Gitea `192.168.3.200:3000/zxzjxx/zxzgpt.git`（**当前认证失败，推送会直接报错**，见 B12-B4 §6）；`github` = `zxz88601151/zxzgpt1`（**公开仓库**，CI 只认它） |
 | 版本号 | `package.json` / `tauri.conf.json` / `Cargo.toml` 三处均 `0.3.0`（一致） |
 | 技术栈 | Tauri 2 + Rust（fsx / runx / wsx / proxy / api / perms）＋ React 18 + TS + Vite 6；测试用 vitest（node 环境为主，DOM 用文件头 `@vitest-environment jsdom` 单文件声明） |
 | 规模 | 前端生产代码 8,975 行（`App.tsx` **1338** 行 + `orchestration/session.ts` 321 行），测试 4,534 行；Rust 8 文件 / 7 模块 |
-| 工作区 | B12-B3 改动待提交（`App.tsx` / `orchestration/session.ts` / 文档）；`.refs/`（193MB）、`.tmp-skills/` 仍为未跟踪 |
+| 工作区 | **干净**（B12-B5 重编后复核 `git status --porcelain` 为空）。`.zxz/` 存旧 exe 备份与构建日志，已在 `.gitignore:15` 忽略 |
 
 ### 1.1 基线命令与实测结果
 
 | 命令 | 结果 |
 |---|---|
-| `npm test` | **447 passed / 20 files**（本轮起点 441；B12-B2 新增 `src/app.rounds.test.tsx` 6 条） |
-| `npm run build` | 成功；`dist/assets/index-C_jjb0nX.js` 335.51 kB（2026-11-03 23:34 实测） |
+| `npm test` | **447 passed / 20 files**（2026-11-04 10:11 B12-B5 重跑；25.4s） |
+| `npm run build` | 成功；`dist/assets/index-CI0qq08X.js` **336,162 B**（sha256 `a15eb818…`），由 `tauri build` 的 `beforeBuildCommand` 于 2026-11-04 10:14 重跑 |
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **82 passed / 1 ignored**（GNU 工具链；msvc 必失败） |
 | `cargo test --manifest-path tools/proxy-harness/Cargo.toml` | **3 passed**（D-16 的错误分类表；同一套 GNU 工具链） |
-| `cargo check --manifest-path src-tauri/Cargo.toml` | 通过，**0 warning**（`--all-targets` 亦 0，2026-11-03 23:36 实测） |
-| e2e（2026-11-04 B12-B3 搬家后实跑） | `e2e.cjs` **24/24**、`workspace-e2e` **39/39**、`skill-e2e` **69/69**；`proxy-e2e` 本轮未跑（Rust 代理另有 D-16 单测与对照实验） |
-| CI 是否跑到新测试 | **是**：`.github/workflows/ci.yml:18` 的 `npm test` 走 vitest，`include: src/**/*.test.ts` |
+| `cargo check --manifest-path src-tauri/Cargo.toml` | 通过；**2 条环境级 warning**（incremental 目录 `.lock` 删除被拒 `os error 5`），非代码警告 |
+| e2e（2026-11-04 10:12 B12-B5 实跑） | `e2e.cjs` **24/24**、`workspace-e2e` **39/39**、`skill-e2e` **69/69**、`proxy-e2e` **接口 11/11 + 前端 24/24** |
+| `npx tauri build --no-bundle` | PASS（2026-11-04 10:18，4m12s）：`zxz.exe` 5,105,664 B / sha256 `66dbd4c5…`；内嵌 `index-CI0qq08X.js` + `index-DLSfHGKG.css` = `dist/assets` 同名；`remote-debugging` 0。日志 `.zxz/logs/tauri-build-20261104.log`。**该 exe 已被下一次 bundle 构建覆盖** |
+| `npx tauri build --bundles nsis` | **PASS**（2026-11-04 10:29，3m39s）：`zxz.exe` **5,105,664 B / sha256 `68b99479…`**（同源重建：体积一字不差、字节不同 → **逐字节不可复现**）；安装包 `bundle/nsis/zxz_0.3.0_x64-setup.exe` **2,230,744 B（2.13 MiB）/ sha256 `14ea02bb…`**，`FileVersion` = `ProductVersion` = `0.3.0`，`NotSigned`。日志 `.zxz/logs/tauri-bundle-nsis-20261104.log`（含 `Downloading nsis-3.13.zip`、`nsis_tauri_utils-v0.5.3.dll` 及哈希校验、`makensis`、`Finished 1 bundle`） |
+| CI 是否跑到新测试 | **是**：`.github/workflows/ci.yml` 的 `npm test` 走 vitest，`vitest.config.ts:11` 的 `include` 覆盖 `src/**/*.test.ts(x)` |
 
 `[FACT]` 本机 msvc 默认工具链会在链接期被 Git for Windows 的 coreutils `link.exe` 抢占，
 报 `link: extra operand`，且后台包装器仍上报 exit 0。**Rust 测试一律用**
@@ -87,6 +89,8 @@
 | B12-B2 · 整轮重放 | 新增 `src/app.rounds.test.tsx` 6 条：① 上游 500 → 只发 1 次请求、`HTTP 500` 与上游原话都上屏、按钮复位；② 工具轮（假 IPC + 假上游）→ 第一轮带 `tools`、`read_file` 的结果按 `tool_call_id` 回填、第二轮带 `assistant.tool_calls` + `tool` 消息、随后 502 即收摊（恰好 2 次请求）；③ 挂起的流 + 点停止 → 显示「已停止生成」、无「请求失败」、不再发请求；④ 每轮都要读文件 → 恰好 6 次请求 + 「已达到本次最多 6 轮读写」；⑤ 自动测试 3 轮不过 → 恰好 3 次请求、3 次 `run_allowed`、每轮报错原文回传进下一轮上下文 + 「测试 3 轮仍未通过」；⑥ exec 审批 → 没回答前请求数仍是 1、`perm_grant` 为 0，点「仅这一次」后记 1 条一次性授权、命令重试、结果回填并继续下一轮 | **PASS** | 前端 **447**（20 文件）；6 次变异检验各自精确变红：去掉 `!res.ok` 抛错 → ①② 红；去掉 `buildMessages` 的 tool_calls 展开 → ② 红；去掉 `AbortError` 分支 → ③ 红；`MAX_ROUNDS` 6→8 → ④ 红（`expected 8 to be 6`）；`testLoopDecision` 去掉 `give_up` → ⑤ 红（`expected 6 to be 3`）；确认框不渲染 → ⑥ 红。`npm run build` 通过 |
 | D-16 · 中断不再记故障 | `proxy.rs` 引入 `ConnError::{PeerGone,Fatal}`：写路径的 `BrokenPipe` / `ConnectionReset` / `ConnectionAborted` 归 `PeerGone` 并静默，其余照旧打日志；读路径的畸形请求仍是 `Fatal`（不改语义） | **PASS** | proxy-harness **3 passed**（分类表）；变异「BrokenPipe 归 Fatal」→ 精确红一条；端到端对照实验：旧行为 stderr 打出 `os error 10053`（FAIL），新行为 stderr 为空（PASS）。`cargo check` 通过；`docs/audit/D16_INTERRUPT_LOG_20261104.md` |
 | B12-B3 · 轮循环搬家 | 新增 `src/orchestration/session.ts`（321 行）导出 `runRounds(deps)`；`App.tsx` 只保留装配（1520 → **1338** 行）；依赖注入：`chat` / `tools()` / `commitMessages` / `patchMessage` / `executeTool` / `writeFiles` / `readFiles` / `readRefs` / `runTest` / `currentWorkspace`。只搬运不改语义（ADR D3）；rAF 在 Node 下回退 setTimeout(16)，浏览器路径不变 | **PASS** | 前端 **447** 不变；e2e 搬家后实跑 24/24 + 39/39 + 69/69；变异①`runRounds` 开头 return → 7 条红（证明 App 走新路径）；变异②测试回路计数传错 → 精确红一条。`grep -rn "from \"react\"" src/orchestration/` 无命中 |
+| B12-B5 · 重编 release | 全量回归九项 + `tauri build --no-bundle` 重编（工作区干净、HEAD `8142815`），关闭 R1 | **PASS** | 447 / 82 / 3 / 24 / 39 / 69 / 11+24 全绿；`zxz.exe` 5,105,664 B、sha256 `66dbd4c5…`、内嵌资源名 = `dist` 同名、`remote-debugging` 0；日志 `.zxz/logs/tauri-build-20261104.log`。**顺带查实一处假回归**：`tools/proxy-e2e.cjs:24` 优先取 `tools/proxy-harness/target-gnu/`，该目录里的 exe 停留在 11-03 23:20（早于 D-16），首次跑 e2e 时打出了本该已消失的 `连接处理失败 … os error 10053`；用当前源码重编该 target-dir 后该行消失、`PASS 11+24` 复现 |
+| B12-B6 · NSIS 安装包 | 业主裁定「保持 `downloadBootstrapper` + 只打 NSIS」，未改 `tauri.conf.json`；`tauri build --bundles nsis` 一次产出 | **PASS_WITH_CONDITIONS** | `zxz_0.3.0_x64-setup.exe` 2,230,744 B / sha256 `14ea02bb…` / mtime 10:29:15；`FileVersion 0.3.0`；NSIS 3.13 + utils v0.5.3 经 Tauri 下载并校验。**条件**：未做真实安装验证、未签名、安装期依赖联网拉 WebView2。附带查实：同源两次构建（`--no-bundle` vs `--bundles nsis`）体积同为 5,105,664 B 但 sha256 不同（`66dbd4c5…` → `68b99479…`），**产物逐字节不可复现**；且 `tauri build` 每次都会把 `src-tauri/Cargo.toml` 的 `tauri = { version = "2" }` 改写成带 `features = []`，已两次 `git checkout --` 还原 |
 
 ### 下一批（按优先级）
 
@@ -109,8 +113,8 @@
 
 | # | 项 | 级别 | 说明 |
 |---|---|---|---|
-| R1 | release exe 落后于 HEAD | 高 | `src-tauri/target/release/zxz.exe` 内嵌的仍是 `index-CQlZK13B.js`，当前构建产物是 `index-CI0qq08X.js`（相差 B3–B16 + 接线层测试 + B12-B3 搬家）。**未重编前不得声称交付物含任何本轮修复** |
-| R2 | 无安装包 | 高 | `bundle.targets: "all"` 配置存在但从未产出；`WebView2` 走 `downloadBootstrapper`，离线不可用 |
+| R1 | ~~release exe 落后于 HEAD~~ | ~~高~~ **已解除** | **B12-B5 重编（2026-11-04 10:18）**：`zxz.exe` **5,105,664 B** / sha256 `66dbd4c5…`（旧 `d15320c7…`、5,068,288 B、mtime 11-02 14:58）；内嵌 `index-CI0qq08X.js` + `index-DLSfHGKG.css`，与 `dist/assets` 同名（旧内嵌 `index-CQlZK13B.js`）；`remote-debugging` 0 命中；于干净工作区 `8142815` 编译，日志 `.zxz/logs/tauri-build-20261104.log`（`Compiling zxz v0.3.0` → `Finished release profile` 4m12s）。旧 exe 备份 `.zxz/backup/zxz-20261102-1458.exe`。构建中出现 `.rsrc merge failure: multiple non-default manifests` 警告——新旧 exe 的 manifest 关键串（`requestedExecutionLevel` / `asInvoker` / `comctl32`）计数完全一致，属 gnu 工具链既有行为，非本次回归。**注**：该 exe 已被 B12-B6 的 bundle 构建覆盖，当前磁盘上是 `68b99479…`（见 §1.1） |
+| R2 | ~~无安装包~~ | ~~高~~ **已产出 / 待装验证** | **B12-B6（2026-11-04 10:29）**：`bundle/nsis/zxz_0.3.0_x64-setup.exe` 2,230,744 B / sha256 `14ea02bb…`；NSIS 3.13 与 `nsis_tauri_utils v0.5.3` 由 Tauri 自动下载并校验哈希（日志可证）；`FileVersion`/`ProductVersion` = `0.3.0`；**`NotSigned`**（无代码签名证书 → 目标机首次运行会撞 SmartScreen）。`webviewInstallMode` 按业主 2026-11-04 裁定保持 `downloadBootstrapper` → **安装时仍需联网拉 WebView2**。**未验证**：真实安装/卸载（会写注册表与安装目录，需业主授权）、无 WebView2 机器上的表现；NSIS 把脚本与载荷整体 LZMA 压缩，`WebView2`/`go.microsoft.com` 在产物里 grep 不到，无法据此证明或否证引导逻辑 |
 | R3 | e2e 不可复现 | ~~中~~ 低 | 三个成因全部处理（B14-A + 业主批准加依赖）：`msedge` 硬编码 → `tools/browser.cjs` 逐级回落；端口 → `localhost:1420` 且子进程继承 `ZXZ_BASE`；`playwright` 入 `devDependencies`。`ci.yml` 已加 `e2e` job。**但该 job 从未在 GitHub 上实际跑过**（本地跑不了 Actions），只能标 `NOT_TESTED`；首次推送后需要看一次运行结果 |
 | R4 | ~~release 无条件带 devtools~~ | ~~中~~ | **已解除**（B16）：`tauri` 依赖不再带 devtools 特性；debug 构建行为不变 |
 | R5 | 推送/发布未授权 | — | 按宪章 §3，push / 打安装包需业主显式授权 |
