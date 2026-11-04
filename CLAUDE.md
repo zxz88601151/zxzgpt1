@@ -5,6 +5,12 @@
 
 ## 架构边界（改代码前先对齐这几条）
 
+- 一次发送的轮循环在 `src/orchestration/session.ts` 的 `runRounds(deps)`，**该目录不 import react**
+  （可在 Node 下单测）。`App.tsx` 只装配依赖：`chat` / `tools()` / `commitMessages` / `patchMessage` /
+  `executeTool` / `writeFiles` / `readFiles` / `readRefs` / `runTest` / `currentWorkspace`。
+  给循环加副作用时必须新增 deps 字段，并同步更新 `src/app.rounds.test.tsx` 的夹具——
+  那里用假上游 + 假 IPC 驱动真实 `runRounds`，装配漏一个就会当场变红。
+
 - 前端只做展示与编排，不直接碰磁盘：本机读写统一走 Tauri IPC，校验在 Rust 侧 `src-tauri/src/fsx.rs`；受控命令同理走 `run_allowed` IPC，校验在 `src-tauri/src/runx.rs`（两模块都不依赖 tauri，fs-harness 可直接单测）。
 - `fsx.rs` 不依赖 tauri，这样 `tools/fs-harness` 可以在无窗口环境下单测路径校验与落盘。
 - 模型与程序的协议：工具调用优先，文本约定作回退。

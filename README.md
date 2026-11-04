@@ -18,14 +18,15 @@ zxz/
 ├── vitest.config.ts            纯逻辑单测（node 环境，串行执行）
 ├── src/                        ★ 前端源码
 │   ├── main.tsx                挂载 React
-│   ├── App.tsx                 状态编排：会话 / 发送 / 快捷键 / 主题
+│   ├── App.tsx                 界面与状态接线：会话 / 快捷键 / 主题 / 各面板（轮循环见 orchestration）
 │   ├── types.ts                会话、消息、设置、事件类型
 │   ├── presets.ts              8 家服务商预设 + 默认设置 + 欢迎卡片
 │   ├── state.ts                存储读写、上下文窗口、会话过滤（纯函数，可单测）
 │   ├── api.ts                  双通道传输层 + SSE 解析（代理 / 直连）
 │   ├── styles.css              样式（深色 / 浅色双主题）
 │   ├── orchestration/
-│   │   └── round.ts            轮末判定（纯函数：停/继续、停止提示、自动测试门禁）+ 单测
+│   │   ├── round.ts            轮末判定（纯函数：停/继续、停止提示、自动测试门禁）+ 单测
+│   │   └── session.ts          一次发送的轮循环（runRounds：模型→工具→落盘→测试→下一轮，依赖注入）
 │   ├── lib/
 │   │   ├── md.ts               自实现 Markdown 渲染
 │   │   ├── hl.ts               自实现代码高亮（5 类 token）

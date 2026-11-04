@@ -21,7 +21,7 @@ import {
   wsOpen as openSession,
   type ExecGrant,
 } from "./lib/fsapi";
-import { buildMessages, filterConversations, findActive, loadState, newConversation, persist, titleFrom } from "./state";
+import { filterConversations, findActive, loadState, newConversation, persist, titleFrom } from "./state";
 import { clamp, copyText, uid } from "./lib/text";
 import { diffLines, diffStats } from "./lib/diff";
 import { stampNow } from "./lib/undo";
@@ -33,7 +33,6 @@ import {
   buildSkillPrompt,
   matchSkills,
   MAX_ACTIVE_SKILLS,
-  parseSkillRefs,
   skillCatalogPrompt,
   skillRefLabel,
   type Skill,
@@ -51,23 +50,14 @@ import {
 import { loadLocalSkills, mergeSkills, pickSkills } from "./lib/skillstore";
 import {
   backupRelPath,
-  buildReadPayload,
-  parseFileBlocks,
-  parseReadRequests,
   relPathError,
   UNDO_DIR,
   type FileBlock,
   type ReadOutcome,
 } from "./lib/files";
-import {
-  MAX_TEST_ROUNDS,
-  runResultHead,
-  testLoopDecision,
-  truncateToolOutput,
-} from "./lib/tools";
 import { findTool, parseToolArgs, planModeBlocks, TOOL_DEFS, type ToolContext } from "./lib/registry";
-import { MAX_ROUNDS, nextRound, shouldAutoTest, stopNotice } from "./orchestration/round";
-import type { AppState, Conversation, FileWriteResult, Message, Settings, Theme, ToolCallRecord, Transport, Usage } from "./types";
+import { runRounds } from "./orchestration/session";
+import type { AppState, Conversation, FileWriteResult, Message, Settings, Theme, ToolCallRecord, Transport } from "./types";
 import type { ToastKind } from "./components/ui";
 
 import { ConfirmExec, type ExecAsk, type ExecChoice } from "./components/ConfirmExec";
@@ -718,229 +708,46 @@ export default function App() {
       const controller = new AbortController();
       abortRef.current = controller;
 
-      // 测试回路计数：本次发送里已经跑完的 npm test 轮数，上限 MAX_TEST_ROUNDS
-      let testRounds = 0;
-
       try {
-        // 一轮 = 一条助手消息。模型读文件后程序自动再请求一轮，最多 MAX_ROUNDS 轮
-        for (let round = 0; round < MAX_ROUNDS; round++) {
-          const assist: Message = {
-            role: "assistant",
-            content: "",
-            reasoning: "",
-            model: s.model,
-            createdAt: Date.now(),
-            streaming: true,
-          };
-          const messages = [...baseMessages, assist];
-          const index = messages.length - 1;
-          update((prev) => ({
-            ...prev,
-            conversations: prev.conversations.map((c) =>
-              c.id === convId ? { ...c, messages, updatedAt: Date.now() } : c
-            ),
-          }));
-
-          const acc = { content: "", reasoning: "", usage: undefined as Usage | undefined };
-          let raf = 0;
-          const flush = () => {
-            raf = 0;
-            patchMessage(convId, index, (m) => ({
-              ...m,
-              content: acc.content,
-              reasoning: acc.reasoning,
-              usage: acc.usage,
-            }));
-          };
-          const schedule = () => {
-            if (!raf) raf = requestAnimationFrame(flush);
-          };
-
-          let aborted = false;
-          let failed = "";
-          let roundToolCalls: { id: string; name: string; arguments: string }[] = [];
-
-          try {
-            const toolModeOn = s.toolCalls !== false && Boolean(stateRef.current.settings.workspace);
-            await chatStream({
-              settings: s,
-              transport,
-              messages: buildMessages({ ...target, messages }, s, skillPrompt),
-              signal: controller.signal,
-              tools: toolModeOn ? TOOL_DEFS : undefined,
-              onEvent: (evt) => {
-                if (evt.type === "delta") {
-                  acc.content += evt.text;
-                  schedule();
-                } else if (evt.type === "reasoning") {
-                  acc.reasoning += evt.text;
-                  schedule();
-                } else if (evt.type === "usage") {
-                  acc.usage = evt.usage;
-                  schedule();
-                } else if (evt.type === "error") {
-                  failed = evt.message;
-                  toast(evt.message, "error");
-                } else if (evt.type === "tool_calls") {
-                  roundToolCalls = evt.calls;
-                }
-              },
-            });
-          } catch (e) {
-            const err = e as Error;
-            if (err.name === "AbortError") {
-              aborted = true;
-              acc.content = acc.content ? acc.content + "\n\n（已停止生成）" : "（已停止生成）";
-            } else {
-              failed = err.message || String(err);
-              toast(failed, "error");
-            }
-          } finally {
-            if (raf) cancelAnimationFrame(raf);
-          }
-
-          // 真实落盘：回复里出现 file: 块就写进工程目录；计划模式只出方案，直接跳过
-          const ws = stateRef.current.settings.workspace;
-          const blocks = aborted || failed ? [] : parseFileBlocks(acc.content);
-          const planMode = Boolean(s.planMode);
-          if (planMode && blocks.length) toast("计划模式：本轮 file: 块未落盘，只保留方案", "");
-          const files = ws && blocks.length && !planMode ? await requestApplyFiles(blocks) : undefined;
-
-          // 工具调用：按顺序执行，结果挂在助手消息上，下一轮 buildMessages
-          // 会把它展开成原生 tool_calls + tool 消息发给上游，模型才能对上号。
-          // 工具模式下即使没有 file: 块，写文件也是通过 write_file 工具发生的。
-          let toolRecords: ToolCallRecord[] = [];
-          if (!aborted && !failed && roundToolCalls.length) {
-            for (const call of roundToolCalls) {
-              toolRecords.push(await executeTool(call));
-            }
-          }
-          // 按权限等级判断"这一轮动过磁盘"，而不是按工具名：
-          // 将来新增任何 write 级工具都会自动纳入测试回路，不会漏跑。
-          const wroteSomething =
-            Boolean(files?.some((f) => f.ok)) || toolRecords.some((r) => findTool(r.name)?.access === "write" && !r.error);
-
-          const finalMsg: Message = {
-            ...assist,
-            content: acc.content,
-            reasoning: acc.reasoning,
-            usage: acc.usage,
-            streaming: false,
-            ...(files ? { files } : {}),
-            ...(toolRecords.length ? { toolCalls: toolRecords } : {}),
-            ...(usedIds.length ? { skills: usedIds } : {}),
-            ...(failed ? { error: failed } : {}),
-          };
-          patchMessage(convId, index, () => finalMsg);
-          baseMessages = [...baseMessages, finalMsg];
-
-          // 这一行不能删：它才是"报错/中止后不跑 npm test"的真正守卫。
-          // nextRound 里也有 aborted/failed 分支，但那要等测试回路跑完才轮到——
-          // 判定太晚，拦不住已经发生的事。
-          if (aborted || failed) break;
-
-          // 测试回路：本轮写了文件、且自动测试开启、且在桌面端，才自动跑测试。
-          // 通过就停在本轮；失败把报错当成隐藏消息回传，模型下一轮再改；
-          // 3 轮不过就停下，把失败原样报给人，不许模型宣称已修好。
-          let testGiveUp = false;
-          // 自动测试的开启条件收在 shouldAutoTest 里：默认关、必须严格 true、
-          // 计划模式/浏览器直开/未接工程/关了工具都不跑。条件从 if 链搬走后，
-          // 判定本身有了单测，这里只剩"跑了怎么办"。
-          if (
-            ws &&
-            shouldAutoTest({
-              wroteSomething,
-              autoTest: s.autoTest,
-              toolCalls: s.toolCalls,
-              planMode,
-              desktop: fsAvailable(),
-              hasWorkspace: Boolean(ws),
-            })
-          ) {
-            try {
-              // 脚本审计已下沉到 Rust 执行层（runx）：npm test 真正跑的脚本不是
-              // 受信任运行器时直接拒绝，这里不再前端预判，拒绝原因走 catch 报出来。
-              const r = await runAllowed(ws.sessionId, ["npm", "test"]);
-              // 用户点了停止：命令是被我们杀掉的，不是测试没过。
-              // 这时候既不能回传"未通过"给模型，也不能再走重试——直接收摊。
-              if (r.cancelled) {
-                toast("已停止自动测试", "");
-                break;
-              }
-              testRounds += 1;
-              const combined = [r.stdout, r.stderr ? `--- stderr ---\n${r.stderr}` : ""].filter(Boolean).join("\n");
-              const decision = testLoopDecision(r.exit_code, testRounds);
-              if (decision === "pass") {
-                toast("测试通过", "ok");
-              } else if (decision === "retry") {
-                const testMsg: Message = {
-                  role: "user",
-                  content: `[测试回路] 第 ${testRounds}/${MAX_TEST_ROUNDS} 轮 npm test 未通过，${runResultHead(r)}\n${truncateToolOutput(combined || "(无输出)")}\n请根据上面报错改代码，不要在测试通过前宣称完成。`,
-                  createdAt: Date.now(),
-                  hidden: true,
-                };
-                baseMessages = [...baseMessages, testMsg];
-                update((prev) => ({
-                  ...prev,
-                  conversations: prev.conversations.map((c) =>
-                    c.id === convId ? { ...c, messages: baseMessages, updatedAt: Date.now() } : c
-                  ),
-                }));
-              } else {
-                // 提示文案由 stopNotice 统一给出，这里不再重复写一份——
-                // 两处各写一句，改一处忘一处的那天用户会看到两种结论。
-                testGiveUp = true;
-              }
-            } catch (e) {
-              // 跑测试本身失败（比如不在桌面端、命令被拒）不阻断主流程，只报一声
-              toast("自动测试未能运行：" + (e as Error).message, "error");
-            }
-          }
-
-          // 模型要文件 / 技能附件：程序回传真实内容后继续下一轮
-          const reads = ws ? parseReadRequests(acc.content) : [];
-          const refs = allSkills.length ? parseSkillRefs(acc.content) : [];
-          // 轮末判定统一走 nextRound。顺序（中断/报错 → 测试放弃 → 自然收尾 → 轮数用尽）
-          // 由 round.ts 的测试锁住；这里不再自己排 if。停止时的提示也由 stopNotice 给，
-          // 包括"测试 3 轮未过"那句——原先两边各写一份，早晚会不一致。
-          const step = nextRound({
-            aborted,
-            // `failed` 在这一层是报错原文（空串表示没失败），判定层只认布尔：
-            // 把"空串=没失败"这种约定挡在纯函数外面。
-            failed: failed !== "",
-            testGiveUp,
-            toolCalls: toolRecords.length,
-            reads: reads.length,
-            skillRefs: refs.length,
-            round,
-          });
-          if (step.kind === "stop") {
-            const notice = stopNotice(step.reason);
-            if (notice) toast(notice, "error");
-            break;
-          }
-          // 工具调用轮次里测试回路已经把报错回传了，读/附件请求仍按原流程回传，
-          // 两类隐藏消息都会进下一轮的上下文，不会互相丢。
-          // 注意：这里是无条件回传的（含"只有工具调用、没有读请求"的轮次）。
-          // buildReadPayload([]) 仍会产出一句"基于以上真实内容继续"的引导，
-          // 这是既有行为，本批只做抽取，没有改它。
-
-          const outcomes = ws ? await readForModel(ws.sessionId, reads) : [];
-          const refOutcomes = await readSkillRefs(allSkills, refs);
-          const toolMsg: Message = {
-            role: "user",
-            content: buildReadPayload([...outcomes, ...refOutcomes]),
-            createdAt: Date.now(),
-            hidden: true,
-          };
-          baseMessages = [...baseMessages, toolMsg];
-          update((prev) => ({
-            ...prev,
-            conversations: prev.conversations.map((c) =>
-              c.id === convId ? { ...c, messages: baseMessages, updatedAt: Date.now() } : c
-            ),
-          }));
-        }
+        // 轮循环已搬到 src/orchestration/session.ts（ADR 0001 第 2 步，只搬运不改语义）。
+        // 这里只装配依赖：状态写入、工具执行、落盘、读文件、跑命令各自还连着 UI 与 IPC，
+        // 搬不走，只能注入。装配错一个，B12-B1/B12-B2 的整轮用例会当场变红。
+        await runRounds({
+          settings: s,
+          conversation: target,
+          skillPrompt,
+          usedSkillIds: usedIds,
+          skills: allSkills,
+          baseMessages,
+          transport,
+          chat: chatStream,
+          // 每轮重新判断：工具模式要求设置没关、且工程还在
+          tools: () => (s.toolCalls !== false && stateRef.current.settings.workspace ? TOOL_DEFS : undefined),
+          signal: controller.signal,
+          desktop: fsAvailable,
+          currentWorkspace: () => stateRef.current.settings.workspace,
+          commitMessages: (messages) =>
+            update((prev) => ({
+              ...prev,
+              conversations: prev.conversations.map((c) =>
+                c.id === convId ? { ...c, messages, updatedAt: Date.now() } : c
+              ),
+            })),
+          patchMessage: (index, fn) => patchMessage(convId, index, fn),
+          toast,
+          executeTool,
+          writeFiles: requestApplyFiles,
+          readFiles: async (paths) => {
+            const w = stateRef.current.settings.workspace;
+            return w ? readForModel(w.sessionId, paths) : [];
+          },
+          readRefs: (refs) => readSkillRefs(allSkills, refs),
+          runTest: (argv) => {
+            const w = stateRef.current.settings.workspace;
+            if (!w) throw new Error('未接入工程目录');
+            return runAllowed(w.sessionId, argv);
+          },
+        });
       } finally {
         abortRef.current = null;
         busyRef.current = false;

@@ -108,11 +108,11 @@ type RunState =
 ## 验收标准
 
 ```
-[~] src/orchestration/ 存在，且 grep -rn "from \"react\"" src/orchestration/ 无命中
+[x] src/orchestration/ 存在，且 grep -rn "from \"react\"" src/orchestration/ 无命中
 [x] 7 类行为用例全绿（vitest，mock provider + mock tools）—— 2026-11-04 补齐，见下方进度
-[ ] src/App.tsx < 500 行，且不再出现 stateRef.current 的手工双写
+[ ] src/App.tsx < 500 行，且不再出现 stateRef.current 的手工双写（现 1338 行，搬走了 182 行）
 [x] 工具分发的 if/else 消失（grep -c "call.name ===" src/ == 0）
-[ ] 迁移前后，tools/workspace-e2e.cjs 的通过项数量不变
+[x] 迁移前后，tools/workspace-e2e.cjs 的通过项数量不变（39 → 39，2026-11-04 实跑）
 ```
 
 ---
@@ -167,6 +167,45 @@ Tauri IPC 换成假的——没有为测试在业务代码里开洞。
 
 **仍未做**：`send()` 本体还在 `App.tsx`（1520 行），第 2 条 `[~]` 没变成「搬家已完成」。
 第 1 步做完意味着**搬运有了回归网**，不等于搬运开始。
+
+---
+
+## 实施进度（2026-11-04，B12-B3：搬运已完成）
+
+**做了什么**：新增 `src/orchestration/session.ts`（321 行），把 `send()` 里的**轮循环**
+整段搬过来，导出 `runRounds(deps)`。`App.tsx` 从 **1520 → 1338 行**（−182）。
+
+**只搬运，不改语义**（D3）：轮数上限、测试回路 3 轮独立计数、`file:` / `@@read:` 兼容协议、
+工具结果展开成原生协议、`if (aborted || failed) break` 的提前守卫——逐字保留。新增的只有两处
+**基础设施**，都不改变浏览器路径：
+
+- `requestAnimationFrame` 在 Node 下不存在，orchestration 要能在无浏览器环境单测，
+  于是有一个 `scheduleFrame` 回退到 `setTimeout(cb, 16)`；浏览器仍走 rAF。
+- 依赖全部从 `deps` 注入（状态写入、工具执行、落盘、读文件、跑命令、toast），
+  因为这些能力各自还连着 UI / IPC / 审批流程，搬不走。
+
+**等价性证据（搬家前后同一套断言）**：
+
+| 类别 | 命令 | 搬家前 | 搬家后 |
+|---|---|---|---|
+| 前端单测 | `npx vitest run` | 447 / 20 文件 | **447 / 20 文件** |
+| 工程模式 e2e | `node tools/workspace-e2e.cjs` | 39/39 | **39/39** |
+| 主 e2e | `node tools/e2e.cjs` | 24/24 | **24/24** |
+| 技能 e2e | `node tools/skill-e2e.cjs` | 69/69 | **69/69** |
+
+**两组变异，证明新文件真的在跑**（不是"旧路径还在，测试绿的其实还是它"）：
+
+1. `runRounds` 开头插 `return` → 7 条红（6 条整轮 + 1 条 App 发送），说明 `App.tsx`
+   确实只剩装配，旧循环已删；
+2. `testLoopDecision(r.exit_code, testRounds)` 改成 `…, MAX_TEST_ROUNDS` → 自动测试回路那条
+   精确红（`expected 1 to be 3`），说明注入的依赖确实被用到。
+
+**验收变化**：5 条标准现在 **4 条达成**（orchestration 无 React / 7 类用例 / 工具 if-else 消失 /
+e2e 项数不变）。剩下一条 `App.tsx < 500 行` 没达成——1338 行里剩的绝大部分是 UI 状态与
+会话/技能/撤销/审批面板的接线，不是编排逻辑。ADR 写的 "1340 → 500" 低估了 UI 占比。
+
+**下一步（若继续）**：`stateRef` 手工双写在 App 里仍有多处（`send` 之外的路径），
+要消掉它得让 UI 改为订阅式，属于 D1 的后半段，不在"只搬运"范围内。
 
 ---
 

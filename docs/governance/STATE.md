@@ -10,12 +10,12 @@
 | 项 | 值 |
 |---|---|
 | 仓库 | `F:/zhuomian/zxz`（product `zxz` / `com.zxz.desktop`） |
-| 分支 / HEAD | `main` / `cb2d523`（`ci(e2e): 把端到端接进流水线`） |
+| 分支 / HEAD | `main` / `6d1cf46` + 本轮未提交的 B12-B3 |
 | 远端 | `origin` 内网 Gitea `192.168.3.200:3000/zxzjxx/zxzgpt.git`（与本地同步）；`github` 备用 |
 | 版本号 | `package.json` / `tauri.conf.json` / `Cargo.toml` 三处均 `0.3.0`（一致） |
 | 技术栈 | Tauri 2 + Rust（fsx / runx / wsx / proxy / api / perms）＋ React 18 + TS + Vite 6；测试用 vitest（node 环境为主，DOM 用文件头 `@vitest-environment jsdom` 单文件声明） |
-| 规模 | 前端 11,850 行（`App.tsx` 1520 行）；Rust 8 文件 / 7 模块（`perms.rs` 为 B10 新增） |
-| 工作区 | 已跟踪文件 0 改动；未跟踪：`.refs/`（193MB）、`.tmp-skills/`、`docs/audit/*.md`、`docs/governance/` |
+| 规模 | 前端生产代码 8,975 行（`App.tsx` **1338** 行 + `orchestration/session.ts` 321 行），测试 4,534 行；Rust 8 文件 / 7 模块 |
+| 工作区 | B12-B3 改动待提交（`App.tsx` / `orchestration/session.ts` / 文档）；`.refs/`（193MB）、`.tmp-skills/` 仍为未跟踪 |
 
 ### 1.1 基线命令与实测结果
 
@@ -26,7 +26,7 @@
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **82 passed / 1 ignored**（GNU 工具链；msvc 必失败） |
 | `cargo test --manifest-path tools/proxy-harness/Cargo.toml` | **3 passed**（D-16 的错误分类表；同一套 GNU 工具链） |
 | `cargo check --manifest-path src-tauri/Cargo.toml` | 通过，**0 warning**（`--all-targets` 亦 0，2026-11-03 23:36 实测） |
-| e2e（当日实跑） | `e2e.cjs` 24/24、`workspace-e2e` 39/39、`skill-e2e` 69/69、`proxy-e2e` 接口 11/11 + 前端 24/24 |
+| e2e（2026-11-04 B12-B3 搬家后实跑） | `e2e.cjs` **24/24**、`workspace-e2e` **39/39**、`skill-e2e` **69/69**；`proxy-e2e` 本轮未跑（Rust 代理另有 D-16 单测与对照实验） |
 | CI 是否跑到新测试 | **是**：`.github/workflows/ci.yml:18` 的 `npm test` 走 vitest，`include: src/**/*.test.ts` |
 
 `[FACT]` 本机 msvc 默认工具链会在链接期被 Git for Windows 的 coreutils `link.exe` 抢占，
@@ -49,17 +49,17 @@
 - 代码级质量：**良好**。447 条前端单测、85 条 Rust 单测（fs-harness 82 + proxy-harness 3）全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。新增的传输层、接线层与代理错误分类用例做过变异检验（改坏生产代码 → 对应用例必须变红），不是只看绿灯。
 - 安全态势：**PARTIAL → 明显改善**。P0 三条 + 本轮 2 条（npm `pre`/`post` 钩子绕过、`.npmrc` 改脚本 shell）+ 执行授权闸门（P0-4）已落地；其余已登记项见 §5 与 `TECHNICAL_DEBT.md`。
 - 交付状态：**NOT_READY**。无安装包；CI 不编译 `src-tauri` 本体；e2e 无法在 CI 复现；release exe 已落后于 HEAD。
-- 架构状态：**PARTIAL**。编排仍是 1520 行 `App.tsx` 内的闭包循环；`src/orchestration/` 已存在但只有一个 `round.ts`（B7 切片），`send()` 本体未搬。工具五处手写已收成注册表（B6 完成）。ADR 0001 的 5 条验收标准 1.5 条达成（详见该 ADR 的"实施进度"小节，未勾的不勾）。
+- 架构状态：**PARTIAL（明显改善）**。轮循环已搬进 `src/orchestration/session.ts`（B12-B3，321 行），`App.tsx` 1520 → **1338 行**，编排层不再 import react；工具五处手写已收成注册表（B6）。ADR 0001 的 5 条验收标准 **4 条达成**，剩「`App.tsx` < 500 行」——那 1338 行里剩的主要是 UI 状态与各面板接线，不是编排。
 
 ## 4. 诊断要点（摘要，证据见各审计文件）
 
 | 维度 | 关键事实 |
 |---|---|
-| 编排 | `send()` 约 320 行闭包；~~`MAX_ROUNDS=6` 未导出~~ **已导出（B7）**；轮末判定已抽成纯函数 `src/orchestration/round.ts`；run 状态仍散在 12 个局部变量；`AbortController` 只覆盖 `chatStream`，**杀不掉正在跑的 `npm test`** |
+| 编排 | ~~`send()` 约 320 行闭包~~ **已搬（B12-B3）**：轮循环在 `orchestration/session.ts` 的 `runRounds(deps)`，App 只装配依赖；`MAX_ROUNDS` 已导出（B7）；轮末判定是纯函数 `round.ts`；`AbortController` 已能杀 `npm test`（B13 `run_cancel`）。**仍欠**：run 状态散在 `deps` 与闭包之间，未做成显式状态机（ADR D2）；`stateRef` 手工双写仍在 |
 | 工具 | ~~新增 1 个工具要改 5 处，无注册表~~ **已修（B6）**：`src/lib/registry.ts` 的 `TOOLS` 是唯一真值源，其余全部派生；`findTool` 精确匹配不归一 |
 | 持久化 | 单键 `zxz.state.v1`，**无 schemaVersion**；250ms 全量写，连 `streaming` 中间态一起写；系统消息**完全不计**上下文预算 |
 | 计划模式 | 只有布尔开关 + 两处拦截 + 一段提示词；无产物、无审批、无对账 |
-| 测试 | ~~`api.ts` 零覆盖~~ **已覆盖（B12-A，31 条 + 4 次变异检验）**；`App.tsx` 1520 行与组件 2300+ 行仍基本 0 覆盖，且无 jsdom/testing-library；可测切片为 `orchestration/round.ts`、`lib/registry.ts`、`api.ts` 三处 |
+| 测试 | ~~`api.ts` 零覆盖~~ **已覆盖（B12-A）**；**接线层已有 10 条整轮用例**（B12-B1 4 条 + B12-B2 6 条，jsdom + 假上游 + 假 IPC），7 类行为等价场景全齐；组件层（`Sidebar`/`SettingsDrawer` 等 2300+ 行）仍靠 e2e 兜着，无组件单测 |
 | CI | 仅 `frontend` + `rust-fs`；无 fmt/clippy、无 e2e、无版本一致性、无覆盖率门槛 |
 
 ## 5. 执行队列
@@ -86,6 +86,7 @@
 | B14-B · e2e 进 CI | 业主批准把 `playwright@1.64.1` 写进 `devDependencies`；`ci.yml` 新增独立 `e2e` job（`npm ci` → `playwright install chromium` → 起 vite + 假上游 → `node tools/e2e.cjs`） | **NOT_TESTED** | `npm ci --dry-run` 通过（锁文件一致）；YAML 结构自检通过（3 个 job、0 制表符）；job 内的命令与本地实跑的命令逐条一致。**但 job 本身从未在 GitHub 上执行过**——本地跑不了 Actions，不给 PASS |
 | B12-B2 · 整轮重放 | 新增 `src/app.rounds.test.tsx` 6 条：① 上游 500 → 只发 1 次请求、`HTTP 500` 与上游原话都上屏、按钮复位；② 工具轮（假 IPC + 假上游）→ 第一轮带 `tools`、`read_file` 的结果按 `tool_call_id` 回填、第二轮带 `assistant.tool_calls` + `tool` 消息、随后 502 即收摊（恰好 2 次请求）；③ 挂起的流 + 点停止 → 显示「已停止生成」、无「请求失败」、不再发请求；④ 每轮都要读文件 → 恰好 6 次请求 + 「已达到本次最多 6 轮读写」；⑤ 自动测试 3 轮不过 → 恰好 3 次请求、3 次 `run_allowed`、每轮报错原文回传进下一轮上下文 + 「测试 3 轮仍未通过」；⑥ exec 审批 → 没回答前请求数仍是 1、`perm_grant` 为 0，点「仅这一次」后记 1 条一次性授权、命令重试、结果回填并继续下一轮 | **PASS** | 前端 **447**（20 文件）；6 次变异检验各自精确变红：去掉 `!res.ok` 抛错 → ①② 红；去掉 `buildMessages` 的 tool_calls 展开 → ② 红；去掉 `AbortError` 分支 → ③ 红；`MAX_ROUNDS` 6→8 → ④ 红（`expected 8 to be 6`）；`testLoopDecision` 去掉 `give_up` → ⑤ 红（`expected 6 to be 3`）；确认框不渲染 → ⑥ 红。`npm run build` 通过 |
 | D-16 · 中断不再记故障 | `proxy.rs` 引入 `ConnError::{PeerGone,Fatal}`：写路径的 `BrokenPipe` / `ConnectionReset` / `ConnectionAborted` 归 `PeerGone` 并静默，其余照旧打日志；读路径的畸形请求仍是 `Fatal`（不改语义） | **PASS** | proxy-harness **3 passed**（分类表）；变异「BrokenPipe 归 Fatal」→ 精确红一条；端到端对照实验：旧行为 stderr 打出 `os error 10053`（FAIL），新行为 stderr 为空（PASS）。`cargo check` 通过；`docs/audit/D16_INTERRUPT_LOG_20261104.md` |
+| B12-B3 · 轮循环搬家 | 新增 `src/orchestration/session.ts`（321 行）导出 `runRounds(deps)`；`App.tsx` 只保留装配（1520 → **1338** 行）；依赖注入：`chat` / `tools()` / `commitMessages` / `patchMessage` / `executeTool` / `writeFiles` / `readFiles` / `readRefs` / `runTest` / `currentWorkspace`。只搬运不改语义（ADR D3）；rAF 在 Node 下回退 setTimeout(16)，浏览器路径不变 | **PASS** | 前端 **447** 不变；e2e 搬家后实跑 24/24 + 39/39 + 69/69；变异①`runRounds` 开头 return → 7 条红（证明 App 走新路径）；变异②测试回路计数传错 → 精确红一条。`grep -rn "from \"react\"" src/orchestration/` 无命中 |
 
 ### 下一批（按优先级）
 
@@ -94,20 +95,21 @@
 
 | # | 任务 | 为什么现在 | 验收 |
 |---|---|---|---|
-| B12-B3 | 把 `send()` 搬进 `src/orchestration/`（D-06） | 回归网已就位（B12-B1 挂载 + B12-B2 整轮边界 7 类全齐），现在动 320 行闭包才有"改坏了会红"的兜底 | `App.tsx` 行数下降，且 447 条断言在搬家前后同样全绿；搬家前先记录每条的通过状态 |
 | 首次 CI 运行 | 看 `e2e` job 到底能不能跑通（B14-B 标的是 `NOT_TESTED`） | job 已写好，但从没在 GitHub 上执行过。首次推送后需据此改成 PASS 或按真实报错修 | 截图/日志中 `e2e` job 为绿 |
 
 > **B12-B 路线已定**：业主选了「先装 jsdom 拿判据，再拆 `send()`」。
 > B12-B1 已完成（`jsdom@25` 已装，App 能在 jsdom 里挂载并被驱动，4 条用例 + 3 次变异检验）；
 > B12-B2 已完成（整轮边界 6 条，ADR 0001 要求的 7 类行为用例全齐，6 次变异检验）。
 > 顺序是刻意的：先有回归网，再动全仓最热的那段代码——反过来就是把"没判据"升级成"没判据且刚大改过"。
-> 现在**回归网已齐，B12-B3 具备开工条件**；但只要还没开始搬，就不要把 ADR 的第 2 条读成已完成。
+> B12-B3 已完成（2026-11-04，业主当面批准）：轮循环搬进 `orchestration/session.ts`，
+> 搬家前后 447 条单测与 24/39/69 项 e2e 全部同数通过。
+> ADR 第 2 条据此变「已搬」，但第 3 条「`App.tsx` < 500 行」仍未达成（现 1338）。
 
 ## 6. 风险与阻断
 
 | # | 项 | 级别 | 说明 |
 |---|---|---|---|
-| R1 | release exe 落后于 HEAD | 高 | `src-tauri/target/release/zxz.exe` 内嵌的仍是 `index-CQlZK13B.js`，而当前构建产物是 `index-BUPLjQ7F.js`（相差 B3–B8 共 6 批改动）。**未重编前不得声称交付物含任何本轮修复** |
+| R1 | release exe 落后于 HEAD | 高 | `src-tauri/target/release/zxz.exe` 内嵌的仍是 `index-CQlZK13B.js`，当前构建产物是 `index-CI0qq08X.js`（相差 B3–B16 + 接线层测试 + B12-B3 搬家）。**未重编前不得声称交付物含任何本轮修复** |
 | R2 | 无安装包 | 高 | `bundle.targets: "all"` 配置存在但从未产出；`WebView2` 走 `downloadBootstrapper`，离线不可用 |
 | R3 | e2e 不可复现 | ~~中~~ 低 | 三个成因全部处理（B14-A + 业主批准加依赖）：`msedge` 硬编码 → `tools/browser.cjs` 逐级回落；端口 → `localhost:1420` 且子进程继承 `ZXZ_BASE`；`playwright` 入 `devDependencies`。`ci.yml` 已加 `e2e` job。**但该 job 从未在 GitHub 上实际跑过**（本地跑不了 Actions），只能标 `NOT_TESTED`；首次推送后需要看一次运行结果 |
 | R4 | ~~release 无条件带 devtools~~ | ~~中~~ | **已解除**（B16）：`tauri` 依赖不再带 devtools 特性；debug 构建行为不变 |
