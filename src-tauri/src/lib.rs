@@ -168,15 +168,23 @@ mod run_cmds {
     /// `gate_exec` 不能省、也不能挪到前端——它是「没有用户批准就起不了进程」
     /// 这句话的唯一实现。
     #[tauri::command]
-    pub fn run_allowed(session_id: String, argv: Vec<String>) -> Result<crate::runx::RunResult, String> {
+    pub async fn run_allowed(session_id: String, argv: Vec<String>) -> Result<crate::runx::RunResult, String> {
         let root = crate::root_for(&session_id, "执行命令")?;
         crate::gate_exec(&session_id, &argv)?;
         // 取消位只覆盖这次执行：登记 → （可能被 run_cancel 置位）→ 注销。
         // 注销必须发生，否则位会一直挂在会话上，下次点停止就指向一条早不在跑的命令。
+        //
+        // 关键：真正的执行要丢进 spawn_blocking，绝不能同步阻塞 IPC 主线程——
+        // 同步 command 会阻塞主线程，`run_cancel`（点「停止」）就只能排队等这条命令
+        // 跑完，取消形同虚设（U-A 实测：run_cancel 延迟 24s 返回 false）。
         let slot = crate::runx::begin_run(&session_id);
-        let out = crate::runx::run_allowed_cancellable(&root, &argv, &slot);
+        let joined = tauri::async_runtime::spawn_blocking(move || {
+            crate::runx::run_allowed_cancellable(&root, &argv, &slot)
+        })
+        .await;
+        // 无论执行线程正常返回还是 join 失败，都要把取消位从会话上摘掉。
         crate::runx::end_run(&session_id);
-        out
+        joined.map_err(|e| format!("执行线程失败：{e}"))?
     }
 
     /// 终止这个会话正在跑的命令（用户点「停止」）。

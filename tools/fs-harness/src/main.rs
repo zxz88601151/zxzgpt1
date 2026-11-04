@@ -529,7 +529,7 @@ mod runx_tests {
         // 数固定长度会随着函数体里加几行（这次加了 begin_run / end_run）就失效——
         // 那种失败说明的是测试写脆了，不是约束被破坏，但报错文字一模一样，很容易被误读。
         let fn_start = lib[..i]
-            .rfind("pub fn run_allowed")
+            .rfind("fn run_allowed")
             .expect("找不到 run_allowed 的函数定义，测试与代码结构已不匹配");
         let before = &lib[fn_start..i];
         assert!(
