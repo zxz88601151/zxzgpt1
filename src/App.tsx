@@ -16,6 +16,7 @@ import {
   runCancel,
   sessionFor,
   undoWrite,
+  openPreview,
   wsClose,
   wsInfo,
   wsOpen as openSession,
@@ -646,6 +647,12 @@ export default function App() {
         if (plan.kind === "new_session") {
           createConv();
           toast(appActionLabel({ kind: "new_session" }), "");
+          return;
+        }
+        if (plan.kind === "preview") {
+          openPreview(plan.target)
+            .then(() => toast("已打开预览", ""))
+            .catch((e) => toast(`预览失败：${e instanceof Error ? e.message : String(e)}`, "error"));
           return;
         }
         // toggle：与设置抽屉写同一份 settings，经 update() 走同一持久化通道

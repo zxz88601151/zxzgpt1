@@ -19,6 +19,7 @@ import type { Conversation, Message, Settings } from "../types";
 export type AppAction =
   | { kind: "toggle"; key: "planMode" | "toolCalls" | "autoTest" | "confirmWrites" | "exploreMode"; value: boolean }
   | { kind: "new_session" }
+  | { kind: "preview"; target: string }
   | { kind: "help" };
 
 export type AppCommandResult = { action: AppAction } | { error: string };
@@ -39,7 +40,7 @@ const TOGGLE_KEYS: Record<string, ToggleKey> = {
 };
 
 /** 命令名的唯一权威：新增命令要同时改这里、TOGGLE_KEYS 与 appCommandHelp 的清单。 */
-const COMMAND_NAMES = new Set<string>(["help", "帮助", "new", "新建", ...Object.keys(TOGGLE_KEYS)]);
+const COMMAND_NAMES = new Set<string>(["help", "帮助", "new", "新建", "preview", "预览", ...Object.keys(TOGGLE_KEYS)]);
 
 function parseOnOff(word: string): boolean | null {
   if (word === "on" || word === "开" || word === "开启") return true;
@@ -68,6 +69,11 @@ export function parseAppCommand(text: string): AppCommandResult | null {
     if (parts.length > 1) return { error: "/new 后面不带参数，直接新建一个会话" };
     return { action: { kind: "new_session" } };
   }
+  if (cmd === "preview" || cmd === "预览") {
+    const target = parts.slice(1).join(" ");
+    if (!target) return { error: "/preview 后面要跟一个 http(s) 地址或本地 HTML 文件路径" };
+    return { action: { kind: "preview", target } };
+  }
   const key = TOGGLE_KEYS[cmd];
   if (arg === undefined) return { error: `/${cmd} 后面要跟 开 或 关，例如 /${cmd} 开` };
   const value = parseOnOff(arg);
@@ -83,6 +89,7 @@ export type AppCommandPlan =
   | { kind: "error"; message: string }
   | { kind: "help"; message: string }
   | { kind: "new_session" }
+  | { kind: "preview"; target: string }
   | { kind: "toggle"; key: ToggleKey; value: boolean; label: string };
 
 /** 入口判定 + busy 语义 + 解析，一次给出执行计划。
@@ -96,6 +103,7 @@ export function planAppCommand(text: string, opts: { busy: boolean; active: bool
   const action = parsed.action;
   if (action.kind === "help") return { kind: "help", message: appCommandHelp() };
   if (action.kind === "new_session") return { kind: "new_session" };
+  if (action.kind === "preview") return { kind: "preview", target: action.target };
   return { kind: "toggle", key: action.key, value: action.value, label: appActionLabel(action) };
 }
 
@@ -105,7 +113,7 @@ export function planAppCommand(text: string, opts: { busy: boolean; active: bool
  *  - new_session 返回原文：清空由 App 侧 createConv() 内部完成，这里不重复清。
  *  reject_busy 在 App 里更早返回、不会走到这里，语义同样是保留原文。 */
 export function nextInputAfterCommand(prevInput: string, plan: AppCommandPlan): string {
-  if (plan.kind === "help" || plan.kind === "toggle") return "";
+  if (plan.kind === "help" || plan.kind === "toggle" || plan.kind === "preview") return "";
   return prevInput;
 }
 
@@ -141,6 +149,7 @@ export function appCommandHelp(): string {
     "/autotest 开|关 —— 自动测试回路",
     "/confirm 开|关 —— 写入前确认",
     "/explore 开|关 —— 探索模式开关（只读拦截属后续批次，当前仅开关）",
+    "/preview <地址|文件> —— 在内置窗口打开预览（http(s) 链接或本地 HTML 文件）",
     "/new —— 新建会话",
     "/help —— 显示本清单",
   ].join("\n");
@@ -150,6 +159,7 @@ export function appCommandHelp(): string {
 export function appActionLabel(action: AppAction): string {
   if (action.kind === "help") return "应用内命令清单";
   if (action.kind === "new_session") return "已新建会话";
+  if (action.kind === "preview") return "已打开预览";
   const names: Record<string, string> = {
     planMode: "计划模式",
     toolCalls: "工具调用",

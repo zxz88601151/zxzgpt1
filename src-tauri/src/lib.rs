@@ -232,6 +232,59 @@ mod perm_cmds {
     }
 }
 
+/// 内置预览窗口：打开一个 http(s) 地址或本地 HTML 文件。
+///
+/// 不涉及工程会话、不读工程文件内容、也不跑命令——只是让 WebView 开个新窗口去
+/// 加载一个地址，属于「看」而不属于「改」。本地文件路径只在 Rust 侧转成 file://，
+/// 不把任意路径当命令交给 shell。
+mod preview_cmds {
+    #[tauri::command]
+    pub async fn open_preview(app: tauri::AppHandle, target: String) -> Result<(), String> {
+        let t = target.trim();
+        let url: tauri::Url = if t.starts_with("http://") || t.starts_with("https://") {
+            t.parse().map_err(|e| format!("链接无效：{e}"))?
+        } else {
+            let p = std::path::Path::new(t);
+            if !p.is_file() {
+                return Err(format!("既不是 http(s) 链接，也不是存在的文件：{t}"));
+            }
+            let abs = std::fs::canonicalize(p).map_err(|e| format!("路径无效：{e}"))?;
+            let mut s = abs.to_string_lossy().replace('\\', "/");
+            if let Some(stripped) = s.strip_prefix("//?/") {
+                s = stripped.to_string();
+            }
+            format!("file:///{s}").parse().map_err(|e| format!("文件地址无效：{e}"))?
+        };
+        // 每次用唯一 label，避开「preview 已存在」的窗口 label 冲突。
+        let label = format!(
+            "preview-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| format!("取时间失败：{e}"))?
+                .as_millis()
+        );
+        let mut builder = tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::External(url))
+            .title("预览")
+            .inner_size(1200.0, 780.0);
+        // WebView2 共享浏览器进程：所有 webview 的 environment options（含
+        // additional_browser_args / scroll_bar_style / data_directory）必须一致，
+        // 否则创建时报 0x8007139F（ERROR_INVALID_STATE）。这里让预览窗口继承主窗口
+        // 的 additional_browser_args，保证 options 一致。
+        if let Some(args) = app
+            .config()
+            .app
+            .windows
+            .iter()
+            .find(|w| w.label == "main")
+            .and_then(|w| w.additional_browser_args.clone())
+        {
+            builder = builder.additional_browser_args(&args);
+        }
+        builder.build().map_err(|e| format!("打开预览窗口失败：{e}"))?;
+        Ok(())
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -253,7 +306,8 @@ pub fn run() {
             run_cmds::run_cancel,
             perm_cmds::perm_grant,
             perm_cmds::perm_revoke,
-            perm_cmds::perm_list
+            perm_cmds::perm_list,
+            preview_cmds::open_preview
         ])
         .setup(|_app| {
             let _ = PROXY.set(proxy::spawn());

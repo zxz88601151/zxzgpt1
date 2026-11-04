@@ -354,3 +354,8 @@ export async function buildTree(sessionId: string, depth = 2): Promise<string> {
   await walk("", 1);
   return lines.join("\n");
 }
+
+/** 打开内置预览窗口：http(s) 地址或本地 HTML 文件路径。 */
+export async function openPreview(target: string): Promise<void> {
+  await call<void>("open_preview", { target });
+}

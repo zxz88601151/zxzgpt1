@@ -47,6 +47,18 @@ describe("parseAppCommand", () => {
     expect(parseAppCommand("/help")).toEqual({ action: { kind: "help" } });
     expect(parseAppCommand("/help foo")).toMatchObject({ error: expect.stringContaining("不带参数") });
   });
+  it("/preview 带目标（http(s) 或本地路径），缺目标报错", () => {
+    expect(parseAppCommand("/preview http://localhost:8000")).toEqual({
+      action: { kind: "preview", target: "http://localhost:8000" },
+    });
+    expect(parseAppCommand("/preview F:/proj/index.html")).toEqual({
+      action: { kind: "preview", target: "F:/proj/index.html" },
+    });
+    expect(parseAppCommand("/预览 http://localhost:8000")).toEqual({
+      action: { kind: "preview", target: "http://localhost:8000" },
+    });
+    expect(parseAppCommand("/preview")).toMatchObject({ error: expect.stringContaining("要跟") });
+  });
   it("大小写策略锁定：只认小写与中英别名，/PLAN 不命中命令名", () => {
     // 大写不再生成「未知命令」错误，而是不拦截 —— D16 的代价，见 appcontrol.ts:7-8
     expect(parseAppCommand("/PLAN 开")).toBeNull();
