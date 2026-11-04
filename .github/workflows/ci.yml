@@ -21,7 +21,12 @@ jobs:
   rust-fs:
     # 只跑不依赖 tauri 的文件层单测：src-tauri 本体需要 WebView2 系统库，
     # 在 CI 里不做全量桌面构建，避免把环境问题误报成代码问题。
-    runs-on: ubuntu-latest
+    #
+    # 必须跑在 windows：这批测试按 Windows 语义设计（verbatim 前缀、`\` 分隔符、
+    # npm/node 前置、taskkill 杀进程树）。在 ubuntu 上 11 条必红（65 过 / 11 挂，
+    # 2026-11-04 Docker 复现实测），改到 windows-latest 后取消类测试才从
+    # "函数早退"的假绿变成真实执行。公开仓库 Windows runner 免费。
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
