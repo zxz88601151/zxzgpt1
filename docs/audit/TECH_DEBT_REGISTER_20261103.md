@@ -48,7 +48,7 @@
 | D-13 | P3 | 测试覆盖结构失衡 | 437 条集中在 `src/lib` + `src/skills` + `src/api.ts` + `orchestration`；`App.tsx` 与组件层仍基本 0 | 与 D-02 同源（组件层没有 DOM 就没法测） | 未修 |
 | D-14 | P3 | e2e 假 IPC 需手工跟随真 IPC | `tools/workspace-e2e.cjs` 的 `__TAURI_INTERNALS__` 桩本轮才补齐 `undo_*` / `perm_*` | 新增一条 IPC 就忘一次，失效方式是**误导性超时**而不是报错 | 机制性风险，未根治 |
 | D-15 | P3 | 样式变量 `--warn` 被引用 4 次、从未定义 | `src/styles.css` 全文无 `--warn:` 声明；4 处引用各带不同 fallback（`#e3b341` / `#d08a2a` / `#b8860b`） | 每个 `var(--warn, X)` 都在用自己的 X，同一个语义在不同位置是三种颜色。改主题时改不动 | 未修（B11 只做记录，不动别人的颜色） |
-| D-16 | P3 | 用户点「停止」会让代理日志报"连接处理失败" | `proxy.rs:98-100` 把 `handle_conn` 的**任何**错误都打成 `连接处理失败`，而前端中断连接就是其中最常见的一种（e2e 跑「中断生成」时实测打出 `os error 10053`） | 日志在说谎的方向是"平时天天报错"，真出故障时反而分不出来 | 未修（本轮记录；属日志口径问题，不影响协议） |
+| D-16 | P3 | ~~用户点「停止」会让代理日志报"连接处理失败"~~ **已修（2026-11-04）** | `proxy.rs` 现在用 `ConnError::{PeerGone,Fatal}` 区分：`BrokenPipe` / `ConnectionReset` / `ConnectionAborted` 归 `PeerGone` 并静默，其余照旧打日志；读路径的畸形请求仍是 `Fatal` | 日志在说谎的方向是"平时天天报错"，真出故障时反而分不出来 | **已修**：`docs/audit/D16_INTERRUPT_LOG_20261104.md`；3 条 Rust 单测 + 端到端对照（旧行为打到 `os error 10053`，新行为 stderr 为空） |
 
 ### 2.1 为什么 D-02 从 P1 降到 P2（而不是「已修」）
 

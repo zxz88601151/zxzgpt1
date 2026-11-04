@@ -24,6 +24,7 @@
 | `npm test` | **447 passed / 20 files**（本轮起点 441；B12-B2 新增 `src/app.rounds.test.tsx` 6 条） |
 | `npm run build` | 成功；`dist/assets/index-C_jjb0nX.js` 335.51 kB（2026-11-03 23:34 实测） |
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **82 passed / 1 ignored**（GNU 工具链；msvc 必失败） |
+| `cargo test --manifest-path tools/proxy-harness/Cargo.toml` | **3 passed**（D-16 的错误分类表；同一套 GNU 工具链） |
 | `cargo check --manifest-path src-tauri/Cargo.toml` | 通过，**0 warning**（`--all-targets` 亦 0，2026-11-03 23:36 实测） |
 | e2e（当日实跑） | `e2e.cjs` 24/24、`workspace-e2e` 39/39、`skill-e2e` 69/69、`proxy-e2e` 接口 11/11 + 前端 24/24 |
 | CI 是否跑到新测试 | **是**：`.github/workflows/ci.yml:18` 的 `npm test` 走 vitest，`include: src/**/*.test.ts` |
@@ -45,7 +46,7 @@
 
 ## 3. 当前结论（不夸大）
 
-- 代码级质量：**良好**。447 条前端单测、82 条 Rust 单测全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。新增的传输层与接线层用例做过变异检验（改坏生产代码 → 对应用例必须变红），不是只看绿灯。
+- 代码级质量：**良好**。447 条前端单测、85 条 Rust 单测（fs-harness 82 + proxy-harness 3）全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。新增的传输层、接线层与代理错误分类用例做过变异检验（改坏生产代码 → 对应用例必须变红），不是只看绿灯。
 - 安全态势：**PARTIAL → 明显改善**。P0 三条 + 本轮 2 条（npm `pre`/`post` 钩子绕过、`.npmrc` 改脚本 shell）+ 执行授权闸门（P0-4）已落地；其余已登记项见 §5 与 `TECHNICAL_DEBT.md`。
 - 交付状态：**NOT_READY**。无安装包；CI 不编译 `src-tauri` 本体；e2e 无法在 CI 复现；release exe 已落后于 HEAD。
 - 架构状态：**PARTIAL**。编排仍是 1520 行 `App.tsx` 内的闭包循环；`src/orchestration/` 已存在但只有一个 `round.ts`（B7 切片），`send()` 本体未搬。工具五处手写已收成注册表（B6 完成）。ADR 0001 的 5 条验收标准 1.5 条达成（详见该 ADR 的"实施进度"小节，未勾的不勾）。
@@ -84,6 +85,7 @@
 | B12-B1 · 渲染夹具 | 业主批准后装 `jsdom@25`；`vitest.config.ts` 收 `*.test.tsx`（环境仍是 node，DOM 按文件声明）；新增 `src/app.test.tsx`：jsdom 里能挂载、空输入不发请求、有输入点发送真的打到 `/chat/completions` 且流回的 delta 渲染成回答 | **PASS** | 前端 **441**（19 文件）；3 次变异检验各自变红一条（去掉空输入守卫 / 改错上游路径 / 断掉 delta 追加） |
 | B14-B · e2e 进 CI | 业主批准把 `playwright@1.64.1` 写进 `devDependencies`；`ci.yml` 新增独立 `e2e` job（`npm ci` → `playwright install chromium` → 起 vite + 假上游 → `node tools/e2e.cjs`） | **NOT_TESTED** | `npm ci --dry-run` 通过（锁文件一致）；YAML 结构自检通过（3 个 job、0 制表符）；job 内的命令与本地实跑的命令逐条一致。**但 job 本身从未在 GitHub 上执行过**——本地跑不了 Actions，不给 PASS |
 | B12-B2 · 整轮重放 | 新增 `src/app.rounds.test.tsx` 6 条：① 上游 500 → 只发 1 次请求、`HTTP 500` 与上游原话都上屏、按钮复位；② 工具轮（假 IPC + 假上游）→ 第一轮带 `tools`、`read_file` 的结果按 `tool_call_id` 回填、第二轮带 `assistant.tool_calls` + `tool` 消息、随后 502 即收摊（恰好 2 次请求）；③ 挂起的流 + 点停止 → 显示「已停止生成」、无「请求失败」、不再发请求；④ 每轮都要读文件 → 恰好 6 次请求 + 「已达到本次最多 6 轮读写」；⑤ 自动测试 3 轮不过 → 恰好 3 次请求、3 次 `run_allowed`、每轮报错原文回传进下一轮上下文 + 「测试 3 轮仍未通过」；⑥ exec 审批 → 没回答前请求数仍是 1、`perm_grant` 为 0，点「仅这一次」后记 1 条一次性授权、命令重试、结果回填并继续下一轮 | **PASS** | 前端 **447**（20 文件）；6 次变异检验各自精确变红：去掉 `!res.ok` 抛错 → ①② 红；去掉 `buildMessages` 的 tool_calls 展开 → ② 红；去掉 `AbortError` 分支 → ③ 红；`MAX_ROUNDS` 6→8 → ④ 红（`expected 8 to be 6`）；`testLoopDecision` 去掉 `give_up` → ⑤ 红（`expected 6 to be 3`）；确认框不渲染 → ⑥ 红。`npm run build` 通过 |
+| D-16 · 中断不再记故障 | `proxy.rs` 引入 `ConnError::{PeerGone,Fatal}`：写路径的 `BrokenPipe` / `ConnectionReset` / `ConnectionAborted` 归 `PeerGone` 并静默，其余照旧打日志；读路径的畸形请求仍是 `Fatal`（不改语义） | **PASS** | proxy-harness **3 passed**（分类表）；变异「BrokenPipe 归 Fatal」→ 精确红一条；端到端对照实验：旧行为 stderr 打出 `os error 10053`（FAIL），新行为 stderr 为空（PASS）。`cargo check` 通过；`docs/audit/D16_INTERRUPT_LOG_20261104.md` |
 
 ### 下一批（按优先级）
 
@@ -92,18 +94,14 @@
 
 | # | 任务 | 为什么现在 | 验收 |
 |---|---|---|---|
-| B12-B3 | 把 `send()` 搬进 `src/orchestration/`（D-06） | 回归网已就位（B12-B1 挂载 + B12-B2 整轮边界），现在动 320 行闭包才有"改坏了会红"的兜底 | `App.tsx` 行数下降，且 444 条断言在搬家前后同样全绿；搬家前先记录每条的通过状态 |
-| D-16 | 代理把「用户点停止」记成「连接处理失败」 | 日志在说谎的方向是「平时天天报错，真故障时反而不显眼」 | 中断时不再打错误 |
+| B12-B3 | 把 `send()` 搬进 `src/orchestration/`（D-06） | 回归网已就位（B12-B1 挂载 + B12-B2 整轮边界 7 类全齐），现在动 320 行闭包才有"改坏了会红"的兜底 | `App.tsx` 行数下降，且 447 条断言在搬家前后同样全绿；搬家前先记录每条的通过状态 |
 | 首次 CI 运行 | 看 `e2e` job 到底能不能跑通（B14-B 标的是 `NOT_TESTED`） | job 已写好，但从没在 GitHub 上执行过。首次推送后需据此改成 PASS 或按真实报错修 | 截图/日志中 `e2e` job 为绿 |
 
 > **B12-B 路线已定**：业主选了「先装 jsdom 拿判据，再拆 `send()`」。
-> B12-B1 已完成（`jsdom@25` 已装，App 能在 jsdom 里挂载并被驱动，4 条用例 + 3 次变异检验）。
+> B12-B1 已完成（`jsdom@25` 已装，App 能在 jsdom 里挂载并被驱动，4 条用例 + 3 次变异检验）；
+> B12-B2 已完成（整轮边界 6 条，ADR 0001 要求的 7 类行为用例全齐，6 次变异检验）。
 > 顺序是刻意的：先有回归网，再动全仓最热的那段代码——反过来就是把"没判据"升级成"没判据且刚大改过"。
->
-> **B14 依赖已批准**：`playwright@1.64.1` 已进 `devDependencies`，`e2e` job 已写。
-> 只剩"它到底跑不跑得通"这一件事没法在本地验证。
->
-> 两条都没擅自开工。
+> 现在**回归网已齐，B12-B3 具备开工条件**；但只要还没开始搬，就不要把 ADR 的第 2 条读成已完成。
 
 ## 6. 风险与阻断
 

@@ -28,6 +28,40 @@ const MAX_HEAD_BYTES: usize = 64 * 1024;
 /// 再大就拒绝——否则本机任意进程可用一个超大 Content-Length 把内存打满。
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
+/// 一条连接处理失败的性质。
+///
+/// 为什么要分成两类：用户点「停止」、切走页面、关窗口，都会让前端直接把 TCP 断掉，
+/// 代理这边正在写分片，于是拿到 `BrokenPipe` / `ConnectionReset`（Windows 上常见
+/// `os error 10053`）。这些是**人主动结束**的正常路径，打成"连接处理失败"之后，
+/// 日志里平时天天有红字，真出故障时那行反而不显眼。
+///
+/// 判定放在写路径上，不改读路径的既有语义：读请求头/体失败仍然是真异常
+/// （畸形请求、超长头），照旧报错。
+enum ConnError {
+    /// 对端在响应写完前走了（用户中断 / 页面关闭）。正常路径，不报错。
+    PeerGone,
+    /// 其它失败：照旧打日志。
+    Fatal(String),
+}
+
+impl From<std::io::Error> for ConnError {
+    fn from(e: std::io::Error) -> Self {
+        use std::io::ErrorKind;
+        match e.kind() {
+            ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted => {
+                ConnError::PeerGone
+            }
+            _ => ConnError::Fatal(e.to_string()),
+        }
+    }
+}
+
+impl From<String> for ConnError {
+    fn from(s: String) -> Self {
+        ConnError::Fatal(s)
+    }
+}
+
 pub struct ProxyInfo {
     pub port: u16,
     pub token: String,
@@ -95,8 +129,11 @@ async fn serve(port: u16, token: String) -> Result<(), String> {
         };
         let tok = share.clone();
         async_runtime::spawn(async move {
-            if let Err(e) = handle_conn(socket, tok).await {
-                eprintln!("[zxz] 连接处理失败：{}", e);
+            match handle_conn(socket, tok).await {
+                Ok(()) => {}
+                // 用户中断 / 页面关闭：前端已经不要这条响应了，不是故障
+                Err(ConnError::PeerGone) => {}
+                Err(ConnError::Fatal(e)) => eprintln!("[zxz] 连接处理失败：{}", e),
             }
         });
     }
@@ -132,7 +169,7 @@ fn host_is_loopback(headers: &HashMap<String, String>) -> bool {
     name == "127.0.0.1" || name == "localhost"
 }
 
-async fn handle_conn(mut socket: TcpStream, token: std::sync::Arc<String>) -> Result<(), String> {
+async fn handle_conn(mut socket: TcpStream, token: std::sync::Arc<String>) -> Result<(), ConnError> {
     // 只先读头：鉴权要看的东西全在头里。把 body 留到鉴权之后读，
     // 否则一个没 token 的请求也能让代理先收下 32MB——校验再准也没意义了。
     let head = match read_head(&mut socket).await {
@@ -264,7 +301,7 @@ async fn handle_conn(mut socket: TcpStream, token: std::sync::Arc<String>) -> Re
 }
 
 /// 流式对话：先把 SSE 响应头写出去，再一边读远端一边把分片推给前端。
-async fn handle_chat(socket: &mut TcpStream, payload: api::ChatRequest) -> Result<(), String> {
+async fn handle_chat(socket: &mut TcpStream, payload: api::ChatRequest) -> Result<(), ConnError> {
     let head = concat!(
         "HTTP/1.1 200 OK\r\n",
         "Content-Type: text/event-stream; charset=utf-8\r\n",
@@ -278,8 +315,8 @@ async fn handle_chat(socket: &mut TcpStream, payload: api::ChatRequest) -> Resul
     socket
         .write_all(head.as_bytes())
         .await
-        .map_err(|e| e.to_string())?;
-    socket.flush().await.map_err(|e| e.to_string())?;
+        .map_err(ConnError::from)?;
+    socket.flush().await.map_err(ConnError::from)?;
 
     let (tx, mut rx) = mpsc::channel::<Option<String>>(64);
 
@@ -303,8 +340,8 @@ async fn handle_chat(socket: &mut TcpStream, payload: api::ChatRequest) -> Resul
                 socket
                     .write_all(format!("data: {}\n\n", json).as_bytes())
                     .await
-                    .map_err(|e| e.to_string())?;
-                socket.flush().await.map_err(|e| e.to_string())?;
+                    .map_err(ConnError::from)?;
+                socket.flush().await.map_err(ConnError::from)?;
             }
             None => break,
         }
@@ -313,12 +350,12 @@ async fn handle_chat(socket: &mut TcpStream, payload: api::ChatRequest) -> Resul
     Ok(())
 }
 
-async fn write_json(socket: &mut TcpStream, status: u16, body: &serde_json::Value) -> Result<(), String> {
+async fn write_json(socket: &mut TcpStream, status: u16, body: &serde_json::Value) -> Result<(), ConnError> {
     let text = body.to_string();
     write_cors(socket, status, "application/json; charset=utf-8", &text).await
 }
 
-async fn write_cors(socket: &mut TcpStream, status: u16, content_type: &str, body: &str) -> Result<(), String> {
+async fn write_cors(socket: &mut TcpStream, status: u16, content_type: &str, body: &str) -> Result<(), ConnError> {
     let reason = match status {
         200 => "OK",
         204 => "No Content",
@@ -337,14 +374,14 @@ async fn write_cors(socket: &mut TcpStream, status: u16, content_type: &str, bod
     socket
         .write_all(head.as_bytes())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(ConnError::from)?;
     if len > 0 {
         socket
             .write_all(body.as_bytes())
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(ConnError::from)?;
     }
-    socket.flush().await.map_err(|e| e.to_string())?;
+    socket.flush().await.map_err(ConnError::from)?;
     Ok(())
 }
 
@@ -432,4 +469,49 @@ async fn read_body(
 
 fn find_head_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+#[cfg(test)]
+mod tests {
+    //! 分类规则本身的判据。
+    //!
+    //! 端到端也能验（断开连接看日志），但那要靠时序，容易 flaky；
+    //! 真正容易改坏的是这张对照表——把 BrokenPipe 归进 Fatal，日志立刻回到
+    //! "平时天天红字"的状态，而任何一条 e2e 都不会红。所以在这里钉住。
+
+    use super::ConnError;
+    use std::io::{Error, ErrorKind};
+
+    fn peer_gone(e: ConnError) -> bool {
+        matches!(e, ConnError::PeerGone)
+    }
+
+    #[test]
+    fn peer_disconnects_are_not_fatal() {
+        // 10053 / 10054 / 10058 这类"对端走了"在 Rust 里分别落到这三档
+        for kind in [
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+        ] {
+            assert!(peer_gone(ConnError::from(Error::new(kind, "peer closed"))), "{:?}", kind);
+        }
+    }
+
+    #[test]
+    fn other_io_errors_stay_fatal() {
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::TimedOut,
+            ErrorKind::AddrInUse,
+        ] {
+            assert!(!peer_gone(ConnError::from(Error::new(kind, "boom"))), "{:?}", kind);
+        }
+    }
+
+    #[test]
+    fn protocol_errors_on_the_read_path_stay_fatal() {
+        // 读请求头/体产生的字符串错误仍是真异常：畸形请求不该被静默吞掉
+        assert!(!peer_gone(ConnError::from("连接被提前关闭".to_string())));
+    }
 }
