@@ -1,6 +1,6 @@
 # 项目状态板（唯一权威）
 
-最后更新：2026-11-03 23:38　｜　维护者：Project Director（Agent 小队）
+最后更新：2026-11-04 09:40　｜　维护者：Project Director（Agent 小队）
 状态判定用词：`PASS` `PARTIAL` `FAIL` `ABSENT` `NOT_TESTED` `BLOCKED`
 
 ---
@@ -21,7 +21,7 @@
 
 | 命令 | 结果 |
 |---|---|
-| `npm test` | **441 passed / 19 files**（本轮起点 328；B12-A `api.test.ts` 37 条，B12-B1 `app.test.tsx` 4 条） |
+| `npm test` | **444 passed / 20 files**（本轮起点 441；B12-B2 新增 `src/app.rounds.test.tsx` 3 条） |
 | `npm run build` | 成功；`dist/assets/index-C_jjb0nX.js` 335.51 kB（2026-11-03 23:34 实测） |
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **82 passed / 1 ignored**（GNU 工具链；msvc 必失败） |
 | `cargo check --manifest-path src-tauri/Cargo.toml` | 通过，**0 warning**（`--all-targets` 亦 0，2026-11-03 23:36 实测） |
@@ -45,7 +45,7 @@
 
 ## 3. 当前结论（不夸大）
 
-- 代码级质量：**良好**。441 条前端单测、82 条 Rust 单测全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。新增的传输层用例做过变异检验（改坏生产代码 → 对应用例必须变红），不是只看绿灯。
+- 代码级质量：**良好**。444 条前端单测、82 条 Rust 单测全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。新增的传输层与接线层用例做过变异检验（改坏生产代码 → 对应用例必须变红），不是只看绿灯。
 - 安全态势：**PARTIAL → 明显改善**。P0 三条 + 本轮 2 条（npm `pre`/`post` 钩子绕过、`.npmrc` 改脚本 shell）+ 执行授权闸门（P0-4）已落地；其余已登记项见 §5 与 `TECHNICAL_DEBT.md`。
 - 交付状态：**NOT_READY**。无安装包；CI 不编译 `src-tauri` 本体；e2e 无法在 CI 复现；release exe 已落后于 HEAD。
 - 架构状态：**PARTIAL**。编排仍是 1520 行 `App.tsx` 内的闭包循环；`src/orchestration/` 已存在但只有一个 `round.ts`（B7 切片），`send()` 本体未搬。工具五处手写已收成注册表（B6 完成）。ADR 0001 的 5 条验收标准 1.5 条达成（详见该 ADR 的"实施进度"小节，未勾的不勾）。
@@ -83,6 +83,7 @@
 | B14-A · e2e 可复现 | `tools/browser.cjs` 逐级回落（env → msedge → chrome → 自带 chromium）；五个脚本去掉写死的 `channel`；默认 BASE 统一 `localhost:1420`；`proxy-e2e` 显式把 `ZXZ_BASE` 传给子进程 | **PASS** | 不传任何环境变量实测：`e2e` 24/24、`proxy-e2e` 11+24、`workspace` 39/39、`skill` 69/69；`ZXZ_BROWSER_CHANNEL="nope,msedge"` 真走进回落分支 |
 | B12-B1 · 渲染夹具 | 业主批准后装 `jsdom@25`；`vitest.config.ts` 收 `*.test.tsx`（环境仍是 node，DOM 按文件声明）；新增 `src/app.test.tsx`：jsdom 里能挂载、空输入不发请求、有输入点发送真的打到 `/chat/completions` 且流回的 delta 渲染成回答 | **PASS** | 前端 **441**（19 文件）；3 次变异检验各自变红一条（去掉空输入守卫 / 改错上游路径 / 断掉 delta 追加） |
 | B14-B · e2e 进 CI | 业主批准把 `playwright@1.64.1` 写进 `devDependencies`；`ci.yml` 新增独立 `e2e` job（`npm ci` → `playwright install chromium` → 起 vite + 假上游 → `node tools/e2e.cjs`） | **NOT_TESTED** | `npm ci --dry-run` 通过（锁文件一致）；YAML 结构自检通过（3 个 job、0 制表符）；job 内的命令与本地实跑的命令逐条一致。**但 job 本身从未在 GitHub 上执行过**——本地跑不了 Actions，不给 PASS |
+| B12-B2 · 整轮重放 | 新增 `src/app.rounds.test.tsx` 3 条：① 上游 500 → 只发 1 次请求、`HTTP 500` 与上游原话都上屏、按钮复位；② 工具轮（假 IPC + 假上游）→ 第一轮带 `tools`、`read_file` 的结果按 `tool_call_id` 回填、第二轮带 `assistant.tool_calls` + `tool` 消息、随后 502 即收摊（恰好 2 次请求）；③ 挂起的流 + 点停止 → 显示「已停止生成」、无「请求失败」、不再发请求 | **PASS** | 前端 **444**（20 文件）；3 次变异检验各自精确变红：去掉 `!res.ok` 抛错 → ①② 红；去掉 `buildMessages` 的 tool_calls 展开 → ② 红（`expected +0 to be 1`）；去掉 `AbortError` 分支 → ③ 红。`npm run build` 通过且产物 hash 不变（`index-Bh36YZlN.js`），证明只加了测试、没动生产代码 |
 
 ### 下一批（按优先级）
 
@@ -91,8 +92,7 @@
 
 | # | 任务 | 为什么现在 | 验收 |
 |---|---|---|---|
-| B12-B2 | `send()` 整轮重放场景（D-02 剩余） | 夹具已通（B12-B1），现在可以往里加场景了：上游报错、工具调用后再失败、中途停止 | 至少 1 类"上游错误"场景在 CI 的 `npm test` 里跑 |
-| B12-B3 | 场景齐了之后，把 `send()` 搬进 `src/orchestration/`（D-06） | 有网之后再动 320 行闭包才安全；否则等于"没判据且刚大改过" | `App.tsx` 行数下降且 441 条断言不变绿→红 |
+| B12-B3 | 把 `send()` 搬进 `src/orchestration/`（D-06） | 回归网已就位（B12-B1 挂载 + B12-B2 整轮边界），现在动 320 行闭包才有"改坏了会红"的兜底 | `App.tsx` 行数下降，且 444 条断言在搬家前后同样全绿；搬家前先记录每条的通过状态 |
 | D-16 | 代理把「用户点停止」记成「连接处理失败」 | 日志在说谎的方向是「平时天天报错，真故障时反而不显眼」 | 中断时不再打错误 |
 | 首次 CI 运行 | 看 `e2e` job 到底能不能跑通（B14-B 标的是 `NOT_TESTED`） | job 已写好，但从没在 GitHub 上执行过。首次推送后需据此改成 PASS 或按真实报错修 | 截图/日志中 `e2e` job 为绿 |
 
