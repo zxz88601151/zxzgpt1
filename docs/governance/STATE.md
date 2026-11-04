@@ -11,7 +11,7 @@
 |---|---|
 | 仓库 | `F:/zhuomian/zxz`（product `zxz` / `com.zxz.desktop`） |
 | 分支 / HEAD | `main` / `8142815`（B12-B3 已提交；ahead `origin/main` 与 `github/main` 各 **26**，**未推送**） |
-| 远端 | `origin` 内网 Gitea `192.168.3.200:3000/zxzjxx/zxzgpt.git`（**当前认证失败，推送会直接报错**，见 B12-B4 §6）；`github` = `zxz88601151/zxzgpt1`（**公开仓库**，CI 只认它） |
+| 远端 | `origin` 内网 Gitea `<内网地址>/<user>/zxzgpt.git`（**当前认证失败，推送会直接报错**，见 B12-B4 §6）；`github` = `zxz88601151/zxzgpt1`（**公开仓库**，CI 只认它）。注：2026-11-04 推送前对公开可见内容做了内网信息占位处理 |
 | 版本号 | `package.json` / `tauri.conf.json` / `Cargo.toml` 三处均 `0.3.0`（一致） |
 | 技术栈 | Tauri 2 + Rust（fsx / runx / wsx / proxy / api / perms）＋ React 18 + TS + Vite 6；测试用 vitest（node 环境为主，DOM 用文件头 `@vitest-environment jsdom` 单文件声明） |
 | 规模 | 前端生产代码 8,975 行（`App.tsx` **1338** 行 + `orchestration/session.ts` 321 行），测试 4,534 行；Rust 8 文件 / 7 模块 |

@@ -15,7 +15,7 @@
 | 项 | 命令 | 实测值 |
 | --- | --- | --- |
 | 工作目录 | `pwd` / `git rev-parse --show-toplevel` | `/f/zhuomian/zxz` → `F:/zhuomian/zxz` |
-| 远端 origin | `git config --get remote.origin.url` | `http://192.169.3.200:3000/zxzjxx/zxzgpt.git`（内网 Gitea） |
+| 远端 origin | `git config --get remote.origin.url` | `http://<内网地址>/<user>/zxzgpt.git`（内网 Gitea；公开推送前已做占位处理） |
 | 远端 github | `git config --get remote.github.url` | `git@github.com:zxz88601151/zxzgpt1.git` |
 | 分支 | `git rev-parse --abbrev-ref HEAD` | `main` |
 | HEAD | `git rev-parse --short HEAD` | `b4a3ed2`（R1，2026-11-02T11:52:54+08:00） |
