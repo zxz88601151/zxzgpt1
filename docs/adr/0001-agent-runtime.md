@@ -109,7 +109,7 @@ type RunState =
 
 ```
 [~] src/orchestration/ 存在，且 grep -rn "from \"react\"" src/orchestration/ 无命中
-[~] 7 类行为用例全绿（vitest，mock provider + mock tools）
+[x] 7 类行为用例全绿（vitest，mock provider + mock tools）—— 2026-11-04 补齐，见下方进度
 [ ] src/App.tsx < 500 行，且不再出现 stateRef.current 的手工双写
 [x] 工具分发的 if/else 消失（grep -c "call.name ===" src/ == 0）
 [ ] 迁移前后，tools/workspace-e2e.cjs 的通过项数量不变
@@ -140,6 +140,33 @@ type RunState =
 
 **结论**：ADR 未完成。B7 只完成"最小可行切片"，其价值在于把最绕的判定逻辑
 变成有测试的纯函数，而不是"编排层已拆分"。
+
+---
+
+## 实施进度（2026-11-04，追加，不改上文）
+
+**迁移步骤 1 已完成：7 类行为等价用例落地**
+
+`src/app.test.tsx`（B12-B1，jsdom 夹具）+ `src/app.rounds.test.tsx`（B12-B2，6 条）
+用的是 **App 真实的 `send()` / `executeTool()` / `buildMessages()`**，只把上游 fetch 与
+Tauri IPC 换成假的——没有为测试在业务代码里开洞。
+
+| # | 类别 | 判据 |
+|---|---|---|
+| 1 | 无工具 1 轮 | 请求打到 `<baseUrl>/chat/completions`，delta 渲染成回答（`app.test.tsx`） |
+| 2 | 有工具多轮 | 第一轮带 `tools`；`read_file` 结果按 `tool_call_id` 回填；第二轮带 `assistant.tool_calls` + `tool` |
+| 3 | 6 轮上限 | 每轮都要读文件时**恰好 6 次**请求 + 「已达到本次最多 6 轮读写」 |
+| 4 | 中断 | 挂起的流 + 点停止 → 「已停止生成」、不误报「请求失败」、不再发请求 |
+| 5 | 审批挂起 | 没答之前请求数仍是 1、`perm_grant` 为 0；点「仅这一次」后记 1 条、命令重试、结果回填 |
+| 6 | 测试 3 轮 | 3 次 `run_allowed`、恰好 3 次请求、每轮报错原文回传进下一轮上下文、末轮报人 |
+| 7 | 上游错误 | 500 只发 1 次请求；`HTTP 500` + 上游原话都上屏；按钮复位 |
+
+**变异检验**（改坏生产代码 → 对应用例必须变红，逐条单独验过）：
+去掉 `!res.ok` 抛错 → 7/2 红；去掉 `tool_calls` 展开 → 2 红；去掉 `AbortError` 分支 → 4 红；
+`MAX_ROUNDS` 6→8 → 3 红；`testLoopDecision` 去掉 `give_up` → 6 红；确认框不渲染 → 5 红。
+
+**仍未做**：`send()` 本体还在 `App.tsx`（1520 行），第 2 条 `[~]` 没变成「搬家已完成」。
+第 1 步做完意味着**搬运有了回归网**，不等于搬运开始。
 
 ---
 

@@ -29,6 +29,10 @@ let container: HTMLDivElement;
 let root: Root;
 let ipc: { cmd: string; args?: Record<string, unknown> }[];
 
+/** 假文件系统的内容。写进去的东西要能被读回来——否则 write_file 的
+ *  回读校验永远是 false，测出来的"写成功"跟真实行为不是一回事。 */
+let files: Map<string, string>;
+
 interface Call {
   url: string;
   init?: RequestInit;
@@ -42,6 +46,10 @@ function fetchCalls(): Call[] {
   });
 }
 
+function ipcCalls(cmd: string): { cmd: string; args?: Record<string, unknown> }[] {
+  return ipc.filter((c) => c.cmd === cmd);
+}
+
 /* ------------------------------------------------------------ 假 Tauri */
 
 /**
@@ -49,11 +57,20 @@ function fetchCalls(): Call[] {
  *
  * 为什么必须装：工具模式的前置条件是 `fsAvailable()`（= window.__TAURI_INTERNALS__
  * 存在）加 settings.workspace。不装的话 toolModeOn 永远是 false，
- * "工具调用结果回填"这条路径在测试里根本走不到——那等于没测。
+ * "工具调用结果回填""审批挂起""自动测试回路"这些路径在测试里根本走不到——
+ * 那等于没测。
  *
- * 默认实现只覆盖本文件用到的命令；传 overrides 可以改单条命令的行为。
+ * 文件读写落在一个内存 Map 上：`fs_write` 之后 `fs_read` 能读回同一份内容，
+ * 这样写入回读校验（verified）才是真的在验证，而不是恒假。
+ * 传 overrides 可以改单条命令的行为。
  */
 function installTauri(overrides: Record<string, (args: Record<string, unknown>) => unknown> = {}): void {
+  files = new Map([
+    ["a.txt", "export const answer = 42;\n"],
+    // run_command 跑 npm/npx 之前会先读 package.json 审脚本内容，
+    // 缺了它工具会以"无法读取 package.json"失败——那是夹具缺件，不是产品行为。
+    ["package.json", JSON.stringify({ scripts: { test: "vitest run" } })],
+  ]);
   const invoke = async (cmd: string, args?: Record<string, unknown>): Promise<unknown> => {
     ipc.push({ cmd, args });
     const h = overrides[cmd];
@@ -64,18 +81,30 @@ function installTauri(overrides: Record<string, (args: Record<string, unknown>) 
         return null;
       case "ws_info":
         return { id: "s1", root: "F:/proj", name: "proj" };
-      case "fs_read":
-        return "export const answer = 42;\n";
+      case "fs_read": {
+        const rel = String(args?.rel || "");
+        if (!files.has(rel)) throw new Error(`读不到 ${rel}`);
+        return files.get(rel);
+      }
       case "fs_list_in":
-        return [];
+        return [...files.keys()].map((name) => ({ name, path: `F:/proj/${name}`, dir: false, size: files.get(name)!.length }));
       case "fs_exists":
-        return false;
-      case "fs_write":
-        return { path: String(args?.rel || ""), bytes: 1, created: true };
+        return files.has(String(args?.rel || ""));
+      case "fs_write": {
+        const rel = String(args?.rel || "");
+        const text = String(args?.content ?? "");
+        const created = !files.has(rel);
+        files.set(rel, text);
+        return { path: rel, bytes: text.length, created };
+      }
       case "undo_write":
-        return { path: "undo", bytes: 1, created: true };
+        return { path: String(args?.rel || ""), bytes: 1, created: false };
       case "perm_list":
+      case "perm_grant":
+      case "perm_revoke":
         return [];
+      case "run_allowed":
+        return { exit_code: 0, stdout: "ok", stderr: "", timed_out: false, truncated: false, cancelled: false };
       default:
         return null;
     }
@@ -223,6 +252,18 @@ function bodyOf(call: Call): { messages: { role: string; content: string; tool_c
 
 /* ------------------------------------------------------------ 用例 */
 
+/** 造一条"模型要调工具"的 SSE。参数用 JSON.stringify 拼，免得手写转义出错。 */
+function toolCallSse(id: string, name: string, args: Record<string, unknown>): Response {
+  const frame = {
+    choices: [{ delta: { tool_calls: [{ index: 0, id, function: { name, arguments: JSON.stringify(args) } }] } }],
+  };
+  return sseResponse(`data: ${JSON.stringify(frame)}`, "data: [DONE]");
+}
+
+function workspaceSettings(): Partial<Settings> {
+  return { workspace: { sessionId: "s1", root: "F:/proj", name: "proj", tree: "a.txt" } };
+}
+
 describe("一整轮的边界", () => {
   it("上游报错：把上游原话报出来，不自动重试下一轮", async () => {
     installTauri();
@@ -313,5 +354,117 @@ describe("一整轮的边界", () => {
 
     expect(fetchCalls().length, "停止后不该自动再来一轮").toBe(1);
     expect((container.querySelector("#btnSend") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("轮数上限：模型每轮都要读文件时，第 6 轮后停下并说明原因", async () => {
+    installTauri();
+    seed(workspaceSettings());
+    let n = 0;
+    stubFetch(() => {
+      n += 1;
+      return toolCallSse(`call_${n}`, "read_file", { path: "a.txt" });
+    });
+
+    await mount();
+    await settle(1);
+    await typeAndSend("一直读下去");
+    // 6 轮、每轮一次 IPC + 一次 fetch，微任务层数不少，给足轮次
+    await settle(40);
+
+    expect(fetchCalls().length, "轮数上限必须是硬上限，不能多打一轮").toBe(6);
+    expect(container.textContent || "").toContain("已达到本次最多 6 轮读写");
+    expect((container.querySelector("#btnSend") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("自动测试回路：连续 3 轮不过就停手报人，每一轮的报错都回传给模型", async () => {
+    let testRound = 0;
+    installTauri({
+      run_allowed: () => {
+        testRound += 1;
+        return { exit_code: 1, stdout: "", stderr: `1 failing (round ${testRound})`, timed_out: false, truncated: false };
+      },
+    });
+    seed({ ...workspaceSettings(), autoTest: true });
+
+    let n = 0;
+    stubFetch(() => {
+      n += 1;
+      return toolCallSse(`call_${n}`, "write_file", { path: "a.txt", content: `版本 ${n}\n` });
+    });
+
+    await mount();
+    await settle(1);
+    await typeAndSend("改到测试通过为止");
+    await settle(60);
+
+    const calls = fetchCalls();
+    expect(calls.length, "3 轮测试都没过 → 第 3 轮之后停手，不再请求第 4 轮").toBe(3);
+    expect(ipcCalls("run_allowed").length, "每轮写了文件就跑一次 npm test").toBe(3);
+    expect(ipcCalls("run_allowed")[0].args?.argv).toEqual(["npm", "test"]);
+
+    // 第二轮 / 第三轮的上下文里要带上上一轮的失败原文，否则模型没有可改的依据
+    const second = bodyOf(calls[1]);
+    const secondText = JSON.stringify(second.messages);
+    expect(secondText, "第一轮报错要回传").toContain("第 1/3 轮");
+    expect(secondText).toContain("1 failing (round 1)");
+
+    const third = bodyOf(calls[2]);
+    const thirdText = JSON.stringify(third.messages);
+    expect(thirdText, "第二轮报错也要回传").toContain("第 2/3 轮");
+    expect(thirdText).toContain("1 failing (round 2)");
+
+    expect(container.textContent || "").toContain("测试 3 轮仍未通过");
+    // 失败收场同样是"结束"，不是"还在生成"
+    expect((container.querySelector("#btnSend") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("执行审批：没点头之前流程挂住不发下一轮，点「仅这一次」后才放行", async () => {
+    let runs = 0;
+    installTauri({
+      run_allowed: () => {
+        runs += 1;
+        if (runs === 1) {
+          throw JSON.stringify({ kind: "need_grant", scope: ["npm", "test"], label: "npm test" });
+        }
+        return { exit_code: 0, stdout: "12 passed", stderr: "", timed_out: false, truncated: false };
+      },
+    });
+    seed(workspaceSettings());
+
+    stubFetch(
+      () => toolCallSse("call_run", "run_command", { argv: ["npm", "test"] }),
+      () => sseResponse('data: {"choices":[{"delta":{"content":"命令跑完了"}}]}', "data: [DONE]"),
+    );
+
+    await mount();
+    await settle(1);
+    await typeAndSend("跑一下测试");
+    await settle(10);
+
+    // 挂起：确认框在，命令还没被批准，也绝不会偷偷把下一轮请求发出去
+    const dialog = container.querySelector("#confirmExec");
+    expect(dialog, "exec 默认必须问人").not.toBeNull();
+    expect(dialog?.textContent || "").toContain("npm test");
+    expect(fetchCalls().length, "审批没答之前不能继续跑").toBe(1);
+    expect(ipcCalls("perm_grant").length, "还没点头就不该有授权").toBe(0);
+
+    const onceBtn = [...(dialog?.querySelectorAll("button") || [])].find(
+      (b) => (b.textContent || "").trim() === "仅这一次",
+    ) as HTMLButtonElement | undefined;
+    expect(onceBtn, "「仅这一次」必须是一个可点的选项").toBeTruthy();
+    await act(async () => {
+      onceBtn?.click();
+    });
+    await settle(20);
+
+    expect(ipcCalls("perm_grant").length, "点一次 = 记一条一次性授权").toBe(1);
+    expect(ipcCalls("perm_grant")[0].args?.scope).toEqual(["npm", "test"]);
+    expect(runs, "授权后必须真的重试那条命令").toBe(2);
+
+    const calls = fetchCalls();
+    expect(calls.length, "命令跑完才继续下一轮").toBe(2);
+    const toolMsg = bodyOf(calls[1]).messages.find((m) => m.role === "tool");
+    expect(toolMsg?.content || "", "执行结果要回填给模型").toContain("12 passed");
+    expect(container.textContent || "").toContain("命令跑完了");
   });
 });
