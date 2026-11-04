@@ -64,6 +64,8 @@ import { ConfirmExec, type ExecAsk, type ExecChoice } from "./components/Confirm
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { Composer } from "./components/Composer";
+import { DictationButton } from "./components/DictationButton";
+import { appendTranscript } from "./lib/dictation";
 import { MessageList } from "./components/MessageList";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { Welcome } from "./components/Welcome";
@@ -1224,6 +1226,16 @@ export default function App() {
             onSend={() => void send()}
             onStop={stop}
             focusSignal={focusSignal}
+            dictation={
+              <DictationButton
+                disabled={busy}
+                onTranscript={(t) => {
+                  setInput((prev) => appendTranscript(prev, t));
+                  setFocusSignal((n) => n + 1);
+                }}
+                onError={(msg) => toast(msg, "error")}
+              />
+            }
             toolbar={
               <SkillChips
                 skills={skills}

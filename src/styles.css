@@ -706,6 +706,9 @@ body.collapsed .sidebar { border-right: none; }
 .send-btn:hover, .stop-btn:hover { transform: translateY(-1px); }
 .send-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
 .stop-btn { background: var(--panel-3); color: var(--text-dim); border: 1px solid var(--line-strong); }
+.mic-btn { width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--line-strong); background: var(--panel-3); color: var(--text-dim); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.mic-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.mic-btn.recording { width: auto; padding: 0 10px; gap: 6px; background: #7a1f1f; color: #fff; border-color: #7a1f1f; }
 
 .composer-hint {
   max-width: 860px;

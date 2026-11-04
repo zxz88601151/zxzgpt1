@@ -11,9 +11,11 @@ interface ComposerProps {
   focusSignal: number;
   /** 输入框上方的工具条（技能胶囊），由 App 注入 */
   toolbar?: ReactNode;
+  /** 发送按钮旁的附加操作（听写按钮），由 App 注入 */
+  dictation?: ReactNode;
 }
 
-export function Composer({ value, busy, onChange, onSend, onStop, focusSignal, toolbar }: ComposerProps) {
+export function Composer({ value, busy, onChange, onSend, onStop, focusSignal, toolbar, dictation }: ComposerProps) {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   // 自增高：先置 auto 再按 scrollHeight 收，最高 220px
@@ -57,6 +59,7 @@ export function Composer({ value, busy, onChange, onSend, onStop, focusSignal, t
           }}
         />
         <div className="composer-actions">
+          {dictation}
           <button type="button" className="stop-btn" id="btnStop" title="停止生成" hidden={!busy} onClick={onStop}>
             <Icon name="stop" />
           </button>
