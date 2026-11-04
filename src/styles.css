@@ -1245,6 +1245,7 @@ body:not(.collapsed) #btnOpenSidebar { display: none; }
   white-space: nowrap;
 }
 .fa-diff.has-del { color: var(--warn, #e3b341); }
+.fa-preview { font-size: 11.5px; padding: 0; }
 
 /* ---------------- 差异对比 ---------------- */
 

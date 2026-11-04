@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { countLines, relPathError, type FileBlock } from "../lib/files";
-import { fsRead } from "../lib/fsapi";
+import { fsRead, openPreview } from "../lib/fsapi";
 import type { FileWriteResult, Workspace } from "../types";
 import { DiffModal } from "./DiffModal";
 
@@ -35,6 +35,21 @@ export function FileWrites({ blocks, files, workspace, onApply }: FileWritesProp
   const [running, setRunning] = useState(false);
   const [extra, setExtra] = useState<FileWriteResult[] | null>(null);
   const [diff, setDiff] = useState<{ path: string; oldText: string; newText: string; note?: string } | null>(null);
+  const [previewErr, setPreviewErr] = useState<string | null>(null);
+
+  const isHtml = (rel: string) => /\.html?$/i.test(rel);
+
+  /** 在内置窗口打开一个 HTML 文件的预览（用绝对路径，工程根目录 + 相对路径）。 */
+  const preview = async (rel: string) => {
+    if (!workspace) return;
+    const root = workspace.root.replace(/[\\/]+$/, "");
+    try {
+      setPreviewErr(null);
+      await openPreview(`${root}/${rel}`);
+    } catch (e) {
+      setPreviewErr(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   const results = files ?? extra;
   const okList = results ? results.filter((r) => r.ok) : [];
@@ -147,12 +162,28 @@ export function FileWrites({ blocks, files, workspace, onApply }: FileWritesProp
                 >
                   <code>{b.path}</code>
                 </button>
+                {isHtml(b.path) && workspace && !bad && !(r && !r.ok) ? (
+                  <button
+                    className="link-btn fa-preview"
+                    type="button"
+                    title="在内置窗口打开预览"
+                    onClick={() => void preview(b.path)}
+                  >
+                    预览
+                  </button>
+                ) : null}
                 {change ? <span className={"fa-diff" + (r && r.del ? " has-del" : "")}>{change}</span> : null}
                 <span className="fa-meta">{meta}</span>
               </li>
             );
           })}
         </ul>
+      ) : null}
+
+      {previewErr ? (
+        <p className="fa-warn" id="faPreviewErr">
+          {previewErr}
+        </p>
       ) : null}
 
       <DiffModal
