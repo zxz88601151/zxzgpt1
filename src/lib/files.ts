@@ -175,11 +175,15 @@ export interface WorkspacePromptOptions {
   confirmWrites?: boolean;
   /** 计划模式下不落盘，提示词里先说清楚 */
   planMode?: boolean;
+  /** 探索模式下不落盘，提示词里先说清楚（优先级高于计划模式的文案） */
+  exploreMode?: boolean;
 }
 
 /** 本地工程模式的系统提示词；tree 为空时只给根目录，不硬编造结构 */
 export function buildWorkspacePrompt(root: string, tree: string, opts: WorkspacePromptOptions = {}): string {
-  const writeLine = opts.planMode
+  const writeLine = opts.exploreMode
+    ? "探索模式：本轮只查不改，你输出的文件块会被程序直接跳过，只保留文字方案。"
+    : opts.planMode
     ? "计划模式：本轮只出方案，不落盘；你输出的文件块会被程序直接跳过。"
     : opts.confirmWrites
       ? "你输出的文件块会先弹差异面板，等用户批复后才写入磁盘；没批复之前不要把写入当成已完成。"

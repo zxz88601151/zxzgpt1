@@ -191,12 +191,16 @@ export async function runRounds(deps: RunDeps): Promise<void> {
       if (raf) cancelFrame(raf);
     }
 
-    // 真实落盘：回复里出现 file: 块就写进工程目录；计划模式只出方案，直接跳过
+    // 真实落盘：回复里出现 file: 块就写进工程目录；计划模式只出方案，直接跳过。
+    // 探索模式同样不落盘：工具调用有执行层拦，文本协议这条旁路也要拦，
+    // 否则模型绕开工具、用 file: 块一样能写盘。
     const ws = deps.currentWorkspace();
     const blocks = aborted || failed ? [] : parseFileBlocks(acc.content);
     const planMode = Boolean(s.planMode);
+    const exploreMode = Boolean(s.exploreMode);
     if (planMode && blocks.length) deps.toast("计划模式：本轮 file: 块未落盘，只保留方案", "");
-    const files = ws && blocks.length && !planMode ? await deps.writeFiles(blocks) : undefined;
+    if (exploreMode && blocks.length) deps.toast("探索模式：本轮 file: 块未落盘，只保留方案", "");
+    const files = ws && blocks.length && !planMode && !exploreMode ? await deps.writeFiles(blocks) : undefined;
 
     // 工具调用：按顺序执行，结果挂在助手消息上，下一轮 buildMessages
     // 会把它展开成原生 tool_calls + tool 消息发给上游，模型才能对上号。

@@ -55,7 +55,7 @@ import {
   type FileBlock,
   type ReadOutcome,
 } from "./lib/files";
-import { findTool, parseToolArgs, planModeBlocks, TOOL_DEFS, type ToolContext } from "./lib/registry";
+import { EXPLORE_TOOL_NAMES, exploreToolDefs, findTool, isExploreTool, parseToolArgs, planModeBlocks, TOOL_DEFS, type ToolContext } from "./lib/registry";
 import { runRounds } from "./orchestration/session";
 import type { AppState, Conversation, FileWriteResult, Message, Settings, Theme, ToolCallRecord, Transport } from "./types";
 import type { ToastKind } from "./components/ui";
@@ -587,6 +587,12 @@ export default function App() {
       const parsedArgs = parseToolArgs(call.arguments);
       if (!parsedArgs.ok) return { ...base, error: parsedArgs.error };
       const args = parsedArgs.args;
+      // 探索模式第二道门（第一道在 tools()：发给模型的定义里已经没有写/跑工具）：
+      // 模型就算硬调写与跑命令，执行层也到不了磁盘和子进程。名单制，不按权限推导，
+      // 将来新增的工具默认不认。
+      if (Boolean(stateRef.current.settings.exploreMode) && !isExploreTool(call.name)) {
+        return { ...base, error: `探索模式已拦截：只读的探索助手只能调 ${EXPLORE_TOOL_NAMES.join("、")}` };
+      }
       if (Boolean(stateRef.current.settings.planMode) && planModeBlocks(spec.access)) {
         return { ...base, error: "计划模式已拦截：本轮只出方案，不写文件、不跑命令" };
       }
@@ -724,7 +730,13 @@ export default function App() {
           transport,
           chat: chatStream,
           // 每轮重新判断：工具模式要求设置没关、且工程还在
-          tools: () => (s.toolCalls !== false && stateRef.current.settings.workspace ? TOOL_DEFS : undefined),
+          // 探索模式第一道门：发给模型的工具定义只剩只读三件套
+          tools: () =>
+            s.toolCalls !== false && stateRef.current.settings.workspace
+              ? stateRef.current.settings.exploreMode
+                ? exploreToolDefs()
+                : TOOL_DEFS
+              : undefined,
           signal: controller.signal,
           desktop: fsAvailable,
           currentWorkspace: () => stateRef.current.settings.workspace,

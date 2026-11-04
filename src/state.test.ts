@@ -83,6 +83,21 @@ describe("buildMessages", () => {
     expect(tool).toEqual({ role: "tool", content: "export const a = 1;", tool_call_id: "c1" });
   });
 
+  it("探索模式时工具提示词只剩只读三件套，工作区提示词也不再说自动落盘", () => {
+    const ws = { sessionId: "s1", root: "F:/proj", name: "proj", tree: "" };
+    const out = buildMessages(
+      conv([msg("user", "查一下")]),
+      settings({ contextTurns: 0, workspace: ws, exploreMode: true })
+    );
+    const sys = out
+      .filter((m) => m.role === "system")
+      .map((m) => m.content)
+      .join("\n");
+    expect(sys).toContain("探索模式");
+    expect(sys).not.toContain("edit_file");
+    expect(sys).not.toContain("自动写入磁盘");
+  });
+
   it("空助手占位不会挤掉真实的一轮上下文", () => {
     const c = conv([
       msg("user", "第一问"),

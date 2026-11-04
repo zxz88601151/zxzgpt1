@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   buildToolsPrompt,
+  exploreToolDefs,
   findTool,
+  isExploreTool,
   parseToolArgs,
   planModeBlocks,
   TOOL_DEFS,
@@ -59,7 +61,7 @@ describe("权限等级", () => {
     const blocked = TOOLS.filter((t) => planModeBlocks(t.access)).map((t) => t.name).sort();
     const risky = TOOLS.filter((t) => t.access === "write" || t.access === "exec").map((t) => t.name).sort();
     expect(blocked).toEqual(risky);
-    expect(blocked).toEqual(["run_command", "write_file"]);
+    expect(blocked).toEqual(["apply_patch", "edit_file", "run_command", "write_file"]);
     for (const t of TOOLS) {
       if (t.access === "read") expect(planModeBlocks(t.access)).toBe(false);
     }
@@ -67,8 +69,11 @@ describe("权限等级", () => {
 
   it("系统提示里的拦截清单与权限等级一致，不靠手写", () => {
     const prompt = buildToolsPrompt(true, false);
-    // 文案由 TOOLS 顺序派生，不手写工具名
-    expect(prompt).toContain("write_file 和 run_command 会被程序拦截");
+    // 文案由 TOOLS 顺序派生，不手写工具名：被拦的每个工具名都必须出现在文案里
+    for (const spec of TOOLS) {
+      if (planModeBlocks(spec.access)) expect(prompt).toContain(spec.name);
+    }
+    expect(prompt).toContain("会被程序拦截");
     // 只读工具必须仍然可用，否则模型在计划模式下什么都做不了
     expect(prompt).toContain("read_file、list_dir、search_files 仍可用");
     // 非计划模式不该出现拦截文案
@@ -108,6 +113,8 @@ describe("Schema 与参数校验不能互相矛盾", () => {
       list_dir: { path: "src" },
       search_files: { query: "abc", path: "src" },
       write_file: { path: "a.ts", content: "x" },
+      edit_file: { path: "a.ts", old_text: "x", new_text: "y" },
+      apply_patch: { path: "a.ts", hunks: [{ old_text: "x", new_text: "y" }] },
       run_command: { argv: ["npm", "install"] },
     };
     for (const spec of TOOLS) {
@@ -242,5 +249,128 @@ describe("parseToolArgs：合法 JSON ≠ 可用参数", () => {
     expect(syntax.ok).toBe(false);
     expect(type.ok).toBe(false);
     if (!syntax.ok && !type.ok) expect(syntax.error).not.toBe(type.error);
+  });
+});
+
+describe("补丁工具：edit_file / apply_patch", () => {
+  it("edit_file 参数校验：空 old_text、缺 new_text、越界路径都拒掉", () => {
+    expect(validateToolArgs("edit_file", { path: "a.ts", old_text: "", new_text: "y" })).not.toBeNull();
+    expect(validateToolArgs("edit_file", { path: "a.ts", old_text: "x" })).not.toBeNull();
+    expect(validateToolArgs("edit_file", { path: "../x", old_text: "x", new_text: "y" })).not.toBeNull();
+    expect(validateToolArgs("edit_file", { path: "a.ts", old_text: "x", new_text: "" })).toBeNull();
+  });
+
+  it("apply_patch 参数校验：hunks 不是数组、为空、超 50、单条缺字段都拒掉", () => {
+    expect(validateToolArgs("apply_patch", { path: "a.ts", hunks: "x" })).not.toBeNull();
+    expect(validateToolArgs("apply_patch", { path: "a.ts", hunks: [] })).not.toBeNull();
+    expect(
+      validateToolArgs("apply_patch", { path: "a.ts", hunks: Array.from({ length: 51 }, () => ({ old_text: "x", new_text: "y" })) })
+    ).not.toBeNull();
+    expect(validateToolArgs("apply_patch", { path: "a.ts", hunks: [{ old_text: "x" }] })).not.toBeNull();
+    expect(validateToolArgs("apply_patch", { path: "a.ts", hunks: [{ old_text: "", new_text: "y" }] })).not.toBeNull();
+  });
+
+  it("edit_file 成功时把算好的新内容交给写通道，不自己碰磁盘", async () => {
+    const spec = findTool("edit_file")!;
+    let written = "";
+    const out = await spec.run(
+      { path: "a.ts", old_text: "hello world", new_text: "hello zxz" },
+      fakeCtx({
+        readFile: async () => "hello world",
+        writeFile: async (_rel, content) => {
+          written = content;
+          return [{ ok: true, path: "a.ts", bytes: content.length, created: false, verified: true }];
+        },
+      })
+    );
+    expect(written).toBe("hello zxz");
+    expect(out.result).toContain("已补丁编辑 a.ts");
+  });
+
+  it("edit_file 命中失败时不调写通道，磁盘没有改动", async () => {
+    const spec = findTool("edit_file")!;
+    let called = false;
+    const out = await spec.run(
+      { path: "a.ts", old_text: "not there", new_text: "y" },
+      fakeCtx({
+        readFile: async () => "hello world",
+        writeFile: async () => {
+          called = true;
+          return [];
+        },
+      })
+    );
+    expect(out.error).toContain("没有命中");
+    expect(called).toBe(false);
+  });
+
+  it("edit_file 读不到文件时明说只改已存在文件，不谎报成功", async () => {
+    const spec = findTool("edit_file")!;
+    const out = await spec.run(
+      { path: "new.ts", old_text: "x", new_text: "y" },
+      fakeCtx({
+        readFile: async () => {
+          throw new Error("不存在");
+        },
+      })
+    );
+    expect(out.error).toContain("只改已存在的文件");
+  });
+
+  it("apply_patch 多 hunk 按顺序应用，第二处失败时整体不写", async () => {
+    const spec = findTool("apply_patch")!;
+    let written = "";
+    const ok = await spec.run(
+      { path: "a.ts", hunks: [{ old_text: "a=1", new_text: "a=10" }, { old_text: "b=2", new_text: "b=20" }] },
+      fakeCtx({
+        readFile: async () => "a=1\nb=2\n",
+        writeFile: async (_rel, content) => {
+          written = content;
+          return [{ ok: true, path: "a.ts", bytes: content.length, created: false, verified: true }];
+        },
+      })
+    );
+    expect(written).toBe("a=10\nb=20\n");
+    expect(ok.result).toContain("2 个 hunk");
+
+    let called = false;
+    const bad = await spec.run(
+      { path: "a.ts", hunks: [{ old_text: "a=1", new_text: "a=10" }, { old_text: "b=3", new_text: "b=30" }] },
+      fakeCtx({
+        readFile: async () => "a=1\nb=2\n",
+        writeFile: async () => {
+          called = true;
+          return [];
+        },
+      })
+    );
+    expect(bad.error).toContain("第 2 个 hunk");
+    expect(called).toBe(false);
+  });
+});
+
+describe("探索模式：名单制三件套", () => {
+  it("发给模型的定义只剩三件套，原 TOOL_DEFS 不改动", () => {
+    expect(exploreToolDefs().map((d) => d.function.name)).toEqual(["read_file", "list_dir", "search_files"]);
+    expect(TOOL_DEFS.map((d) => d.function.name)).toContain("write_file");
+  });
+
+  it("写与跑命令（包括新补丁工具）默认不认，未知工具也不认", () => {
+    for (const n of ["write_file", "edit_file", "apply_patch", "run_command", "glob", ""]) {
+      expect(isExploreTool(n), `${n} 不该在探索名单里`).toBe(false);
+    }
+    for (const n of ["read_file", "list_dir", "search_files"]) {
+      expect(isExploreTool(n)).toBe(true);
+    }
+  });
+
+  it("探索模式的提示词只讲只读工具，不提补丁与测试回路", () => {
+    const prompt = buildToolsPrompt(false, false, true);
+    expect(prompt).toContain("探索模式");
+    expect(prompt).toContain("read_file");
+    expect(prompt).not.toContain("edit_file");
+    expect(prompt).not.toContain("npm test");
+    // 非探索模式的提示词必须提到补丁工具，否则模型不知道有这条路
+    expect(buildToolsPrompt(false, false)).toContain("edit_file");
   });
 });

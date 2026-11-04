@@ -14,10 +14,16 @@
 - 前端只做展示与编排，不直接碰磁盘：本机读写统一走 Tauri IPC，校验在 Rust 侧 `src-tauri/src/fsx.rs`；受控命令同理走 `run_allowed` IPC，校验在 `src-tauri/src/runx.rs`（两模块都不依赖 tauri，fs-harness 可直接单测）。
 - `fsx.rs` 不依赖 tauri，这样 `tools/fs-harness` 可以在无窗口环境下单测路径校验与落盘。
 - 模型与程序的协议：工具调用优先，文本约定作回退。
-  - 工具调用开启时：`read_file / list_dir / search_files / write_file / run_command`
-    五个工具（定义在 `src/lib/tools.ts`，原生 `tool_calls` 协议，下一轮展开成
-    assistant tool_calls + tool 消息）；`file:` / `@@read:` 只作不支持工具的
-    兼容端回退，不要在工具可用时混用两套协议。
+  - 工具调用开启时：`read_file / list_dir / search_files / write_file / edit_file /
+    apply_patch / run_command` 七个工具（定义在 `src/lib/registry.ts` 的 `TOOLS`，
+    原生 `tool_calls` 协议，下一轮展开成 assistant tool_calls + tool 消息）；
+    `file:` / `@@read:` 只作不支持工具的兼容端回退，不要在工具可用时混用两套协议。
+  - 补丁工具只改已存在的文件：`edit_file` 单处精确替换、`apply_patch` 多 hunk，
+    old_text 必须逐字命中且恰好一次，不做模糊匹配；落盘复用 write_file 的
+    备份/确认/回读校验。
+  - 探索模式（`exploreMode`）：只读三件套 `read_file / list_dir / search_files`
+    是硬编码名单，将来新增工具默认不认；发工具定义与执行层两道门拦截写与跑命令，
+    `file:` 块也不落盘。
   - 文本回退：`` ```file:相对路径 `` → 程序写入磁盘（整文件覆盖）；
   - 单独一行 `@@read: 相对路径` → 程序回传真实文件内容，继续下一轮；
   - 普通代码块只展示，永远不落盘。

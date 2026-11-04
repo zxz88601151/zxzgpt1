@@ -467,4 +467,33 @@ describe("一整轮的边界", () => {
     expect(toolMsg?.content || "", "执行结果要回填给模型").toContain("12 passed");
     expect(container.textContent || "").toContain("命令跑完了");
   });
+
+  it("探索模式：发给模型的定义只剩只读三件套，硬调补丁工具被执行层拦截、磁盘零改动", async () => {
+    installTauri();
+    seed({ exploreMode: true, workspace: { sessionId: "s1", root: "F:/proj", name: "proj", tree: "a.txt" } });
+    stubFetch(
+      () => toolCallSse("call_1", "edit_file", { path: "a.txt", old_text: "answer = 42", new_text: "answer = 43" }),
+      () => sseResponse('data: {"choices":[{"delta":{"content":"已查到，改动方案如下"}}]}', "data: [DONE]"),
+    );
+
+    await mount();
+    await settle(1);
+    await typeAndSend("改一下 a.txt");
+    await settle(12);
+
+    const calls = fetchCalls();
+    expect(calls.length, "第一轮工具调用 + 第二轮收尾，恰好两次请求").toBe(2);
+
+    // 第一道门：发给模型的工具定义里已经没有写/跑工具
+    expect((bodyOf(calls[0]).tools || []).map((t) => t.function.name)).toEqual(["read_file", "list_dir", "search_files"]);
+
+    // 第二道门：模型硬调 edit_file，执行层拦下并把拦截原因回填给模型
+    const toolMsgs = bodyOf(calls[1]).messages.filter((m) => m.role === "tool");
+    expect(toolMsgs.length, "每次工具调用对应一条 tool 消息").toBe(1);
+    expect(toolMsgs[0].content, "回填的是拦截原因，不是改动结果").toContain("探索模式已拦截");
+
+    // 磁盘零改动：拦截发生在写通道之前，fs_write 一次都没被调到
+    expect(ipcCalls("fs_write")).toHaveLength(0);
+    expect(files.get("a.txt")).toBe("export const answer = 42;\n");
+  });
 });

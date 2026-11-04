@@ -83,7 +83,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // 写完自动跑测试默认关：npm test 会执行工程 package.json 里写死的脚本，
   // 而这文件可能是模型刚写的，默认开等于默认允许自动执行未经人审的命令。
   autoTest: false,
-  // 探索模式默认关；C1 只提供 /explore 开关与抽屉同源存取，只读拦截（A2）未实施前此开关无行为效果。
+  // 探索模式默认关；A2 已实施：开后模型只能调只读三件套，写/跑命令在发工具定义
+  // 与执行层两道门拦截，file: 块也不落盘；查完要改请先关掉它。
   exploreMode: false,
 };
 

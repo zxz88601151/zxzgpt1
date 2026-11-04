@@ -18,6 +18,7 @@
  */
 
 import { relPathError, shouldSkipDir } from "./files";
+import { applyEdit, applyHunks } from "./patch";
 import {
   checkNpmCommandScript,
   isAllowedCommand,
@@ -241,6 +242,127 @@ const writeFile: ToolSpec = {
   },
 };
 
+/**
+ * 补丁类工具共用的落盘收尾：算出来的新内容走 ctx.writeFile，也就是
+ * write_file 那条路——备份、写入前确认、回读校验全部复用，不另起写路径。
+ * 返回值文案与 write_file 同款式，只是动词换成补丁，避免模型把两种结果混读。
+ */
+async function finishPatch(
+  verb: string,
+  ctx: ToolContext,
+  rel: string,
+  content: string
+): Promise<ToolRunResult> {
+  const results = await ctx.writeFile(rel, content);
+  if (!results.length) return { error: "用户放弃写入，磁盘没有改动" };
+  const r = results[0];
+  if (!r.ok) return { error: r.error || "写入失败" };
+  return {
+    result: `${verb} ${r.path}（${r.bytes ?? 0} bytes，${r.created ? "新建" : "覆盖"}，回读校验 ${
+      r.verified ? "通过" : "不一致"
+    }${r.backup ? `，旧版备份在 ${r.backup}` : ""}）`,
+  };
+}
+
+const editFile: ToolSpec = {
+  name: "edit_file",
+  access: "write",
+  summary: "单处精确替换",
+  description:
+    "只改文件里的一处：old_text 必须与原文逐字一致且恰好出现一次，命中 0 次或多次都会被程序拒绝，不做模糊匹配。改小处优先用它，不要为改几行就整文件重写。计划模式下此工具会被拦截，写入前确认开启时需要用户在面板里批复。",
+  parameters: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "工程内相对路径" },
+      old_text: { type: "string", description: "要替换的原文片段，必须逐字一致且只出现一次" },
+      new_text: { type: "string", description: "替换后的新片段，可以为空串表示删除" },
+    },
+    required: ["path", "old_text", "new_text"],
+    additionalProperties: false,
+  },
+  validate: (args) => {
+    if (typeof args.path !== "string") return "edit_file 需要 path";
+    const bad = relPathError(args.path);
+    if (bad) return bad;
+    if (typeof args.old_text !== "string" || !args.old_text) return "edit_file 需要非空 old_text";
+    if (typeof args.new_text !== "string") return "edit_file 需要 new_text（可以为空串表示删除）";
+    return null;
+  },
+  run: async (args, ctx) => {
+    const rel = asRel(args.path);
+    let current: string;
+    try {
+      current = await ctx.readFile(rel);
+    } catch (e) {
+      return { error: `读不到 ${rel}：${(e as Error).message}（补丁工具只改已存在的文件，新建请用 write_file）` };
+    }
+    const patched = applyEdit(current, args.old_text as string, args.new_text as string);
+    if (!patched.ok) return { error: patched.error };
+    return finishPatch("已补丁编辑", ctx, rel, patched.content);
+  },
+};
+
+const applyPatch: ToolSpec = {
+  name: "apply_patch",
+  access: "write",
+  summary: "多处补丁",
+  description:
+    "一次改文件里的多处：hunks 按顺序作用在前一个的结果上，每处 old_text 都必须逐字一致且在当时恰好出现一次，任一处失败就整体不写，不留改了一半的文件。计划模式下此工具会被拦截，写入前确认开启时需要用户在面板里批复。",
+  parameters: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "工程内相对路径" },
+      hunks: {
+        type: "array",
+        description: "按顺序应用的替换对",
+        items: {
+          type: "object",
+          properties: {
+            old_text: { type: "string", description: "要替换的原文片段，必须逐字一致且只出现一次" },
+            new_text: { type: "string", description: "替换后的新片段，可以为空串表示删除" },
+          },
+          required: ["old_text", "new_text"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["path", "hunks"],
+    additionalProperties: false,
+  },
+  validate: (args) => {
+    if (typeof args.path !== "string") return "apply_patch 需要 path";
+    const bad = relPathError(args.path);
+    if (bad) return bad;
+    if (!Array.isArray(args.hunks)) return "apply_patch 需要 hunks 数组";
+    if (!args.hunks.length) return "apply_patch 的 hunks 不能为空";
+    if (args.hunks.length > 50) return "apply_patch 的 hunks 太多（上限 50 个），请拆成多次调用";
+    for (let i = 0; i < args.hunks.length; i++) {
+      const h = args.hunks[i] as Record<string, unknown> | null;
+      if (!h || typeof h !== "object" || Array.isArray(h)) return `apply_patch 第 ${i + 1} 个 hunk 必须是对象`;
+      if (typeof h.old_text !== "string" || !h.old_text) return `apply_patch 第 ${i + 1} 个 hunk 需要非空 old_text`;
+      if (typeof h.new_text !== "string") return `apply_patch 第 ${i + 1} 个 hunk 需要 new_text（可以为空串表示删除）`;
+    }
+    return null;
+  },
+  run: async (args, ctx) => {
+    const rel = asRel(args.path);
+    let current: string;
+    try {
+      current = await ctx.readFile(rel);
+    } catch (e) {
+      return { error: `读不到 ${rel}：${(e as Error).message}（补丁工具只改已存在的文件，新建请用 write_file）` };
+    }
+    const patched = applyHunks(
+      current,
+      (args.hunks as { old_text: string; new_text: string }[]).map((h) => ({ old_text: h.old_text, new_text: h.new_text }))
+    );
+    if (!patched.ok) return { error: patched.error };
+    const out = await finishPatch("已应用补丁", ctx, rel, patched.content);
+    if (out.result) out.result += `（${(args.hunks as unknown[]).length} 个 hunk）`;
+    return out;
+  },
+};
+
 const runCommand: ToolSpec = {
   name: "run_command",
   access: "exec",
@@ -289,7 +411,7 @@ const runCommand: ToolSpec = {
 };
 
 /** 唯一权威清单。加工具只改这里，其余（Schema / 校验 / 提示 / 分发 / 权限）自动跟上。 */
-export const TOOLS: readonly ToolSpec[] = [readFile, listDir, searchFiles, writeFile, runCommand];
+export const TOOLS: readonly ToolSpec[] = [readFile, listDir, searchFiles, writeFile, editFile, applyPatch, runCommand];
 
 const BY_NAME = new Map<string, ToolSpec>(TOOLS.map((t) => [t.name, t]));
 
@@ -339,12 +461,42 @@ export function parseToolArgs(
   return { ok: true, args: parsed as Record<string, unknown> };
 }
 
+/**
+ * 探索模式的工具名单：硬编码的三件套，不是“所有只读工具”。
+ *
+ * 故意不用 access === "read" 推导：将来新增一个只读工具时，它在探索模式下
+ * 默认应该是“不认”，等有人明确把它放进这张名单才放行。名单制是 fail-closed，
+ * 推导制是 fail-open，探索模式的锁门意义就在这一个字上。
+ */
+export const EXPLORE_TOOL_NAMES: readonly ToolName[] = ["read_file", "list_dir", "search_files"];
+
+/** 这个工具在探索模式下能不能用：只认名单，别的（包括未来新增的）默认不认。 */
+export function isExploreTool(name: string): boolean {
+  return (EXPLORE_TOOL_NAMES as readonly string[]).includes(name);
+}
+
+/** 发给模型的工具定义在探索模式下只剩三件套，原 TOOL_DEFS 不改动。 */
+export function exploreToolDefs(): ToolDefinition[] {
+  return TOOL_DEFS.filter((d) => isExploreTool(d.function.name));
+}
+
 /** 给模型看的工具说明：放在工作区提示词之后、计划提示词之前 */
-export function buildToolsPrompt(planMode: boolean, confirmWrites: boolean): string {
+export function buildToolsPrompt(planMode: boolean, confirmWrites: boolean, exploreMode = false): string {
+  if (exploreMode) {
+    const read = TOOLS.filter((t) => isExploreTool(t.name));
+    return [
+      "",
+      "探索模式：你是只读的探索助手，只查工程、不改工程。",
+      `工具：${read.map((t) => `${t.name}（${t.summary}）`).join("、")}。`,
+      "不要调用写文件、跑命令类工具，程序会在发工具定义与执行层两道门直接拦截它们；查完要改什么只能以文字方案输出，等用户关掉探索模式、走正常确认流程后再动手。",
+      "回答要带文件路径和行号依据，找不到就明说找不到，不要凭空编一个文件或函数出来。",
+    ].join("\n");
+  }
   const lines = [
     "",
     "优先用工具，不要再用 ```file: 代码块和 @@read: 行写文件、读文件——工具调用才是本轮的正式通道，旧的文本协议只作不支持工具的兼容端回退。",
     `工具：${TOOLS.map((t) => `${t.name}（${t.summary}）`).join("、")}。`,
+    "改小处优先用 edit_file（单处精确替换）或 apply_patch（多处 hunk），不要为改几行就整文件重写；old_text 必须与原文逐字一致，命中 0 次或多次都会被程序拒绝，不要猜原文、不要模糊匹配。",
     "run_command 只允许：npm test、npm run build、npm run lint、npx vitest run、git status、git diff、git diff --stat、以及 --version 类查询；安装、发布、推送、删除、改写历史一律会被程序拒绝，不要尝试。npm/npx 还会审计 package.json 里对应脚本的内容，不是受信任运行器（vitest / jest / mocha / node --test / tsc / vite / eslint）会被拒。",
     "写完文件后程序会自动跑一次 npm test，把结果回传给你；测试失败时先看报错、改代码、再等下一轮测试，不要在测试还没通过时宣称完成；3 轮测试不过程序会停下并报给人。",
   ];
@@ -352,6 +504,7 @@ export function buildToolsPrompt(planMode: boolean, confirmWrites: boolean): str
     const names = TOOLS.filter((t) => planModeBlocks(t.access)).map((t) => t.name);
     lines.push(`计划模式：本轮只出方案，${names.join(" 和 ")} 会被程序拦截，不要调用它们；read_file、list_dir、search_files 仍可用。`);
   }
-  if (confirmWrites) lines.push("写入前确认已开启：write_file 会先弹差异面板，等用户批复后才真正落盘，批复前不要把写入当成已完成。");
+  if (confirmWrites)
+    lines.push("写入前确认已开启：write_file、edit_file、apply_patch 会先弹差异面板，等用户批复后才真正落盘，批复前不要把写入当成已完成。");
   return lines.join("\n");
 }

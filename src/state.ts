@@ -68,11 +68,15 @@ export function buildMessages(conv: Conversation, settings: Settings, skillPromp
         toolMode: settings.toolCalls !== false,
         confirmWrites: Boolean(settings.confirmWrites),
         planMode: Boolean(settings.planMode),
+        exploreMode: Boolean(settings.exploreMode),
       }),
     });
     // 工具说明：只在工具调用开启时发，放在工作区提示词之后、计划提示词之前
     if (settings.toolCalls !== false) {
-      out.push({ role: "system", content: buildToolsPrompt(Boolean(settings.planMode), Boolean(settings.confirmWrites)) });
+      out.push({
+        role: "system",
+        content: buildToolsPrompt(Boolean(settings.planMode), Boolean(settings.confirmWrites), Boolean(settings.exploreMode)),
+      });
     }
     // 项目记忆：工程自己的 CLAUDE.md / AGENTS.md，比通用技能更具体
     const memory = ws.memory && ws.memorySource ? buildProjectMemoryPrompt(ws.memorySource, ws.memory) : "";
