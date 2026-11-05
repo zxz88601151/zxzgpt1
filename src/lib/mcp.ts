@@ -234,15 +234,18 @@ export function buildMcpSpecs(
 
 /**
  * 发给模型的函数声明。描述里固定带一句边界说明：
- * MCP 工具走服务器自己的沙箱，不受本程序受控执行白名单约束——
+ * MCP 工具默认需要用户逐次确认（Ask），由 Rust 侧授权闸门记账——
  * 模型与人都应该在调之前就看到这句话，而不是在出事之后才知道。
+ *
+ * 旧文案写着「不受本程序受控执行白名单约束」，那是在自承存在权限旁路；
+ * ADR 0004 把 MCP 纳入统一策略视图后，这句话已经不成立，必须改掉。
  */
 export function mcpToolDef(spec: McpToolSpec): ToolDefinition {
   return {
     type: "function",
     function: {
       name: spec.name,
-      description: `${spec.description || spec.tool}（MCP 插件工具，来自 ${spec.server} 服务器：走服务器自己的沙箱执行，不受本程序受控执行白名单约束；计划模式与探索模式下不可用）`,
+      description: `${spec.description || spec.tool}（MCP 插件工具，来自 ${spec.server} 服务器：默认需要用户逐次确认（Ask），由 Rust 侧授权闸门记账；计划模式与探索模式下不可用）`,
       parameters: spec.parameters,
     },
   };
@@ -300,13 +303,60 @@ export function validateMcpToolArgs(spec: McpToolSpec, args: Record<string, unkn
 
 /* ------------------------------------------------------------ 调用分发 */
 
+/** 审批选择。与 `components/ConfirmExec.tsx` 的 ExecChoice 同形，避免反向依赖 UI。 */
+export type McpApprovalChoice = "once" | "session" | "deny";
+
+export interface McpApprovalRequest {
+  server: string;
+  tool: string;
+  label: string;
+  scope: string[];
+}
+
 /**
- * 执行一次 MCP 工具调用（App.tsx 的 executeTool 里，内置工具查不到时走这里）。
+ * 从 Rust 闸门错误里还原 `need_grant`。Rust 用 JSON 字符串回传（与 exec 同款），
+ * 前端也可能已经把它转成带 `name/scope/label` 的 Error；两种形态都认。
+ */
+export function parseMcpGrantRequired(e: unknown): { scope: string[]; label: string } | null {
+  if (e && typeof e === "object") {
+    const x = e as { name?: unknown; scope?: unknown; label?: unknown };
+    if (x.name === "ExecGrantRequired") {
+      return {
+        scope: Array.isArray(x.scope) ? x.scope.map(String) : [],
+        label: typeof x.label === "string" ? x.label : "",
+      };
+    }
+  }
+  const text = typeof e === "string" ? e : e instanceof Error ? e.message : "";
+  if (!text.trim().startsWith("{")) return null;
+  try {
+    const j = JSON.parse(text) as { kind?: unknown; scope?: unknown; label?: unknown };
+    if (j.kind !== "need_grant") return null;
+    return {
+      scope: Array.isArray(j.scope) ? j.scope.map(String) : [],
+      label: typeof j.label === "string" ? j.label : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function mcpErrorMessage(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  return String(e ?? "未知错误");
+}
+
+/**
+ * 执行一次 MCP 工具调用（App.tsx 的 `executeTool` 在统一策略视图判定为 mcp 后走这里）。
  *
- * 只做四件事：查动态清单（精确匹配）→ 按权限等级拦 → 校验参数 → 交给
- * 注入的 call（Rust 命令）。计划/探索拦截与内置 exec 工具同一口径，
- * 所以 MCP 工具不会因为「不在内置注册表里」就绕过拦截。
- * 本函数自己不抛异常：失败都以 `{ error }` 回去，调用方直接当工具结果记。
+ * ADR 0004：查动态清单（精确匹配）→ 计划/探索拦截 → 校验参数 → **默认 Ask**。
+ * 授权链与 `run_command` 同构：先调 Rust，未授权时 `guard_mcp` 回 `need_grant`，
+ * 前端问用户 → `perm_grant` 记账 → 重试。Rust 侧是权威，前端弹框只是体验；
+ * 会话级授权批准过之后首次调用直接放行，不会反复骚扰。
+ *
+ * **fail-closed**：审批通道缺失、用户拒绝、重试超限、记账失败，都不允许调到
+ * tools/call。本函数自己不抛异常：失败一律以 `{ error }` 回去。
  */
 export async function executeMcpToolCall(opts: {
   name: string;
@@ -314,6 +364,12 @@ export async function executeMcpToolCall(opts: {
   specs: McpToolSpec[];
   planMode: boolean;
   exploreMode: boolean;
+  /** Rust 侧授权 scope，由调用方按 `mcpScope(server, tool)` 生成 */
+  scope: string[];
+  /** 问用户。App 注入 askExec */
+  ask: (req: McpApprovalRequest) => Promise<McpApprovalChoice>;
+  /** 记账。App 注入 permGrant，写进 Rust 侧同一张授权表 */
+  grant: (scope: string[], uses: number | null, label: string) => Promise<void>;
   call: (server: string, tool: string, args: Record<string, unknown>) => Promise<string>;
 }): Promise<ToolRunResult> {
   const spec = opts.specs.find((s) => s.name === opts.name);
@@ -324,11 +380,30 @@ export async function executeMcpToolCall(opts: {
   }
   const bad = validateMcpToolArgs(spec, opts.args);
   if (bad) return { error: bad };
-  try {
-    const text = await opts.call(spec.server, spec.tool, opts.args);
-    return { result: truncateToolOutput(text) };
-  } catch (e) {
-    return { error: (e as Error).message };
+  if (typeof opts.ask !== "function" || typeof opts.grant !== "function") {
+    return { error: "MCP 工具需要用户授权，但审批通道不可用，已拒绝调用" };
+  }
+
+  const defaultLabel = `MCP ${spec.server}/${spec.tool}`;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const text = await opts.call(spec.server, spec.tool, opts.args);
+      return { result: truncateToolOutput(text) };
+    } catch (e) {
+      const need = parseMcpGrantRequired(e);
+      if (!need) return { error: mcpErrorMessage(e) };
+      if (attempt >= 2) return { error: "多次授权后仍无法执行 MCP 工具，已停止重试" };
+      const label = need.label || defaultLabel;
+      const scope = need.scope.length ? need.scope : opts.scope;
+      const choice = await opts.ask({ server: spec.server, tool: spec.tool, label, scope });
+      if (choice === "deny") return { error: "用户拒绝了这次 MCP 工具调用" };
+      try {
+        await opts.grant(scope, choice === "once" ? 1 : null, label);
+      } catch (grantErr) {
+        return { error: `MCP 授权记账失败：${mcpErrorMessage(grantErr)}` };
+      }
+      // 授权已记进 Rust 侧，下一轮 call 会过闸门；最多 3 轮防死循环
+    }
   }
 }
 
@@ -380,8 +455,15 @@ export async function mcpListTools(name: string): Promise<McpTool[]> {
 }
 
 /** 调一次工具（tools/call，60 秒超时；超时后 Rust 侧会杀掉该服务器）。 */
-export async function mcpCallTool(server: string, tool: string, args: Record<string, unknown>): Promise<string> {
-  return call<string>("mcp_call_tool", { name: server, tool, arguments: args });
+export async function mcpCallTool(
+  server: string,
+  tool: string,
+  args: Record<string, unknown>,
+  sessionId: string,
+): Promise<string> {
+  // sessionId 是 Rust 侧 guard_mcp 授权闸门的入口（ADR 0004），不能省：
+  // 少了它，MCP 调用就退回到「前端自己说了算」的老路。
+  return call<string>("mcp_call_tool", { name: server, tool, arguments: args, sessionId });
 }
 
 /** 所有服务器的运行状态（含已挂的，带失败原因）。 */

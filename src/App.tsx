@@ -58,6 +58,7 @@ import {
   type ReadOutcome,
 } from "./lib/files";
 import { EXPLORE_TOOL_NAMES, exploreToolDefs, findTool, isExploreTool, parseToolArgs, planModeBlocks, TOOL_DEFS, type ToolContext } from "./lib/registry";
+import { mcpScope, resolveToolPolicy } from "./lib/toolpolicy";
 import {
   executeMcpToolCall,
   loadMcpServers,
@@ -688,16 +689,28 @@ export default function App() {
       const args = parsedArgs.args;
       const spec = findTool(call.name);
       if (!spec) {
-        // MCP 插件工具：只认「已加载的动态清单」，精确匹配，不做归一化。
-        // 计划/探索拦截与参数校验都在 executeMcpToolCall 里，与内置 exec
-        // 工具同一口径——不在内置注册表里，不等于绕过拦截。
+        // 统一策略视图（ADR 0004）：内置 / MCP 动态 / 未知三类走同一个入口解析，
+        // 动态工具不再有「不在注册表里就绕过权限模型」的第二条旁路。
+        // 精确匹配，不做归一化；查不到就是未知工具。
+        const policy = resolveToolPolicy(call.name, mcpSpecsRef.current);
+        if (policy.source !== "mcp" || !policy.server || !policy.tool) {
+          return { ...base, error: `未知工具：${call.name}` };
+        }
         const out = await executeMcpToolCall({
           name: call.name,
           args,
           specs: mcpSpecsRef.current,
           planMode: Boolean(stateRef.current.settings.planMode),
           exploreMode: Boolean(stateRef.current.settings.exploreMode),
-          call: (server, tool, a) => mcpCallTool(server, tool, a),
+          scope: mcpScope(policy.server, policy.tool),
+          // 默认 Ask：Rust 侧 guard_mcp 未授权 → need_grant → 问用户 →
+          // permGrant 记账 → 重试；会话级授权批过之后首次调用直接放行。
+          call: (server, tool, a) => mcpCallTool(server, tool, a, ws.sessionId),
+          ask: (req) => askExec(req.label),
+          grant: async (scope, uses, grantLabel) => {
+            await permGrant(ws.sessionId, scope, uses, grantLabel);
+            void refreshGrants();
+          },
         });
         return { ...base, ...(out.error ? { error: out.error } : { result: out.result ?? "" }) };
       }
@@ -722,7 +735,7 @@ export default function App() {
         return { ...base, error: (e as Error).message };
       }
     },
-    [ctxRef]
+    [ctxRef, askExec, refreshGrants]
   );
   executeToolRef.current = executeTool;
 

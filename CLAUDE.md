@@ -75,16 +75,19 @@
   `tauri dev`/打包运行时注入，headless 测不到——改了 CSP 必须在真机 DevTools 看有无 CSP 报错再算完成。
 - 扫描技能时只给行号与语境（代码块 / 劝阻 / 正文），不给危险分：同一条命令写在
   拦截规则表里是防护，写在卸载脚本里才是风险。
-- **执行授权闸门并不覆盖 MCP 工具**（2026-11-05 审计发现，D-18）：`executeMcpToolCall`
-  只拦计划/探索模式，不经过 `perms::decide`、不弹授权、无默认 `Ask`；工具描述本身写着
-  「不受本程序受控执行白名单约束」。缺省 `context-mode` 为 `enabled: false`，且其 `ctx_execute`
-  可执行任意代码。**在权限收敛落地前，不要在任何文档或结论里写「所有执行都要批准」。**
-  好消息：`mcp.json` 在 `app.path().app_config_dir()`（工程根之外），`fsx` 会话边界使模型
-  `write_file` 改不到它，`save_config` 另有裸命令/shell 元字符/凭据键校验——不存在
-  「模型改配置 → 自动拉起任意命令」这条链。
-- **子代理不响应主「停止」**（D-17）：`App.tsx` 给 `runSubagent` 传的是独立的
-  `new AbortController().signal`，`stop()` 只 abort 主 controller。动停止链路、并行调度或
-  子代理时必须一并修，别只改一半。
+- **MCP 工具已纳入统一权限视图并默认 `Ask`**（2026-11-06，ADR 0004 / D-18 已修）：
+  `lib/toolpolicy.ts` 把内置 / MCP 动态 / 未知三类解析成同一张策略表，动态工具是
+  `access: exec` / `approval: ask` / `cost: expensive`；`mcp_call_tool` IPC 必带
+  `session_id`，Rust 侧 `perms::guard_mcp` 是权威闸门，未授权回 `need_grant` →
+  复用 `askExec` 弹框 → `perm_grant` 记账 → 重试，scope = `["mcp", server, tool]`。
+  **审批通道缺失时 `executeMcpToolCall` 必须 fail-closed 直接拒绝**，改这条链路别把这个
+  性质弄丢。缺省 `context-mode` 仍为 `enabled: false`；`mcp.json` 在应用配置目录
+  （工程根之外）且有校验，「模型改配置 → 自动拉起任意命令」这条链本来就不成立。
+- **子代理复用主链路取消信号**（D-17 已修）：`App.tsx` 把本轮 `controller.signal`
+  存进 `mainSignalRef` 交给 `runSubagent`；`runRounds` 每轮前检查 `signal.aborted`，
+  `runSubagent` 每轮请求前再查一次、停止后不返回残缺摘要。动停止链路或并行调度时
+  别把这两个检查拆掉。**`runToolBatch` 的任何异常都必须补成 `error` 记录，
+  `records` 不许留空洞**（D-20 已修）。
 - 预览窗口 `open_preview` 接受任意 http(s) 或任意**存在的本地文件**（不限工程根、不限扩展名），
   用 `WebviewUrl::External` 新开 WebView。External URL 的 CSP 是否生效**没有真机证据**，
   改预览或 CSP 前先按上面那条要求做宿主 DevTools 验证（D-23）。

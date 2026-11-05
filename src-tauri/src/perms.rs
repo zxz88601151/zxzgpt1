@@ -95,6 +95,30 @@ pub fn scope_of(argv: &[String]) -> Vec<String> {
     }
 }
 
+/// 查表并消耗一次授权。exec 与 MCP 共用同一张表、同一套消耗语义：
+/// 一次性授权用完即清、会话级授权不限次、不同 scope 绝不外溢。
+fn consume_scope(session_id: &str, scope: &[String]) -> bool {
+    let mut map = lock();
+    let mut allowed = false;
+    if let Some(list) = map.get_mut(session_id) {
+        if let Some(g) = list
+            .iter_mut()
+            .find(|g| g.scope.as_slice() == scope && g.uses_left != Some(0))
+        {
+            if let Some(n) = g.uses_left {
+                g.uses_left = Some(n.saturating_sub(1));
+            }
+            allowed = true;
+        }
+        // 用完的一次性授权立刻清掉，别留在表里做"看起来还有"的假象
+        list.retain(|g| g.uses_left != Some(0));
+        if list.is_empty() {
+            map.remove(session_id);
+        }
+    }
+    allowed
+}
+
 /// 判定一次执行请求。
 ///
 /// 顺序很重要：先过白名单，再看授权。白名单不过的命令**直接 Deny**，
@@ -108,25 +132,52 @@ pub fn decide(session_id: &str, argv: &[String]) -> Decision {
     if scope.is_empty() {
         return Decision::Deny { reason: "命令为空".into() };
     }
-    let mut map = lock();
-    let mut allowed = false;
-    if let Some(list) = map.get_mut(session_id) {
-        if let Some(g) = list.iter_mut().find(|g| g.scope == scope && g.uses_left != Some(0)) {
-            if let Some(n) = g.uses_left {
-                g.uses_left = Some(n.saturating_sub(1));
-            }
-            allowed = true;
-        }
-        // 用完的一次性授权立刻清掉，别留在表里做"看起来还有"的假象
-        list.retain(|g| g.uses_left != Some(0));
-        if list.is_empty() {
-            map.remove(session_id);
-        }
-    }
-    if allowed {
+    if consume_scope(session_id, &scope) {
         return Decision::Allow;
     }
     Decision::Ask { label: scope.join(" "), scope }
+}
+
+// ---------------------------------------------------------------------------
+// MCP 工具授权（ADR 0004）
+//
+// MCP 不走 `runx::is_allowed`（那是命令白名单，工具名不是命令），但**共用**
+// `perms` 授权表与 `grant` IPC：scope = ["mcp", server, tool]，与前端
+// `src/lib/toolpolicy.ts::mcpScope` 逐字镜像。判定仍在 IPC 后面的 Rust 侧，
+// 前端弹框只是体验；任何能执行 JS 的路径都跳不过这道闸门。
+// ---------------------------------------------------------------------------
+
+pub fn mcp_scope(server: &str, tool: &str) -> Vec<String> {
+    vec!["mcp".into(), server.to_ascii_lowercase(), tool.to_ascii_lowercase()]
+}
+
+fn valid_mcp_name(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 128 && !s.chars().any(|c| c.is_control())
+}
+
+/// 判定一次 MCP 工具调用。名字非法直接 Deny（不给弹框机会），
+/// 其余情况新会话必 Ask，授权只解锁自己的 scope。
+pub fn decide_mcp(session_id: &str, server: &str, tool: &str) -> Decision {
+    if !valid_mcp_name(server) || !valid_mcp_name(tool) {
+        return Decision::Deny { reason: "MCP 服务器名或工具名非法".into() };
+    }
+    let scope = mcp_scope(server, tool);
+    if consume_scope(session_id, &scope) {
+        return Decision::Allow;
+    }
+    Decision::Ask {
+        label: format!("MCP {server}/{tool}"),
+        scope,
+    }
+}
+
+/// MCP 调用的唯一闸门：`mcp_call_tool` IPC 在任何 tools/call 之前必须先过它。
+pub fn guard_mcp(session_id: &str, server: &str, tool: &str) -> Result<(), GateDenied> {
+    match decide_mcp(session_id, server, tool) {
+        Decision::Allow => Ok(()),
+        Decision::Ask { scope, label } => Err(GateDenied::NeedGrant { scope, label }),
+        Decision::Deny { reason } => Err(GateDenied::Refused { reason }),
+    }
 }
 
 /// 记一条授权。`uses` 为 `Some(n)` 表示还能用 n 次，`None` 表示本会话内不限次。
@@ -371,5 +422,96 @@ mod tests {
         assert_eq!(scope_of(&argv(&["git", "diff", "--stat"])), vec!["git", "diff"]);
         assert_eq!(scope_of(&argv(&["node", "--version"])), vec!["node", "--version"]);
         assert!(scope_of(&[]).is_empty());
+    }
+
+    // ---- ADR 0004：MCP 工具授权闸门（与 exec 共用同一张授权表） ----
+
+    #[test]
+    fn mcp_fresh_session_must_ask() {
+        let s = sid("mcp-fresh");
+        assert!(matches!(
+            decide_mcp(&s, "context-mode", "ctx_execute"),
+            Decision::Ask { .. }
+        ));
+        assert!(matches!(
+            guard_mcp(&s, "context-mode", "ctx_execute"),
+            Err(GateDenied::NeedGrant { .. })
+        ));
+        for _ in 0..3 {
+            assert!(matches!(
+                decide_mcp(&s, "context-mode", "ctx_execute"),
+                Decision::Ask { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn mcp_grant_unlocks_only_its_own_scope() {
+        let s = sid("mcp-scope");
+        grant(
+            &s,
+            &mcp_scope("context-mode", "ctx_execute"),
+            None,
+            "MCP context-mode/ctx_execute".into(),
+        );
+        assert_eq!(decide_mcp(&s, "context-mode", "ctx_execute"), Decision::Allow);
+        assert!(matches!(
+            decide_mcp(&s, "context-mode", "ctx_search"),
+            Decision::Ask { .. }
+        ));
+        assert!(matches!(
+            decide_mcp(&s, "other", "ctx_execute"),
+            Decision::Ask { .. }
+        ));
+        assert!(matches!(
+            decide(&s, &argv(&["npm", "test"])),
+            Decision::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn mcp_one_shot_grant_is_consumed() {
+        let s = sid("mcp-oneshot");
+        grant(&s, &mcp_scope("a", "x"), Some(1), "MCP a/x".into());
+        assert_eq!(decide_mcp(&s, "a", "x"), Decision::Allow);
+        assert!(matches!(decide_mcp(&s, "a", "x"), Decision::Ask { .. }));
+    }
+
+    #[test]
+    fn mcp_invalid_names_are_denied_not_asked() {
+        let s = sid("mcp-invalid");
+        for (server, tool) in [("", "x"), ("a", ""), ("a\nb", "x"), ("a", "x\ty")] {
+            match decide_mcp(&s, server, tool) {
+                Decision::Deny { reason } => assert!(reason.contains("非法"), "{reason}"),
+                other => panic!("必须是 Deny，实际 {other:?}"),
+            }
+        }
+        assert!(matches!(
+            guard_mcp(&s, "", "x"),
+            Err(GateDenied::Refused { .. })
+        ));
+    }
+
+    #[test]
+    fn mcp_scope_is_normalized() {
+        assert_eq!(
+            mcp_scope("Context-Mode", "CTX_EXECUTE"),
+            vec!["mcp", "context-mode", "ctx_execute"]
+        );
+        assert_ne!(mcp_scope("a", "x"), mcp_scope("b", "x"));
+        assert_ne!(mcp_scope("a", "x"), mcp_scope("a", "y"));
+    }
+
+    #[test]
+    fn mcp_grant_does_not_unlock_exec_and_vice_versa() {
+        let s = sid("mcp-no-cross");
+        grant(&s, &["mcp".into(), "a".into(), "x".into()], None, "MCP a/x".into());
+        assert_eq!(decide_mcp(&s, "a", "x"), Decision::Allow);
+        assert!(matches!(
+            decide(&s, &argv(&["git", "status"])),
+            Decision::Ask { .. }
+        ));
+        grant(&s, &["git".into(), "status".into()], None, "git status".into());
+        assert!(matches!(decide_mcp(&s, "b", "y"), Decision::Ask { .. }));
     }
 }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { exploreToolDefs, subagentToolDefs } from "./registry";
 import {
   buildMcpSpecs,
@@ -8,6 +8,7 @@ import {
   mcpToolDef,
   mcpToolDefs,
   mcpToolName,
+  parseMcpGrantRequired,
   validateMcpConfigFile,
   validateMcpServerConfig,
   validateMcpToolArgs,
@@ -159,11 +160,13 @@ describe("buildMcpSpecs：重名不静默覆盖", () => {
 });
 
 describe("mcpToolDef：描述里写明边界", () => {
-  it("描述带服务器来源与沙箱边界说明", () => {
+  it("描述带服务器来源与默认 Ask 说明，不再自承权限旁路", () => {
     const def = mcpToolDef(spec());
     expect(def.function.name).toBe("mcp_context_mode_ctx_search");
     expect(def.function.description).toMatch(/context-mode/);
-    expect(def.function.description).toMatch(/不受本程序受控执行白名单约束/);
+    expect(def.function.description).toMatch(/默认需要用户逐次确认|Ask/);
+    expect(def.function.description).toMatch(/Rust 侧授权闸门/);
+    expect(def.function.description).not.toMatch(/不受本程序受控执行白名单约束/);
     expect(def.function.parameters).toEqual(spec().parameters);
   });
 
@@ -197,78 +200,158 @@ describe("MCP 工具不进探索与子代理", () => {
   });
 });
 
-describe("executeMcpToolCall：分发", () => {
-  const call = async (server: string, tool: string) => `${server}/${tool} ok`;
+/** ADR 0004：默认 Ask 之后，调用参数带一整套假审批通道。
+ *  「直接成功的 call」代表 Rust 侧已有会话级授权；单个用例按需覆盖。 */
+type McpOpts = Parameters<typeof executeMcpToolCall>[0];
+const SCOPE = ["mcp", "context-mode", "ctx_search"];
 
-  it("未知工具直接拒绝，不调服务器", async () => {
-    const out = await executeMcpToolCall({
-      name: "mcp_nope_x",
-      args: {},
-      specs: [spec()],
-      planMode: false,
-      exploreMode: false,
-      call,
-    });
-    expect(out.error).toMatch(/未知工具/);
+function mcpOpts(over: Partial<McpOpts> = {}): McpOpts {
+  return {
+    name: spec().name,
+    args: { query: "x" },
+    specs: [spec()],
+    planMode: false,
+    exploreMode: false,
+    scope: SCOPE,
+    ask: vi.fn().mockResolvedValue("session"),
+    grant: vi.fn().mockResolvedValue(undefined),
+    call: async (server: string, tool: string) => `${server}/${tool} ok`,
+    ...over,
+  } as McpOpts;
+}
+
+/** Rust 闸门回传的 need_grant 错误（与 perms::GateDenied::to_json 同形）。 */
+function needGrant(): string {
+  return JSON.stringify({
+    kind: "need_grant",
+    scope: SCOPE,
+    label: "MCP context-mode/ctx_search",
+  });
+}
+
+describe("executeMcpToolCall：分发 + 默认 Ask", () => {
+  it("已有会话授权时直接返回结果，不弹框", async () => {
+    const ask = vi.fn();
+    const out = await executeMcpToolCall(mcpOpts({ ask }));
+    expect(out.result).toContain("ok");
+    expect(ask).not.toHaveBeenCalled();
   });
 
-  it("计划模式与探索模式都拦截", async () => {
-    const plan = await executeMcpToolCall({
-      name: spec().name,
-      args: { query: "x" },
-      specs: [spec()],
-      planMode: true,
-      exploreMode: false,
-      call,
-    });
+  it("未知工具直接拒绝，不调服务器", async () => {
+    const call = vi.fn();
+    const out = await executeMcpToolCall(mcpOpts({ name: "mcp_nope_x", call }));
+    expect(out.error).toMatch(/未知工具/);
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it("计划模式与探索模式在审批之前就拦截", async () => {
+    const ask = vi.fn();
+    const plan = await executeMcpToolCall(mcpOpts({ planMode: true, ask }));
     expect(plan.error).toMatch(/计划模式已拦截/);
-    const explore = await executeMcpToolCall({
-      name: spec().name,
-      args: { query: "x" },
-      specs: [spec()],
-      planMode: false,
-      exploreMode: true,
-      call,
-    });
+    const explore = await executeMcpToolCall(mcpOpts({ exploreMode: true, ask }));
     expect(explore.error).toMatch(/探索模式已拦截/);
+    expect(ask).not.toHaveBeenCalled();
   });
 
   it("参数校验失败不调服务器", async () => {
-    const out = await executeMcpToolCall({
-      name: spec().name,
-      args: {},
-      specs: [spec()],
-      planMode: false,
-      exploreMode: false,
-      call,
-    });
+    const call = vi.fn();
+    const out = await executeMcpToolCall(mcpOpts({ args: {}, call }));
     expect(out.error).toMatch(/缺少必填参数/);
+    expect(call).not.toHaveBeenCalled();
   });
 
   it("成功时返回结果，超长截断并注明", async () => {
-    const out = await executeMcpToolCall({
-      name: spec().name,
-      args: { query: "x" },
-      specs: [spec()],
-      planMode: false,
-      exploreMode: false,
-      call: async () => "y".repeat(30000),
-    });
+    const out = await executeMcpToolCall(mcpOpts({ call: async () => "y".repeat(30000) }));
     expect(out.result).toMatch(/工具输出已截断/);
     expect(out.result!.length).toBeLessThan(30000);
   });
 
-  it("服务器抛错时转成 error，不抛异常", async () => {
-    const out = await executeMcpToolCall({
-      name: spec().name,
-      args: { query: "x" },
-      specs: [spec()],
-      planMode: false,
-      exploreMode: false,
-      call: async () => {
-        throw new Error("MCP 服务器 context-mode 无响应");
-      },
-    });
+  it("服务器抛非授权错误时转成 error，不抛异常、也不弹框", async () => {
+    const ask = vi.fn();
+    const out = await executeMcpToolCall(
+      mcpOpts({
+        ask,
+        call: async () => {
+          throw new Error("MCP 服务器 context-mode 无响应");
+        },
+      })
+    );
     expect(out.error).toMatch(/无响应/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("Rust 回 need_grant → 问用户 → 记账 → 重试成功", async () => {
+    const call = vi.fn().mockRejectedValueOnce(needGrant()).mockResolvedValueOnce("ok");
+    const ask = vi.fn().mockResolvedValue("once");
+    const grant = vi.fn().mockResolvedValue(undefined);
+    const out = await executeMcpToolCall(mcpOpts({ call, ask, grant }));
+    expect(out.result).toBe("ok");
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(ask.mock.calls[0][0]).toMatchObject({
+      server: "context-mode",
+      tool: "ctx_search",
+      scope: SCOPE,
+    });
+    // once = 只授权 1 次；scope 用 Rust 回传的那份，不自己另拼
+    expect(grant).toHaveBeenCalledWith(SCOPE, 1, "MCP context-mode/ctx_search");
+    expect(call).toHaveBeenCalledTimes(2);
+  });
+
+  it("用户 deny → 不重试、不记账，返回拒绝错误", async () => {
+    const call = vi.fn().mockRejectedValue(needGrant());
+    const grant = vi.fn();
+    const out = await executeMcpToolCall(mcpOpts({ call, grant, ask: vi.fn().mockResolvedValue("deny") }));
+    expect(out.error).toMatch(/用户拒绝/);
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(grant).not.toHaveBeenCalled();
+  });
+
+  it("审批通道缺失 → fail-closed，绝不调用服务器", async () => {
+    const call = vi.fn().mockResolvedValue("不该被调用");
+    const out = await executeMcpToolCall(
+      mcpOpts({ call, ask: undefined, grant: undefined })
+    );
+    expect(out.error).toMatch(/审批通道不可用/);
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it("重复 need_grant → 最多 3 轮后停止，不死循环", async () => {
+    const call = vi.fn().mockRejectedValue(needGrant());
+    const ask = vi.fn().mockResolvedValue("session");
+    const grant = vi.fn().mockResolvedValue(undefined);
+    const out = await executeMcpToolCall(mcpOpts({ call, ask, grant }));
+    expect(out.error).toMatch(/多次授权/);
+    expect(call).toHaveBeenCalledTimes(3);
+    expect(ask).toHaveBeenCalledTimes(2);
+    expect(grant).toHaveBeenCalledTimes(2);
+  });
+
+  it("授权记账失败 → 报错，不再重试调用", async () => {
+    const call = vi.fn().mockRejectedValue(needGrant());
+    const grant = vi.fn().mockRejectedValue(new Error("Rust 记账失败"));
+    const out = await executeMcpToolCall(mcpOpts({ call, grant }));
+    expect(out.error).toMatch(/MCP 授权记账失败/);
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("parseMcpGrantRequired：闸门错误通道", () => {
+  it("认 Rust 回传的 JSON 字符串", () => {
+    expect(parseMcpGrantRequired(needGrant())).toEqual({
+      scope: SCOPE,
+      label: "MCP context-mode/ctx_search",
+    });
+  });
+
+  it("也认前端已转换的 ExecGrantRequired 形态", () => {
+    expect(
+      parseMcpGrantRequired({ name: "ExecGrantRequired", scope: SCOPE, label: "MCP a/x" })
+    ).toEqual({ scope: SCOPE, label: "MCP a/x" });
+  });
+
+  it("普通错误 / 非法 JSON 返回 null", () => {
+    expect(parseMcpGrantRequired(new Error("无响应"))).toBeNull();
+    expect(parseMcpGrantRequired("{ not json")).toBeNull();
+    expect(parseMcpGrantRequired(JSON.stringify({ kind: "refused", reason: "x" }))).toBeNull();
   });
 });

@@ -284,12 +284,20 @@ mod mcp_cmds {
     }
 
     /// 调一次工具（tools/call，60 秒超时；超时后 Rust 侧会杀掉该服务器）。
+    ///
+    /// ADR 0004：MCP 工具默认 `Ask`。`session_id` 是授权闸门的入口，判定放在
+    /// IPC 后面的 Rust 侧（`perms::guard_mcp`），前端确认框只是体验——没有用户
+    /// 批准，任何路径都到不了 tools/call。未授权时回传与 exec 同款的
+    /// `need_grant` JSON，前端据此弹框、`perm_grant` 记账、再重试。
     #[tauri::command]
     pub async fn mcp_call_tool(
         name: String,
         tool: String,
         arguments: serde_json::Value,
+        session_id: String,
     ) -> Result<String, String> {
+        let _ = crate::root_for(&session_id, "调用 MCP 工具")?;
+        crate::perms::guard_mcp(&session_id, &name, &tool).map_err(|g| g.to_json())?;
         tauri::async_runtime::spawn_blocking(move || crate::mcp::call_tool(&name, &tool, arguments))
             .await
             .map_err(|e| format!("MCP 工具调用线程失败：{e}"))?

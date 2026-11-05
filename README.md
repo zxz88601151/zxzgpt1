@@ -1055,10 +1055,14 @@ Rust 侧另补了边界用例（`tools/fs-harness`，当日 **82 条全过**，�
 
 ### 15.2 用之前必须知道的四条边界
 
-1. **执行授权闸门不覆盖 MCP 工具**。`executeMcpToolCall` 只拦计划/探索模式，
-   不经过 `perms::decide`、不弹授权、没有默认 `Ask`；工具描述自己写着
-   「不受本程序受控执行白名单约束」。缺省 `context-mode` 为 `enabled: false`，
-   启用后其 `ctx_execute` 可执行任意代码。
+1. **执行授权闸门覆盖 MCP 工具（2026-11-06 已修，ADR 0004）**。原先
+   `executeMcpToolCall` 只拦计划/探索模式，不经过 `perms::decide`、不弹授权、
+   没有默认 `Ask`，工具描述还自承「不受本程序受控执行白名单约束」。现在 MCP
+   动态工具由 `lib/toolpolicy.ts` 统一解析（`access: exec` / `approval: ask` /
+   `cost: expensive`），`mcp_call_tool` IPC 增加 `session_id`，Rust 侧
+   `perms::guard_mcp` 是权威闸门：未授权回 `need_grant` → 前端复用 `ConfirmExec`
+   弹框 → `perm_grant` 记账 → 重试，scope = `["mcp", server, tool]`。
+   缺省 `context-mode` 仍为 `enabled: false`。
    已核实 `mcp.json` 位于应用配置目录（工程根之外）、有命令与凭据校验，
    **不存在「模型改配置 → 自动拉起任意命令」这条链**，别把这两件事混为一谈。
 2. **子代理取消传播 / 批次异常兜底（2026-11-06 已修）**。原先 `App.tsx` 给子代理
@@ -1074,7 +1078,8 @@ Rust 侧另补了边界用例（`tools/fs-harness`，当日 **82 条全过**，�
    另外 `search_files` 的正则没有 ReDoS 防护，复杂模式可能卡住渲染进程。
 
 以上四条与技术债台账 `TECH_DEBT_REGISTER_20261103.md` §6（D-17 ~ D-23）一一对应。
-第 2 条已于 2026-11-06 修复；其余按 `STATE.md` §5 队列继续推进，
+第 1、2 条已于 2026-11-06 修复（ADR 0004 / D-17~D-19）；第 4 条由队列 ④ 处理，
+第 3 条需 Windows + WebView2 真机（队列 ⑥）。
 **进度以代码与审计报告为准，本节不预先标 PASS**。
 
 ### 15.3 实测与未验证
@@ -1083,6 +1088,7 @@ Rust 侧另补了边界用例（`tools/fs-harness`，当日 **82 条全过**，�
 |---|---|
 | `npm ci` / `npm test` / `npm run build` | 2026-11-05：PASS / **545 passed + 6 skipped（29 文件）** / PASS |
 | ② 修复后复跑（2026-11-06） | **550 passed + 6 skipped（29 文件）** / `npm run build` PASS |
+| ③ 修复后复跑（2026-11-06） | **568 passed + 6 skipped（30 文件）** / `npm run build` PASS；Rust harness 新增 6 条 MCP 闸门测试全 PASS |
 | 三处版本号 | 均 `0.3.0`，一致 |
 | GitHub Actions | 23 次运行，最新 `CI #23` = **passing**（三 job 全绿） |
 | Rust 测试 / 本地 e2e / 真机 CSP / 打包 / 真模型 | **`NOT_TESTED`**（Ubuntu 沙箱 + 宪章 §3 未授权，不标 PASS） |
