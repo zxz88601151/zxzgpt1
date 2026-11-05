@@ -421,3 +421,49 @@ describe("todo_write：任务清单", () => {
     expect(planModeBlocks(spec.access)).toBe(false);
   });
 });
+
+describe("search_files 正则 + glob", () => {
+  it("search_files regex=true 校验非法正则、非布尔值都拒绝", () => {
+    const spec = findTool("search_files")!;
+    expect(spec.validate({ query: "use[A-Z]", regex: true })).toBeNull();
+    expect(spec.validate({ query: "(unclosed", regex: true })).toContain("正则");
+    expect(spec.validate({ query: "abc", regex: "yes" })).toContain("布尔");
+  });
+
+  it("search_files 正则模式按正则命中行", async () => {
+    const spec = findTool("search_files")!;
+    const ctx = fakeCtx({
+      listDir: async () => [{ name: "a.ts", path: "a.ts", dir: false, size: 1 }],
+      readFile: async () => "const X = 1;\nconst y = 2;\n",
+    });
+    const r = await spec.run({ query: "= 1", regex: true }, ctx);
+    expect(r.result).toContain("a.ts:1:");
+    expect(r.result).not.toContain(":2:");
+  });
+
+  it("glob 工具按模式匹配文件路径，跨层 ** 生效", async () => {
+    const spec = findTool("glob")!;
+    const ctx = fakeCtx({
+      listDir: async (rel) => {
+        if (rel === "")
+          return [
+            { name: "src", path: "src", dir: true, size: 0 },
+            { name: "README.md", path: "README.md", dir: false, size: 1 },
+          ];
+        if (rel === "src")
+          return [
+            { name: "a.tsx", path: "src/a.tsx", dir: false, size: 1 },
+            { name: "b.ts", path: "src/b.ts", dir: false, size: 1 },
+          ];
+        return [];
+      },
+    });
+    const r = await spec.run({ pattern: "src/**/*.tsx" }, ctx);
+    expect(r.result).toContain("src/a.tsx");
+    expect(r.result).not.toContain("src/b.ts");
+  });
+
+  it("glob 校验：空 pattern 拒绝", () => {
+    expect(findTool("glob")!.validate({ pattern: "" })).toContain("非空");
+  });
+});

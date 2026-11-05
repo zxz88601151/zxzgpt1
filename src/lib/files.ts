@@ -219,3 +219,32 @@ export function buildWorkspacePrompt(root: string, tree: string, opts: Workspace
   );
   return lines.join("\n");
 }
+
+/** 把 glob 模式转成正则：`*` 匹配单层（不含 /），`**` 匹配任意层，`?` 匹配单字符。 */
+export function globToRegExp(pattern: string): RegExp {
+  let re = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === "*") {
+      if (pattern[i + 1] === "*") {
+        if (pattern[i + 2] === "/") {
+          // `**/` 匹配任意层目录（含 0 层）：src/**/*.tsx 要能匹配 src/a.tsx
+          re += "(?:[^/]*/)*";
+          i += 2;
+        } else {
+          re += ".*";
+          i += 1;
+        }
+      } else {
+        re += "[^/]*";
+      }
+    } else if (c === "?") {
+      re += "[^/]";
+    } else if ("\\^$.|+()[]{}".includes(c)) {
+      re += "\\" + c;
+    } else {
+      re += c;
+    }
+  }
+  return new RegExp("^" + re + "$");
+}

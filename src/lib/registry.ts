@@ -17,7 +17,7 @@
  * 否则 state.ts（要 buildToolsPrompt）与 App.tsx 之间会绕出运行时环。
  */
 
-import { relPathError, shouldSkipDir } from "./files";
+import { globToRegExp, relPathError, shouldSkipDir } from "./files";
 import { applyEdit, applyHunks } from "./patch";
 import {
   checkNpmCommandScript,
@@ -150,14 +150,15 @@ const listDir: ToolSpec = {
 const searchFiles: ToolSpec = {
   name: "search_files",
   access: "read",
-  summary: "字面子串搜索",
+  summary: "搜索文件内容",
   description:
-    "在工程内按字面子串搜索文件内容，返回 path:行号 命中。不要用它当正则引擎，query 就是字面文本。",
+    "在工程内搜索文件内容，返回 path:行号 命中。默认字面匹配；regex=true 时把 query 当正则（大小写不敏感）。",
   parameters: {
     type: "object",
     properties: {
-      query: { type: "string", description: "要找的字面文本" },
+      query: { type: "string", description: "要找的字面文本，regex=true 时是正则" },
       path: { type: "string", description: "限定搜索的相对目录，空串表示整棵树" },
+      regex: { type: "boolean", description: "是否把 query 当正则（默认 false 字面匹配）" },
     },
     required: ["query"],
     additionalProperties: false,
@@ -165,12 +166,22 @@ const searchFiles: ToolSpec = {
   validate: (args) => {
     if (typeof args.query !== "string" || !args.query.trim()) return "search_files 需要非空 query";
     if (args.query.length > 200) return "search_files 的 query 太长（上限 200 字符）";
+    if (args.regex !== undefined && typeof args.regex !== "boolean") return "search_files 的 regex 必须是布尔值";
+    if (args.regex === true) {
+      try {
+        new RegExp(args.query);
+      } catch {
+        return "search_files 的 query 不是合法正则";
+      }
+    }
     if (args.path === undefined || args.path === "") return null;
     if (typeof args.path !== "string") return "search_files 的 path 必须是字符串";
     return relPathError(args.path);
   },
   run: async (args, ctx) => {
-    const query = (args.query as string).toLowerCase();
+    const query = args.query as string;
+    const useRegex = args.regex === true;
+    const re = useRegex ? new RegExp(query, "i") : null;
     const matches: string[] = [];
     let visited = 0;
 
@@ -197,7 +208,8 @@ const searchFiles: ToolSpec = {
           continue; // 读不到（二进制、超大）就跳过，不阻断搜索
         }
         content.split("\n").forEach((line, i) => {
-          if (matches.length < SEARCH_MAX_MATCHES && line.toLowerCase().includes(query)) {
+          const hit = re ? re.test(line) : line.toLowerCase().includes(query.toLowerCase());
+          if (matches.length < SEARCH_MAX_MATCHES && hit) {
             matches.push(`${rel ? `${rel}/` : ""}${e.name}:${i + 1}: ${line.trim().slice(0, 200)}`);
           }
         });
@@ -491,8 +503,51 @@ const todoWrite: ToolSpec = {
   },
 };
 
+const globFiles: ToolSpec = {
+  name: "glob",
+  access: "read",
+  summary: "按模式匹配文件",
+  description:
+    "按 glob 模式匹配工程内文件相对路径，返回匹配的文件列表。* 匹配一层任意字符（不含 /），** 匹配任意层级，? 匹配单字符。例如 src/**/*.tsx。",
+  parameters: {
+    type: "object",
+    properties: { pattern: { type: "string", description: "glob 模式，如 src/**/*.tsx" } },
+    required: ["pattern"],
+    additionalProperties: false,
+  },
+  validate: (args) => {
+    if (typeof args.pattern !== "string" || !args.pattern.trim()) return "glob 需要非空 pattern";
+    if (args.pattern.length > 200) return "glob 的 pattern 太长（上限 200 字符）";
+    return null;
+  },
+  run: async (args, ctx) => {
+    const re = globToRegExp(args.pattern as string);
+    const matches: string[] = [];
+    const walk = async (rel: string, depth: number): Promise<void> => {
+      if (matches.length >= SEARCH_MAX_MATCHES || depth > 10) return;
+      let entries: FsEntry[];
+      try {
+        entries = await ctx.listDir(rel);
+      } catch {
+        return;
+      }
+      for (const e of entries) {
+        if (matches.length >= SEARCH_MAX_MATCHES) return;
+        const full = rel ? `${rel}/${e.name}` : e.name;
+        if (e.dir) {
+          if (!shouldSkipDir(e.name)) await walk(full, depth + 1);
+        } else if (re.test(full)) {
+          matches.push(full);
+        }
+      }
+    };
+    await walk("", 0);
+    return { result: matches.length ? matches.join("\n") : "(没有匹配)" };
+  },
+};
+
 /** 唯一权威清单。加工具只改这里，其余（Schema / 校验 / 提示 / 分发 / 权限）自动跟上。 */
-export const TOOLS: readonly ToolSpec[] = [readFile, listDir, searchFiles, writeFile, editFile, applyPatch, runCommand, webSearch, todoWrite];
+export const TOOLS: readonly ToolSpec[] = [readFile, listDir, searchFiles, writeFile, editFile, applyPatch, runCommand, webSearch, todoWrite, globFiles];
 
 const BY_NAME = new Map<string, ToolSpec>(TOOLS.map((t) => [t.name, t]));
 
