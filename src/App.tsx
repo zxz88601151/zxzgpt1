@@ -5,27 +5,20 @@ import {
   buildTree,
   ExecGrantRequired,
   fsAvailable,
-  fsExists,
   fsListIn,
   fsRead,
   fsWrite,
   permGrant,
-  permList,
-  permRevoke,
   runAllowed,
   runCancel,
-  sessionFor,
-  undoWrite,
   openPreview,
   webSearch as webSearchApi,
   wsClose,
   wsInfo,
   wsOpen as openSession,
-  type ExecGrant,
 } from "./lib/fsapi";
 import { filterConversations, findActive, loadState, newConversation, persist, titleFrom } from "./state";
 import { clamp, copyText, uid } from "./lib/text";
-import { diffLines, diffStats } from "./lib/diff";
 import { stampNow } from "./lib/undo";
 import { builtinSkills } from "./skills";
 import { SOURCES, buildAuditMarkdown } from "./skills/sources";
@@ -36,12 +29,9 @@ import {
   matchSkills,
   MAX_ACTIVE_SKILLS,
   skillCatalogPrompt,
-  skillRefLabel,
   type Skill,
-  type SkillRef,
 } from "./lib/skill";
-import { PROJECT_MEMORY_FILES, truncateProjectMemory } from "./lib/project";
-import { buildPendingWrites, type PendingWrite } from "./lib/pending";
+import type { PendingWrite } from "./lib/pending";
 import {
   appendAssistantMessage,
   appActionLabel,
@@ -50,30 +40,28 @@ import {
   withToggleApplied,
 } from "./lib/appcontrol";
 import { loadLocalSkills, mergeSkills, pickSkills } from "./lib/skillstore";
-import {
-  backupRelPath,
-  relPathError,
-  UNDO_DIR,
-  type FileBlock,
-  type ReadOutcome,
-} from "./lib/files";
+import { UNDO_DIR, type FileBlock } from "./lib/files";
 import { EXPLORE_TOOL_NAMES, exploreToolDefs, findTool, isExploreTool, parseToolArgs, planModeBlocks, TOOL_DEFS, type ToolContext } from "./lib/registry";
 import { mcpScope, resolveToolPolicy } from "./lib/toolpolicy";
-import {
-  executeMcpToolCall,
-  loadMcpServers,
-  mcpCallTool,
-  mcpToolDefs,
-  stopMcpServers,
-  type McpToolSpec,
-} from "./lib/mcp";
+import { executeMcpToolCall, mcpCallTool, mcpToolDefs } from "./lib/mcp";
 import { runRounds } from "./orchestration/session";
 import { forceCompact } from "./orchestration/compact";
 import { runSubagent } from "./orchestration/subagent";
+import {
+  applyFileBlocks,
+  buildPendingItems,
+  loadProjectMemory,
+  patchMessageAt,
+  readForModel,
+  readSkillRefs,
+} from "./lib/workspace";
+import { buildSummarizeMessages } from "./orchestration/summarize";
+import { useMcpServers } from "./hooks/useMcpServers";
+import { useExecApproval } from "./hooks/useExecApproval";
 import type { AppState, Conversation, FileWriteResult, Message, Settings, Theme, ToolCallRecord, Transport } from "./types";
 import type { ToastKind } from "./components/ui";
 
-import { ConfirmExec, type ExecAsk, type ExecChoice } from "./components/ConfirmExec";
+import { ConfirmExec } from "./components/ConfirmExec";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { Composer } from "./components/Composer";
@@ -110,7 +98,6 @@ export default function App() {
   const [keyword, setKeyword] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
   /** 当前生效的执行授权（Rust 侧记账，这里只是镜像给界面看） */
-  const [grants, setGrants] = useState<ExecGrant[]>([]);
   const [wsOpen, setWsOpen] = useState(false);
   const [undoOpen, setUndoOpen] = useState(false);
   const [skillOpen, setSkillOpen] = useState(false);
@@ -148,52 +135,18 @@ export default function App() {
     window.setTimeout(() => setToasts((list) => list.filter((t) => t.id !== id)), 2600);
   }, []);
 
-  /* ------------------------------------------------------------ MCP 插件：随工程会话启动/停止 */
-  //
-  // MCP 服务器随工程走：
-  //  - 工程一打开，读 mcp.json，把 enabled 的服务器拉起来、列出工具，
-  //    工具定义进模型；
-  //  - 换工程 / 关工程，先停掉旧服务器（服务器的 cwd 跟着工程走，
-  //    不停就串目录），再按新工程重拉；
-  //  - 单个服务器挂了只 toast 报错，不阻断主流程（失败隔离）。
-  // 启用开关在 mcp.json 里（默认 context-mode 是关的），本批不做管理页。
-  const mcpSpecsRef = useRef<McpToolSpec[]>([]);
-  const mcpSessionRef = useRef<string | null>(null);
-  const mcpLoadGen = useRef(0);
-  useEffect(() => {
-    const ws = state.settings.workspace;
-    if (!ws || !fsAvailable()) {
-      // 没接工程 / 浏览器直开：停掉已拉起的服务器、清空动态工具
-      if (mcpSessionRef.current) {
-        const names = [...new Set(mcpSpecsRef.current.map((s) => s.server))];
-        mcpSessionRef.current = null;
-        mcpSpecsRef.current = [];
-        void stopMcpServers(names);
-      }
-      return;
-    }
-    if (mcpSessionRef.current === ws.sessionId) return;
-    const prevSession = mcpSessionRef.current;
-    const prevNames = [...new Set(mcpSpecsRef.current.map((s) => s.server))];
-    mcpSessionRef.current = ws.sessionId;
-    mcpSpecsRef.current = [];
-    const gen = ++mcpLoadGen.current;
-    const run = async () => {
-      if (prevSession) await stopMcpServers(prevNames);
-      const { specs, errors } = await loadMcpServers(ws.sessionId);
-      if (gen !== mcpLoadGen.current) return;
-      mcpSpecsRef.current = specs;
-      for (const e of errors) toast(`MCP 服务器 ${e.server} 启动失败：${e.error}`, "error");
-      if (specs.length) {
-        const servers = [...new Set(specs.map((s) => s.server))].join("、");
-        toast(`MCP 插件已就绪：${specs.length} 个工具（${servers}）`, "");
-      }
-    };
-    run().catch((e) => {
-      if (gen !== mcpLoadGen.current) return;
-      toast(`MCP 配置读取失败：${(e as Error).message}`, "error");
-    });
-  }, [state.settings.workspace?.sessionId, toast]);
+  /* MCP 生命周期与执行授权桥已抽成 hooks（ADR 0001 第 5 步）：
+     组件只消费返回值，不再持有这些 ref 与 Promise 桥的实现细节。 */
+  const {
+    grants,
+    execAsk,
+    askExec,
+    answerExec,
+    refreshGrants,
+    revokeGrant,
+    dropExecGrants,
+  } = useExecApproval({ stateRef, toast, drawerOpen });
+  const mcpSpecsRef = useMcpServers(state.settings.workspace, toast);
 
   /* ------------------------------------------------------------ 持久化 */
 
@@ -237,80 +190,8 @@ export default function App() {
 
   /* ------------------------------------------------------------ 会话操作 */
 
-  /**
-   * 执行授权的确认框：exec 类命令默认不跑，先问人。
-   *
-   * 工具执行是 async 流程，确认框是 React 状态，所以用一个 Promise 桥接。
-   * ref 与 state 双写是必要的：ref 让同步路径（比如撤回授权时要作废待答的框）
-   * 能立刻拿到 resolver，state 负责触发渲染。
-   */
-  const [execAsk, setExecAsk] = useState<ExecAsk | null>(null);
-  const execAskRef = useRef<ExecAsk | null>(null);
-  const askExec = useCallback(
-    (label: string) =>
-      new Promise<ExecChoice>((resolve) => {
-        const ask: ExecAsk = { label, resolve };
-        execAskRef.current = ask;
-        setExecAsk(ask);
-      }),
-    []
-  );
-  const answerExec = useCallback((choice: ExecChoice) => {
-    const cur = execAskRef.current;
-    execAskRef.current = null;
-    setExecAsk(null);
-    cur?.resolve(choice);
-  }, []);
-
-  /** 从 Rust 侧拉一次授权表。失败就当空（界面只是镜像，权威判定永远在 Rust）。 */
-  const refreshGrants = useCallback(async () => {
-    const ws = stateRef.current.settings.workspace;
-    if (!ws) {
-      setGrants([]);
-      return;
-    }
-    try {
-      setGrants(await permList(ws.sessionId));
-    } catch {
-      setGrants([]);
-    }
-  }, []);
-
-  /** 撤销一条 / 全部授权。撤销之后必须重新拉表，让界面与 Rust 侧保持一致。 */
-  const revokeGrant = useCallback(
-    (scope?: string[]) => {
-      const ws = stateRef.current.settings.workspace;
-      if (!ws) return;
-      permRevoke(ws.sessionId, scope)
-        .then(setGrants)
-        .catch((e) => toast(`撤销失败：${(e as Error).message}`, "error"));
-    },
-    [toast]
-  );
-
-  // 打开设置时同步一次：用户在别处改了授权，抽屉里的列表要能反映出来
-  useEffect(() => {
-    if (drawerOpen) void refreshGrants();
-  }, [drawerOpen, refreshGrants]);
 
 
-  /**
-   * 把执行授权收回到「当前对话」的粒度。
-   *
-   * Rust 侧是按工程目录（sessionId）记账的——同一目录重复 open 会复用同一个会话，
-   * 所以「本工程目录都允许」的实际生命周期是「直到关闭工程」。切换或新建对话时
-   * 主动撤销，是为了不让上一个对话里点过的「允许」直接给下一个对话的模型用。
-   * 撤销失败要说出来：静默失败等于授权还在，而用户以为已经收回了。
-   */
-  const dropExecGrants = useCallback(() => {
-    // 先作废还挂着的确认框：用户切走了对话，就不该还有一个"等批准"的执行在排队
-    answerExec("deny");
-    const ws = stateRef.current.settings.workspace;
-    if (!ws) return;
-    permRevoke(ws.sessionId)
-      .then(() => setGrants([]))
-      .catch((e) => toast(`执行授权撤回失败：${(e as Error).message}`, "error"));
-  }, [answerExec, toast]);
 
   const createConv = useCallback(() => {
     void dropExecGrants();
@@ -384,14 +265,7 @@ export default function App() {
     (convId: string, index: number, fn: (m: Message) => Message) => {
       update((prev) => ({
         ...prev,
-        conversations: prev.conversations.map((c) => {
-          if (c.id !== convId) return c;
-          const list = c.messages.slice();
-          const old = list[index];
-          if (!old) return c;
-          list[index] = fn(old);
-          return { ...c, messages: list, updatedAt: Date.now() };
-        }),
+        conversations: patchMessageAt(prev.conversations, convId, index, fn, Date.now()),
       }));
     },
     [update]
@@ -415,87 +289,20 @@ export default function App() {
     }
   }, [update]);
 
-  /**
-   * 把回复里的 file: 块真的写进磁盘。不弹确认——本地工程模式的约定就是「模型直接改代码」；
-   * 覆盖已有文件前先把旧内容备份到 .zxz/undo/<时间戳>/，要退回去随时取。
-   */
+  /** 把回复里的 file: 块真的写进磁盘：备份、写入、回读校验在 lib/workspace.ts，
+   *  这里只保留 toast 与目录树刷新这两项 UI 副作用。 */
   const applyFiles = useCallback(
     async (blocks: FileBlock[]): Promise<FileWriteResult[]> => {
       const ws = stateRef.current.settings.workspace;
       if (!ws || !blocks.length) return [];
-
-      const stamp = stampNow();
-      const results: FileWriteResult[] = [];
-      let backedUp = 0;
-
-      for (const b of blocks) {
-        const bad = relPathError(b.path);
-        if (bad) {
-          results.push({ path: b.path, ok: false, error: bad });
-          continue;
-        }
-        try {
-          let oldText = "";
-          let backup: string | undefined;
-          // 「确认不存在」与「校验失败」必须分开：fsExists 现在会把后者抛出来。
-          // 抛了就不能往下写——不然等于把一次越界/链接校验失败当成"新建文件"，
-          // 静默跳过备份，覆盖就变成不可撤销的操作。
-          let exists: boolean;
-          try {
-            exists = await fsExists(ws.sessionId, b.path);
-          } catch (e) {
-            results.push({
-              path: b.path,
-              ok: false,
-              error: `无法确认目标是否存在，已中止写入：${(e as Error).message}`,
-            });
-            continue;
-          }
-          if (exists) {
-            // 备份失败必须阻断写入：没有备份的覆盖不可撤销，不能"先写了再说"。
-            oldText = await fsRead(ws.sessionId, b.path);
-            backup = backupRelPath(stamp, b.path);
-            // 走撤销专用通道：普通 fsWrite 现在整目录拒绝 .zxz/undo，
-            // 因为模型手里的 write_file 用的正是那条通道。
-            await undoWrite(ws.sessionId, stamp, b.path, oldText);
-            backedUp += 1;
-          }
-          const r = await fsWrite(ws.sessionId, b.path, b.content);
-          // 写完回读校验：Claude Code 那套“改完要验证”在本工具里没有终端可跑，
-          // 至少做到写进去的东西和模型给的东西逐字一致，否则不能算“写好了”。
-          let verified = true;
-          try {
-            verified = (await fsRead(ws.sessionId, b.path)) === b.content;
-          } catch {
-            verified = false;
-          }
-          const stats = diffStats(diffLines(oldText, b.content));
-          results.push({
-            path: b.path,
-            ok: true,
-            bytes: r.bytes,
-            created: r.created,
-            ...(backup ? { backup } : {}),
-            add: stats.add,
-            del: stats.del,
-            verified,
-          });
-        } catch (e) {
-          results.push({ path: b.path, ok: false, error: (e as Error).message });
-        }
-      }
-
-      const ok = results.filter((r) => r.ok).length;
-      const fail = results.length - ok;
-      const unverified = results.filter((r) => r.ok && r.verified === false).length;
-      const backupNote = backedUp ? `，${backedUp} 个覆盖前已备份到 ${UNDO_DIR}` : "";
+      const r = await applyFileBlocks(blocks, ws.sessionId);
+      const backupNote = r.backedUp ? `，${r.backedUp} 个覆盖前已备份到 ${UNDO_DIR}` : "";
       toast(
-        `已写入 ${ok} 个文件${backupNote}${fail ? `，${fail} 个失败` : ""}${unverified ? `，${unverified} 个回读不一致` : ""}`,
-        fail || unverified ? "error" : "ok"
+        `已写入 ${r.ok} 个文件${backupNote}${r.fail ? `，${r.fail} 个失败` : ""}${r.unverified ? `，${r.unverified} 个回读不一致` : ""}`,
+        r.fail || r.unverified ? "error" : "ok"
       );
-
       await refreshTree();
-      return results;
+      return r.results;
     },
     [refreshTree, toast]
   );
@@ -509,16 +316,7 @@ export default function App() {
       const ws = stateRef.current.settings.workspace;
       if (!ws || !blocks.length) return [];
       if (!stateRef.current.settings.confirmWrites) return applyFiles(blocks);
-
-      const olds = new Map<string, string>();
-      for (const b of blocks) {
-        try {
-          if (await fsExists(ws.sessionId, b.path)) olds.set(b.path, await fsRead(ws.sessionId, b.path));
-        } catch {
-          /* 读不到旧内容就按新建处理，面板里会显示为空 */
-        }
-      }
-      const items = buildPendingWrites(blocks, olds);
+      const items = await buildPendingItems(blocks, ws.sessionId);
       const approved = await new Promise<PendingWrite[] | null>((resolve) => {
         pendingResolveRef.current = resolve;
         setPending(items);
@@ -532,63 +330,6 @@ export default function App() {
     [applyFiles, toast]
   );
 
-  /** 接入工程时读项目记忆：CLAUDE.md 优先，没有就退到 AGENTS.md，读不到就算没有 */
-  const loadProjectMemory = useCallback(async (sessionId: string): Promise<{ source: string; body: string } | null> => {
-    for (const file of PROJECT_MEMORY_FILES) {
-      try {
-        const body = await fsRead(sessionId, file);
-        if (body.trim()) return { source: file, body: truncateProjectMemory(body) };
-      } catch {
-        /* 这个文件不存在就试下一个 */
-      }
-    }
-    return null;
-  }, []);
-
-  /** 按模型的要求读真实文件内容 */
-  const readForModel = useCallback(async (sessionId: string, paths: string[]): Promise<ReadOutcome[]> => {
-    const out: ReadOutcome[] = [];
-    for (const p of paths) {
-      const bad = relPathError(p);
-      if (bad) {
-        out.push({ path: p, error: bad });
-        continue;
-      }
-      try {
-        out.push({ path: p, content: await fsRead(sessionId, p) });
-      } catch (e) {
-        out.push({ path: p, error: (e as Error).message });
-      }
-    }
-    return out;
-  }, []);
-
-  /** 按模型要求取技能附件：内建技能只有正文，外部技能从它自己的目录读 */
-  const readSkillRefs = useCallback(async (all: Skill[], refs: SkillRef[]): Promise<ReadOutcome[]> => {
-    const out: ReadOutcome[] = [];
-    for (const r of refs) {
-      const label = skillRefLabel(r);
-      const sk = all.find((x) => x.id === r.skillId);
-      if (!sk) {
-        out.push({ path: label, error: `没有这个技能（可用：${all.map((x) => x.id).slice(0, 8).join("、")}）` });
-        continue;
-      }
-      if (!sk.dir) {
-        out.push(
-          r.rel === "SKILL.md"
-            ? { path: label, content: sk.body }
-            : { path: label, error: "内建技能没有附带文件，只能取 SKILL.md" }
-        );
-        continue;
-      }
-      try {
-        out.push({ path: label, content: await fsRead(await sessionFor(sk.dir), r.rel) });
-      } catch (e) {
-        out.push({ path: label, error: (e as Error).message });
-      }
-    }
-    return out;
-  }, []);
 
   /**
    * 工具执行上下文：把「当前会话」和几个副作用通道包成一个对象交给注册表。
@@ -741,31 +482,16 @@ export default function App() {
 
   /* ------------------------------------------------------------ 发送 */
 
-  /** 上下文压缩用的模型摘要：把一批历史消息压成结构化中文要点。网络失败返回空，由引擎兜底。 */
+  /** 上下文压缩用的模型摘要：拼 prompt 的纯逻辑在 orchestration/summarize.ts。 */
   const summarizeWindow = useCallback(async (window: Message[]): Promise<string> => {
     const settings = stateRef.current.settings;
-    const sys =
-      "你是上下文压缩器。把下面这段对话历史压缩为结构化摘要，保留：1) 用户的核心目标与已确认需求；" +
-      "2) 涉及的文件路径与已做的修改/创建；3) 关键决策与未解决的问题；4) 重要的命令或错误信息。" +
-      "用简洁中文要点列出，不要复述寒暄，控制在 300 字以内。";
-    const userText = window
-      .map(
-        (m) =>
-          `${m.role === "assistant" ? "助手" : "用户"}: ${
-            m.content || (m.toolCalls ? "[工具调用: " + m.toolCalls.map((t) => t.name).join(", ") + "]" : "")
-          }`,
-      )
-      .join("\n\n");
     const controller = new AbortController();
     let acc = "";
     try {
       await chatStream({
         settings: { ...settings, stream: false, maxTokens: 600 },
         transport,
-        messages: [
-          { role: "system", content: sys },
-          { role: "user", content: userText },
-        ],
+        messages: buildSummarizeMessages(window),
         signal: controller.signal,
         onEvent: (evt) => {
           if (evt.type === "delta") acc += evt.text;
