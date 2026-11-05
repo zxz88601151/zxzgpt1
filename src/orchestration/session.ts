@@ -16,7 +16,9 @@
  */
 
 import { buildReadPayload, parseFileBlocks, parseReadRequests, type FileBlock, type ReadOutcome } from "../lib/files";
-import { findTool, isParallelSafeTool } from "../lib/registry";
+import { findTool } from "../lib/registry";
+import { isParallelSafe, resolveToolPolicy } from "../lib/toolpolicy";
+import { planToolBatch, type BatchClass } from "./budget";
 import {
   MAX_TEST_ROUNDS,
   runResultHead,
@@ -134,19 +136,25 @@ export function toolFailure(call: BatchCall, e: unknown): ToolCallRecord {
   return { ...call, error: `工具执行异常：${reason}` };
 }
 
+/** 工具名 → 批次类别。动态 MCP 工具与未知名字落到 gated：不并发、不进成本预算。 */
+function classifyBatchTool(name: string): BatchClass {
+  const policy = resolveToolPolicy(name);
+  if (isParallelSafe(policy)) return "cheap";
+  // 已知的内置只读工具却不可并发，只可能是 expensive（目前是 explore）
+  if (policy.source === "builtin" && policy.access === "read") return "expensive";
+  return "gated";
+}
+
 export async function runToolBatch(
   calls: BatchCall[],
   execute: (call: BatchCall) => Promise<ToolCallRecord>,
 ): Promise<ToolCallRecord[]> {
   const records: ToolCallRecord[] = new Array(calls.length);
-  const parallelIdx: number[] = [];
-  const gatedPlan: { idx: number; call: BatchCall }[] = [];
-  calls.forEach((call, i) => {
-    if (isParallelSafeTool(call.name)) parallelIdx.push(i);
-    else gatedPlan.push({ idx: i, call });
-  });
+  const plan = planToolBatch(calls, classifyBatchTool);
+  // 成本闸门跳过的调用也要有一条 tool 消息，否则 tool_call_id 对不上
+  for (const { idx, reason } of plan.skipped) records[idx] = { ...calls[idx], error: reason };
 
-  /** 两层都走它：单次执行抛错 → error 记录，绝不把异常丢给 allSettled 吞掉。 */
+  /** 所有执行都走它：单次抛错 → error 记录，绝不把异常丢给 allSettled 吞掉。 */
   const safe = async (call: BatchCall): Promise<ToolCallRecord> => {
     try {
       return await execute(call);
@@ -155,21 +163,23 @@ export async function runToolBatch(
     }
   };
 
-  // 只读层：并发扇出
-  const settled = await Promise.allSettled(
-    parallelIdx.map(async (i) => {
-      records[i] = await safe(calls[i]);
-    }),
-  );
-  // 双保险：万一 safe 之外还有漏网的 rejection（或 execute 返回了 undefined），
-  // 把那个下标补成错误记录，保证 records 无空洞、下标与 tool_call_id 一一对齐。
-  settled.forEach((r, k) => {
-    const i = parallelIdx[k];
-    if (!records[i]) records[i] = toolFailure(calls[i], r.status === "rejected" ? r.reason : undefined);
-  });
-  // 写/执行层：串行，保持原始相对顺序
-  for (const { idx, call } of gatedPlan) {
-    records[idx] = await safe(call);
+  // cheap 层：按窗口分波，波内并发、波间串行（MAX_CONCURRENT_READS）
+  for (const wave of plan.waves) {
+    const settled = await Promise.allSettled(
+      wave.map(async (i) => {
+        records[i] = await safe(calls[i]);
+      }),
+    );
+    // 双保险：漏网的 rejection 或 execute 返回 undefined 都补成错误记录，
+    // 保证 records 无空洞、下标与 tool_call_id 一一对齐。
+    settled.forEach((r, k) => {
+      const i = wave[k];
+      if (!records[i]) records[i] = toolFailure(calls[i], r.status === "rejected" ? r.reason : undefined);
+    });
+  }
+  // expensive / gated 层：串行，按原始相对顺序，避免模态与授权框叠加
+  for (const idx of plan.serial) {
+    records[idx] = await safe(calls[idx]);
   }
   return records;
 }

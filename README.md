@@ -1073,13 +1073,17 @@ Rust 侧另补了边界用例（`tools/fs-harness`，当日 **82 条全过**，�
    （`session.parallel.test.ts` / `subagent.test.ts` 共 5 条新增断言锁住）。
 3. **预览窗口**接受任意 http(s) 或任意存在的本地文件（不限工程根、不限扩展名），
    以 `WebviewUrl::External` 新建 WebView；External URL 的 CSP 是否生效**没有真机证据**。
-4. **只读 ≠ 无成本**。`isParallelSafeTool = access === "read"` 把 `web_search` 与
-   `explore` 也判为可并发，一批 N 个 `explore` 会产生 N 个子代理的模型请求；
-   另外 `search_files` 的正则没有 ReDoS 防护，复杂模式可能卡住渲染进程。
+4. **并发有闸门、正则有防护（2026-11-06 已修，D-21 / D-22）**。
+   `orchestration/budget.ts` 把一批调用分成三类：`cheap`（工程内只读，按 4 个一波
+   并发）、`expensive`（`explore` 等会派生模型请求，**每批最多 1 个，超出的直接
+   返回错误、不执行**）、`gated`（写 / 执行 / MCP / 未知，串行）；MCP 动态工具名
+   不再被当成只读并发。`lib/regexsafe.ts` 在执行前静态拒绝嵌套量词、量词化分支、
+   大重复等灾难性回溯构造，并限制单行参与匹配的字符数（2000）；`run` 入口二次
+   校验，不假设调用方跑过 `validate`。
 
 以上四条与技术债台账 `TECH_DEBT_REGISTER_20261103.md` §6（D-17 ~ D-23）一一对应。
-第 1、2 条已于 2026-11-06 修复（ADR 0004 / D-17~D-19）；第 4 条由队列 ④ 处理，
-第 3 条需 Windows + WebView2 真机（队列 ⑥）。
+第 1、2、4 条已于 2026-11-06 修复（ADR 0004 / D-17、D-18、D-20~D-22）；
+第 3 条需 Windows + WebView2 真机（队列 ⑥，**本沙箱 BLOCKED**）。
 **进度以代码与审计报告为准，本节不预先标 PASS**。
 
 ### 15.3 实测与未验证
@@ -1089,6 +1093,7 @@ Rust 侧另补了边界用例（`tools/fs-harness`，当日 **82 条全过**，�
 | `npm ci` / `npm test` / `npm run build` | 2026-11-05：PASS / **545 passed + 6 skipped（29 文件）** / PASS |
 | ② 修复后复跑（2026-11-06） | **550 passed + 6 skipped（29 文件）** / `npm run build` PASS |
 | ③ 修复后复跑（2026-11-06） | **568 passed + 6 skipped（30 文件）** / `npm run build` PASS；Rust harness 新增 6 条 MCP 闸门测试全 PASS |
+| ④ 修复后复跑（2026-11-06） | **601 passed + 6 skipped（32 文件）** / `npm run build` PASS |
 | 三处版本号 | 均 `0.3.0`，一致 |
 | GitHub Actions | 23 次运行，最新 `CI #23` = **passing**（三 job 全绿） |
 | Rust 测试 / 本地 e2e / 真机 CSP / 打包 / 真模型 | **`NOT_TESTED`**（Ubuntu 沙箱 + 宪章 §3 未授权，不标 PASS） |

@@ -18,6 +18,7 @@
  */
 
 import { globToRegExp, relPathError, shouldSkipDir } from "./files";
+import { compileSearchRegExp, MAX_TEST_LINE_CHARS, safeRegExpError } from "./regexsafe";
 import { applyEdit, applyHunks } from "./patch";
 import {
   checkNpmCommandScript,
@@ -165,7 +166,7 @@ const searchFiles: ToolSpec = {
   access: "read",
   summary: "搜索文件内容",
   description:
-    "在工程内搜索文件内容，返回 path:行号 命中。默认字面匹配；regex=true 时把 query 当正则（大小写不敏感）。",
+    "在工程内搜索文件内容，返回 path:行号 命中。默认字面匹配；regex=true 时把 query 当正则（大小写不敏感）。危险正则（嵌套量词、大重复、量词化分支）会被程序直接拒绝，不会执行。",
   parameters: {
     type: "object",
     properties: {
@@ -181,6 +182,9 @@ const searchFiles: ToolSpec = {
     if (args.query.length > 200) return "search_files 的 query 太长（上限 200 字符）";
     if (args.regex !== undefined && typeof args.regex !== "boolean") return "search_files 的 regex 必须是布尔值";
     if (args.regex === true) {
+      // 先挡灾难性回溯构造，再验语法。只验语法挡不住 `(a+)+$` 这类 20 字符的模式。
+      const unsafe = safeRegExpError(args.query);
+      if (unsafe) return `search_files 的 query 不是安全正则：${unsafe}`;
       try {
         new RegExp(args.query);
       } catch {
@@ -194,7 +198,11 @@ const searchFiles: ToolSpec = {
   run: async (args, ctx) => {
     const query = args.query as string;
     const useRegex = args.regex === true;
-    const re = useRegex ? new RegExp(query, "i") : null;
+    // run 入口再编译一次：不假设调用方一定先跑过 validate（审批重放、批量执行、
+    // 子代理将来都可能直接调 run），与 run_command 二次查白名单同理。
+    const compiled = useRegex ? compileSearchRegExp(query) : null;
+    if (compiled?.error) return { error: `search_files 的正则不可用：${compiled.error}` };
+    const re = compiled?.re ?? null;
     const matches: string[] = [];
     let visited = 0;
 
@@ -221,7 +229,10 @@ const searchFiles: ToolSpec = {
           continue; // 读不到（二进制、超大）就跳过，不阻断搜索
         }
         content.split("\n").forEach((line, i) => {
-          const hit = re ? re.test(line) : line.toLowerCase().includes(query.toLowerCase());
+          // 正则模式下只让前 MAX_TEST_LINE_CHARS 个字符参与匹配：
+          // 漏网的复杂模式最多也只能在这一小段文本上回溯，不会卡死渲染进程。
+          const text = re && line.length > MAX_TEST_LINE_CHARS ? line.slice(0, MAX_TEST_LINE_CHARS) : line;
+          const hit = re ? re.test(text) : line.toLowerCase().includes(query.toLowerCase());
           if (matches.length < SEARCH_MAX_MATCHES && hit) {
             matches.push(`${rel ? `${rel}/` : ""}${e.name}:${i + 1}: ${line.trim().slice(0, 200)}`);
           }

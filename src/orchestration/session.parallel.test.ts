@@ -143,4 +143,45 @@ describe("runToolBatch 并发调度", () => {
     expect(recs).toHaveLength(1);
     expect(recs[0].error).toMatch(/工具执行异常/);
   });
+
+  it("一批 3 个 explore 只执行 1 个，其余被成本闸门跳过", async () => {
+    const calls: Call[] = [1, 2, 3].map((i) => ({ id: String(i), name: "explore", arguments: "{}" }));
+    const { execute, events } = makeExecutor({});
+    const recs = await runToolBatch(calls, execute);
+    expect(events).toHaveLength(1);
+    expect(recs).toHaveLength(3);
+    expect(recs[0].result).toBe("ok");
+    expect(recs[1].error).toMatch(/成本|上限/);
+    expect(recs[2].error).toMatch(/成本|上限/);
+  });
+
+  it("9 个只读工具按 4 个一波限流，不是一次全扇出", async () => {
+    const calls: Call[] = Array.from({ length: 9 }, (_, i) => ({
+      id: String(i),
+      name: "read_file",
+      arguments: "{}",
+    }));
+    const { execute, events } = makeExecutor({ read_file: 20 });
+    const t0 = Date.now();
+    const recs = await runToolBatch(calls, execute);
+    const elapsed = Date.now() - t0;
+    expect(recs).toHaveLength(9);
+    expect(events).toHaveLength(9);
+    // 全串行 = 180ms；3 波并发约 60ms；上限 150ms 能区分两者
+    expect(elapsed).toBeLessThan(150);
+  });
+
+  it("MCP 动态工具名按 unknown 归入闸控层，不与只读工具并发", async () => {
+    const calls: Call[] = [
+      { id: "1", name: "mcp_context_mode_ctx_execute", arguments: "{}" },
+      { id: "2", name: "read_file", arguments: "{}" },
+    ];
+    const { execute } = makeExecutor({ mcp_context_mode_ctx_execute: 20, read_file: 20 });
+    const t0 = Date.now();
+    const recs = await runToolBatch(calls, execute);
+    expect(recs).toHaveLength(2);
+    expect(recs.every((r) => r !== undefined)).toBe(true);
+    // 两条串行 = 40ms；若被误判为并发则约 20ms
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(30);
+  });
 });
