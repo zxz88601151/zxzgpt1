@@ -142,3 +142,24 @@ App.tsx:526 send()
 ---
 
 *本文档为 Phase 0 审计产出，未修改任何业务代码。*
+
+---
+
+## 2026-11-06 状态校正（追加，覆盖上文过期口径）
+
+> 本文件上一次更新停在 2026-11-02，下表中的行数、`App.tsx:601` 行号引用、
+> 「压缩 / MCP / 子代理未实现」等结论**均已过期**，仅作历史留档。
+> **当前唯一权威以 `docs/governance/STATE.md` 为准。**
+
+| 项 | 本文旧口径 | 2026-11-06 实际 |
+|---|---|---|
+| `App.tsx` | 1340 行，唯一编排中心 | **1296 行**；轮循环早在 `orchestration/session.ts`，工程逻辑 / 压缩 prompt / MCP 生命周期 / 授权桥已抽到 `lib/` 与 `hooks/` |
+| 发送循环位置 | `App.tsx:601` | `orchestration/session.ts::runRounds(deps)`；`App.tsx` 只装配依赖 |
+| 工具调度 | 无并行 | `runToolBatch` 经 `budget.planToolBatch` 分波（cheap 4 并发 / expensive 每批最多 1 / gated 串行） |
+| 上下文压缩 | 未实现 | `orchestration/compact.ts` 已落地，prompt 在 `orchestration/summarize.ts` |
+| MCP 客户端 | 无 | `src-tauri/src/mcp.rs` + `lib/mcp.ts`；已由 `lib/toolpolicy.ts` 统一策略视图并默认 `Ask`（ADR 0004） |
+| 子代理 | 未实现 | `orchestration/subagent.ts`；停止信号经主链路 `signal` 传播 |
+| 工具数 | 9 条 IPC / 七个工具 | 内置 **11 个**工具 + MCP 动态工具 |
+| 单测 | 447 条 | **609 passed / 6 skipped（34 文件）** |
+
+ADR 0001 的验收项「`App.tsx` < 500 行」**仍未达成**，详见技术债台账 §7（D-06）。

@@ -481,3 +481,24 @@ P0 ──▶ P1 ──▶ P2 ──▶ P4
 ---
 
 *本文档为 Phase 0 审计产出的规划，未实施、未修改任何业务代码。*
+
+---
+
+## 2026-11-06 状态校正（追加，覆盖上文过期口径）
+
+> 本路线图的 P3/P4/P5 部分条目已被 11-05 的功能提交超前实现，随后 11-06 又完成
+> 队列 ①~⑤。**下表未达成的验收项保持 `[ ]`，已实现项不再重复规划。**
+> 当前执行队列与完成度以 `docs/governance/STATE.md` §5 为唯一权威。
+
+| 路线图条目 | 2026-11-06 状态 |
+|---|---|
+| 上下文压缩 / 并行工具 / Explore 子代理 / 联网搜索 / `glob` / `todo_write` | **已实现**（11-05 批次，独立复审见 `BATCH_20261105_INDEPENDENT_REVIEW.md`） |
+| MCP 客户端 + 工具纳管 | **已实现且已收敛权限**：ADR 0004 统一策略视图 + 默认 `Ask` + Rust `guard_mcp` |
+| P4-3「MCP 必须注册进 ToolRegistry + 默认 Ask」 | **已达成**（以统一策略视图 `lib/toolpolicy.ts` 的形式，而非把动态工具塞进静态数组，理由见 ADR 0004 D1） |
+| P5「父级 cancel → 子代理全部停止」 | **已达成**：`mainSignalRef` + 双重 abort 检查 |
+| P1-2「结果按 `tool_call_id` 归位且异常不留空洞」 | **已达成**：`toolFailure` 兜底 + 波内二次补洞 |
+| `[ ] App.tsx < 500 行，无 stateRef 手工双写` | **仍为 `[ ]`**：已降到 1296 行，手工双写仍在；见台账 D-06 |
+| 预览窗口真机 CSP 验证 | **BLOCKED / NOT_TESTED**：`PREVIEW_CSP_HOST_VERIFICATION_20261106.md` |
+
+后续批次建议：① 本轮代码改动的非实施者独立复审（D-27）→ ② 继续拆 `App.tsx` 接线层
+→ ③ `schemaVersion` 迁移链（D-07）→ ④ Windows 宿主执行 CSP 清单。

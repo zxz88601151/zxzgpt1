@@ -40,7 +40,7 @@ zxz/
 │   │   ├── tools.ts            工具定义、白名单、tool_calls 合并、测试回路决策（纯逻辑）
 │   │   ├── pending.ts          写入前确认：待批清单（纯逻辑，不碰 IPC）
 │   │   ├── fsapi.ts            本机文件 IPC 封装（列目录 / 读 / 写 / 拼目录树）
-│   │   └── *.test.ts           本目录 16 个单测文件（全仓 29 个 / 545 passed + 6 skipped，见 §9.6）
+│   │   └── *.test.ts           本目录 19 个单测文件（全仓 34 个 / 609 passed + 6 skipped，见 §9.6）
 │   ├── skills/
 │   │   ├── index.ts            内建技能装配（?raw 导入，与外部技能同一套解析）
 │   │   ├── sources.ts          外部来源登记表（29 条）+ 分组汇总 + 审计清单生成
@@ -316,7 +316,7 @@ node tools/e2e.cjs                       # 24 项，2026-11-03 实测 24/24
 按文件头 `@vitest-environment jsdom` 单文件声明，全局环境仍是 node：
 
 ```bash
-npm test                  # vitest run，545 passed + 6 skipped（29 个文件），2026-11-05 实测
+npm test                  # vitest run，609 passed + 6 skipped（34 个文件），2026-11-06 实测
 ```
 
 **两个本机踩过的坑，写下来省得再踩**：
@@ -423,7 +423,7 @@ node tools/desktop-skill-e2e.cjs    # 静态 21 项，本轮未跑（见 9.6，�
 ### 9.6 覆盖范围（2026-11-03 重测；2026-11-05 按 HEAD `2083011` 复核）
 
 **2026-11-05 本轮实测（Ubuntu 沙箱，HEAD `2083011`）**：`npm ci` PASS、
-`npm test` **545 passed / 6 skipped（29 文件）**、`npm run build` PASS（产物 365,04 kB）。
+`npm test` **609 passed / 6 skipped（34 文件）**、`npm run build` PASS（产物 369.72 kB）。
 本环境**未跑**：Rust 测试、本地四套 e2e、真机 CSP、打包——一律 `NOT_TESTED`，不标 PASS。
 CI 由 GitHub Actions 宿主跑过 **23 次**，最新 `CI #23 / 2083011` = **passing**
 （`frontend` / `rust-fs` / `e2e` 三 job 全绿，无 `continue-on-error`），
@@ -439,7 +439,7 @@ B14-B「首次 CI 运行」据此关闭。完整审计见
 | `tools/skill-e2e.cjs`（假 IPC 技能库） | 69 | **69 PASS / 0 FAIL** |
 | `tools/proxy-e2e.cjs`（真实 Rust 代理，重编后） | 11 + 24 | **11/11 接口 + 24/24 前端** |
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | 82 + 1 ignored | **82 PASS** |
-| `npx vitest run` | 447 / 20 文件 | **447 PASS**（2026-11-04 历史值；今日 545 / 29 文件见本节开头） |
+| `npx vitest run` | 609 / 34 文件 | **609 PASS**（2026-11-06 实测，见 §15.3） |
 
 **当日没跑，只有静态计数**（下表数字是脚本里 `check(...)` 的调用点数量，
 不是运行结果；未跑的原因逐个写在最后一列）：
@@ -1094,13 +1094,23 @@ Rust 侧另补了边界用例（`tools/fs-harness`，当日 **82 条全过**，�
 | ② 修复后复跑（2026-11-06） | **550 passed + 6 skipped（29 文件）** / `npm run build` PASS |
 | ③ 修复后复跑（2026-11-06） | **568 passed + 6 skipped（30 文件）** / `npm run build` PASS；Rust harness 新增 6 条 MCP 闸门测试全 PASS |
 | ④ 修复后复跑（2026-11-06） | **601 passed + 6 skipped（32 文件）** / `npm run build` PASS |
+| ⑤ 拆分后复跑（2026-11-06） | **609 passed + 6 skipped（34 文件）** / `npm run build` PASS（369.72 kB） |
 | 三处版本号 | 均 `0.3.0`，一致 |
 | GitHub Actions | 23 次运行，最新 `CI #23` = **passing**（三 job 全绿） |
-| Rust 测试 / 本地 e2e / 真机 CSP / 打包 / 真模型 | **`NOT_TESTED`**（Ubuntu 沙箱 + 宪章 §3 未授权，不标 PASS） |
+| Rust `tools/fs-harness`（纯逻辑，真实 `cargo test`） | 76 passed / 6 failed / 1 ignored；6 条失败经基线对照确认为**预存 Windows 路径语义失败**，新增 6 条 MCP 闸门测试全 PASS |
+| `src-tauri` 全量编译 / 本地 e2e / 真机 CSP / 打包 / 真模型 | **`NOT_TESTED`**（Ubuntu 沙箱 + 宪章 §3 未授权，不标 PASS） |
 
-### 15.4 下一步
+### 15.4 队列执行结果（业主 2026-11-06 确认的顺序）
 
-按优先级：① 归档本批次独立复审 → ② 子代理取消传播 + 并行批次异常处理 →
-③ MCP 工具纳入注册表并默认 `Ask`（**需业主裁定信任模型**）→ ④ 并发成本闸门与
-正则防护 → ⑤ `App.tsx` 拆分 → ⑥ 预览窗口真机 CSP 验证。
-完整验收标准见 `docs/governance/STATE.md` §5 与审计报告 §5。
+| 序 | 动作 | 结果 | 本地提交 |
+|---|---|---|---|
+| ① | 归档 11-05 批次独立复审 | **已完成**，结论 `PARTIAL` | `6dac044` |
+| ② | 子代理取消传播 + 并行批次异常处理 | **已完成**（D-17 / D-20） | `d5515a8` |
+| ③ | MCP 工具纳入注册表并默认 `Ask` | **已完成**（ADR 0004，业主裁定） | `851c990` |
+| ④ | 并发成本闸门 + 正则 ReDoS 防护 | **已完成**（D-21 / D-22） | `3935880` |
+| ⑤ | `App.tsx` 拆分 | **部分完成**：1570 → 1296 行，ADR 0001「< 500 行」仍 `[ ]` | `50c21ea` |
+| ⑥ | 预览窗口真机 CSP 验证 | **BLOCKED / NOT_TESTED**：交付 `docs/audit/PREVIEW_CSP_HOST_VERIFICATION_20261106.md` | — |
+
+**未验证项**：Rust `src-tauri` 全量编译、本地 e2e、真机 CSP、打包、真模型一律
+`NOT_TESTED`；本轮 6 笔提交均为**本地提交、未推送远端**，CI 未覆盖新提交。
+完整状态与证据见 `docs/governance/STATE.md`（唯一权威）与技术债台账 §7。

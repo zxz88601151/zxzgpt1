@@ -168,3 +168,30 @@ D-06 排第一不代表马上动手：它要动全仓最热、零覆盖的 320 �
 D-03（授权按工程目录）、D-05（`fs_list` / `fs_mkdir` 绝对路径）、D-07（无 `schemaVersion`）、
 D-15（`--warn` 未定义）、D-11 / D-12 / D-14 均未见改动；D-06 恶化（见 §2 修订行）。
 
+## 7. 2026-11-06 队列 ①~⑥ 修复登记（本轮最新，覆盖 §2 / §6 的状态列）
+
+> 依据：业主 2026-11-06 确认的执行队列；证据见 `git log`、`docs/governance/STATE.md`、
+> `docs/adr/0004-mcp-permission.md`、`docs/audit/BATCH_20261105_INDEPENDENT_REVIEW.md`。
+> 判定：已修项标提交号，**未验证项仍标 `NOT_TESTED`**，不冒充 PASS。
+
+| # | 原状态 | 本轮动作 | 新状态 | 提交 / 证据 |
+|---|---|---|---|---|
+| D-06 | `App.tsx` 1550 行，反向恶化 | 抽出 `lib/workspace.ts`、`orchestration/summarize.ts`、`hooks/useMcpServers.ts`、`hooks/useExecApproval.ts` | **PARTIAL**：**1296 行**（-274），ADR 0001「< 500 行」仍 `[ ]` | `50c21ea`；新增 8 条纯逻辑断言 |
+| D-13 | 545 条，组件层仍 0 | 接线层纯逻辑可单测 | **PARTIAL**：609 条 / 34 文件；组件层 DOM 单测仍 `ABSENT` | 每步 `npm test` 全绿 |
+| D-17 | P1 子代理不响应停止 | `mainSignalRef` 复用主 signal + `runRounds` 轮前检查 + `runSubagent` 请求前检查 | **已修** | `d5515a8`；`subagent.test.ts` 2 条新断言 |
+| D-18 | P1 MCP 未接入权限模型 | 统一策略视图 + 默认 `Ask` + Rust `guard_mcp` 闸门 | **已修（业主裁定 / ADR 0004）** | `851c990`；前端 27 条新断言、harness 6 条 MCP 测试全 PASS |
+| D-19 | P1 批次无独立复审 | 批次级独立复审归档 | **已修** | `6dac044`；`BATCH_20261105_INDEPENDENT_REVIEW.md`（结论 `PARTIAL`） |
+| D-20 | P2 `allSettled` 留空洞 | `toolFailure` 兜底 + 波内二次补洞 | **已修** | `d5515a8`；`session.parallel.test.ts` 3 条新断言 |
+| D-21 | P2 正则无 ReDoS 防护 | `lib/regexsafe.ts` 静态拒绝 + 行长截断 + `run` 二次校验 | **已修** | `3935880`；22 条断言 |
+| D-22 | P2 并发成本无上限 | `orchestration/budget.ts` 三类分波 + expensive 每批上限 1 | **已修** | `3935880`；11 条断言 |
+| D-23 | P2 预览窗口 CSP 无真机证据 | 交付可复现宿主验证清单 | **BLOCKED / NOT_TESTED**（未改任何 CSP） | `PREVIEW_CSP_HOST_VERIFICATION_20261106.md` |
+| D-24 | P2 治理文档基线失真 | `STATE.md` / 台账 / README / CLAUDE 同步，`CURRENT_ARCHITECTURE.md` / `ROADMAP.md` 补校正章节 | **已修** | 本轮文档提交 |
+| D-25 / D-26 | P3 `todo_write` 不持久化 / 文档数字失真 | 数字已同步；`todo_write` 未动 | D-26 **已修**；D-25 **仍在册** | — |
+| **D-27** | — | 本轮 ①~⑤ 的代码改动尚未经非实施者独立复审 | **P1 新增** | 宪章 §1：开发结论不构成验收结论；`STATE.md` R8 |
+
+> **编号更正**：`d5515a8` 提交消息里写的 `D-17/D-18` 中，后者应为 **D-20**
+> （`runToolBatch` 异常空洞）；D-18 是 MCP 权限，由 `851c990` 修复。按「一次提交只做一件事」
+> 不用 amend 改历史，在此登记以免后续对不上号。
+>
+> **复核后仍在册**：D-03（授权按工程目录）、D-05（绝对路径）、D-07（无 `schemaVersion`）、
+> D-15（`--warn` 未定义）、D-25（`todo_write` 不持久化）。
