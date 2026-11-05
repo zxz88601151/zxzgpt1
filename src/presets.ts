@@ -25,10 +25,10 @@ export const PRESETS: Preset[] = [
   },
   {
     id: "bigmodel",
-    name: "智谱 BigModel",
+    name: "智谱 BigModel（直连）",
     base: "https://open.bigmodel.cn/api/paas/v4",
-    models: ["glm-4-flash", "glm-4-plus", "glm-4-air"],
-    defaultModel: "glm-4-flash",
+    models: ["glm-4.5-flash", "glm-4.7-flash", "glm-4.6v-flash", "glm-4-flash", "glm-4-plus"],
+    defaultModel: "glm-4.5-flash",
   },
   {
     id: "siliconflow",
