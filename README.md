@@ -40,7 +40,7 @@ zxz/
 │   │   ├── tools.ts            工具定义、白名单、tool_calls 合并、测试回路决策（纯逻辑）
 │   │   ├── pending.ts          写入前确认：待批清单（纯逻辑，不碰 IPC）
 │   │   ├── fsapi.ts            本机文件 IPC 封装（列目录 / 读 / 写 / 拼目录树）
-│   │   └── *.test.ts           本目录 13 个单测文件（全仓 20 个 / 447 条，见 §9.6）
+│   │   └── *.test.ts           本目录 16 个单测文件（全仓 29 个 / 545 passed + 6 skipped，见 §9.6）
 │   ├── skills/
 │   │   ├── index.ts            内建技能装配（?raw 导入，与外部技能同一套解析）
 │   │   ├── sources.ts          外部来源登记表（29 条）+ 分组汇总 + 审计清单生成
@@ -316,7 +316,7 @@ node tools/e2e.cjs                       # 24 项，2026-11-03 实测 24/24
 按文件头 `@vitest-environment jsdom` 单文件声明，全局环境仍是 node：
 
 ```bash
-npm test                  # vitest run，447 条（20 个文件），2026-11-04 实测
+npm test                  # vitest run，545 passed + 6 skipped（29 个文件），2026-11-05 实测
 ```
 
 **两个本机踩过的坑，写下来省得再踩**：
@@ -420,9 +420,17 @@ node tools/skill-e2e.cjs   # 69 项，实测 69/69（默认连 localhost:1420）
 node tools/desktop-skill-e2e.cjs    # 静态 21 项，本轮未跑（见 9.6，同样需要先开 CDP 端口编译）
 ```
 
-### 9.6 覆盖范围（2026-11-03 重测，数字=实测；2026-11-04 追加前端单测）
+### 9.6 覆盖范围（2026-11-03 重测；2026-11-05 按 HEAD `2083011` 复核）
 
-**当日实跑，全绿**：
+**2026-11-05 本轮实测（Ubuntu 沙箱，HEAD `2083011`）**：`npm ci` PASS、
+`npm test` **545 passed / 6 skipped（29 文件）**、`npm run build` PASS（产物 365,04 kB）。
+本环境**未跑**：Rust 测试、本地四套 e2e、真机 CSP、打包——一律 `NOT_TESTED`，不标 PASS。
+CI 由 GitHub Actions 宿主跑过 **23 次**，最新 `CI #23 / 2083011` = **passing**
+（`frontend` / `rust-fs` / `e2e` 三 job 全绿，无 `continue-on-error`），
+B14-B「首次 CI 运行」据此关闭。完整审计见
+`docs/audit/HEAD_2083011_INDEPENDENT_AUDIT_20261105.md`。
+
+**下表是 2026-11-04 Windows 宿主当日实跑的历史记录，保留作对照，不代表今日实测**：
 
 | 脚本 / 命令 | 项数 | 结果 |
 |---|---|---|
@@ -431,7 +439,7 @@ node tools/desktop-skill-e2e.cjs    # 静态 21 项，本轮未跑（见 9.6，�
 | `tools/skill-e2e.cjs`（假 IPC 技能库） | 69 | **69 PASS / 0 FAIL** |
 | `tools/proxy-e2e.cjs`（真实 Rust 代理，重编后） | 11 + 24 | **11/11 接口 + 24/24 前端** |
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | 82 + 1 ignored | **82 PASS** |
-| `npx vitest run` | 447 / 20 文件 | **447 PASS**（2026-11-04） |
+| `npx vitest run` | 447 / 20 文件 | **447 PASS**（2026-11-04 历史值；今日 545 / 29 文件见本节开头） |
 
 **当日没跑，只有静态计数**（下表数字是脚本里 `check(...)` 的调用点数量，
 不是运行结果；未跑的原因逐个写在最后一列）：
@@ -768,12 +776,23 @@ WebView 侧配了 CSP（`tauri.conf.json` 的 `csp` / `devCsp`）：生产 `scri
 这是从“聊天壳”到“能自己验证的 Agent”的第一步，也是第一次改掉“不执行命令”
 这条旧定位，所以范围收得很紧：
 
-### 14.1 七个工具
+### 14.1 十一个内置工具（2026-11-05 复核）
 
-模型在工程模式下可用：`read_file`（读文件）、`list_dir`（列一层目录）、
-`search_files`（字面子串搜索，最多 100 个命中）、`write_file`（整文件写入，
-覆盖前备份、落盘后回读校验、确认开关同样生效）、`edit_file`（单处精确替换）、
-`apply_patch`（多处 hunk，任一处失败整体不写）、`run_command`（白名单命令）。
+`src/lib/registry.ts` 的 `TOOLS` 是内置工具的唯一真值源。模型在工程模式下可用：
+
+- 原有七个：`read_file`（读文件）、`list_dir`（列一层目录）、
+  `search_files`（内容搜索，最多 100 命中；`regex=true` 时按正则，大小写不敏感）、
+  `write_file`（整文件写入，覆盖前备份、落盘后回读校验、确认开关同样生效）、
+  `edit_file`（单处精确替换）、`apply_patch`（多处 hunk，任一处失败整体不写）、
+  `run_command`（白名单命令）。
+- 11-05 新增四个：`web_search`（Rust 侧联网搜索，只读）、`todo_write`（任务清单，
+  **注意：当前只把模型传来的清单格式化回显，不持久化任何状态**）、
+  `glob`（按模式匹配相对路径）、`explore`（派只读探索子代理，独立上下文、最多 4 轮，
+  工具集为探索三件套 + `glob` + `web_search`）。
+
+**MCP 插件工具不属于这十一个**：它们是 `src/lib/mcp.ts` 的动态清单，
+`App.tsx` 拼在 `TOOL_DEFS` 后面，**不在注册表内、也不经过执行授权闸门**，
+详见 §15 的安全边界说明。
 补丁工具只改已存在的文件（新建仍用 `write_file`），落盘复用 `write_file` 那条路：
 备份、写入前确认、回读校验一个不少；改动触发自动测试回路的规则也一样（按权限
 等级判断，不是按工具名手写）。
@@ -1008,3 +1027,63 @@ Rust 侧另补了边界用例（`tools/fs-harness`，当日 **82 条全过**，�
 **本批没做、仍在 P2 里的**：`read_range`、`glob`、`grep`、`.gitignore` 感知与敏感文件
 拦截、`delete_file`、验证链可配置（P2-3、P2-4）。P2 的出口条件（工具数 ≥ 10 等）
 按这批不算达成，别把这批读成 P2 完成。
+
+> 注：`glob` 已于 11-05 由 `c692df5` 补上（见 §14.1）；`read_range` / `grep` /
+> `.gitignore` 感知 / `delete_file` / 可配置验证链仍未做。
+
+---
+
+## 15. 2026-11-05 批次：新增能力、安全边界与待办（独立审计后补）
+
+> 本节由 `docs/audit/HEAD_2083011_INDEPENDENT_AUDIT_20261105.md` 摘录，
+> 对应 HEAD `2083011`。这一批 20 个提交此前没有独立复审记录，本轮补做首次只读复审；
+> **本节是事实说明，不是验收结论**。
+
+### 15.1 新增能力
+
+| 能力 | 提交 | 主要落点 |
+|---|---|---|
+| 内置预览窗口 / 文件回执预览按钮 | `ce311d5` `dde824b` | `lib.rs::open_preview`、`lib/appcontrol.ts` |
+| 联网搜索 `web_search` | `c813e26` | `lib.rs::web_search`、`registry.ts` |
+| 任务清单 `todo_write` | `e09ee9d` | `registry.ts` |
+| 正则搜索 + `glob` | `c692df5` | `registry.ts` |
+| 同步 Explore 子代理 | `a327ad0` | `orchestration/subagent.ts` |
+| 工具并行执行（只读扇出 / 写执行串行） | `6fcbee7` | `session.ts::runToolBatch` |
+| 上下文压缩（token 预算 + 增量摘要 + 结构化兜底） | `a0e2163` | `orchestration/compact.ts` |
+| MCP 客户端 + context-mode | `9e713f5` | `src-tauri/src/mcp.rs`、`lib/mcp.ts` |
+| 补丁编辑 / 探索模式 / 听写 / 预设更新 / 真机 e2e | `2adbfa1` `5137a08` 等 | 见 `git log` |
+
+### 15.2 用之前必须知道的四条边界
+
+1. **执行授权闸门不覆盖 MCP 工具**。`executeMcpToolCall` 只拦计划/探索模式，
+   不经过 `perms::decide`、不弹授权、没有默认 `Ask`；工具描述自己写着
+   「不受本程序受控执行白名单约束」。缺省 `context-mode` 为 `enabled: false`，
+   启用后其 `ctx_execute` 可执行任意代码。
+   已核实 `mcp.json` 位于应用配置目录（工程根之外）、有命令与凭据校验，
+   **不存在「模型改配置 → 自动拉起任意命令」这条链**，别把这两件事混为一谈。
+2. **子代理不响应「停止」**。点停止后主链路会停，但已扇出的 `explore` 子代理
+   仍可能跑完最多 4 轮模型请求；`runToolBatch` 的 `Promise.allSettled` 也会等整批。
+3. **预览窗口**接受任意 http(s) 或任意存在的本地文件（不限工程根、不限扩展名），
+   以 `WebviewUrl::External` 新建 WebView；External URL 的 CSP 是否生效**没有真机证据**。
+4. **只读 ≠ 无成本**。`isParallelSafeTool = access === "read"` 把 `web_search` 与
+   `explore` 也判为可并发，一批 N 个 `explore` 会产生 N 个子代理的模型请求；
+   另外 `search_files` 的正则没有 ReDoS 防护，复杂模式可能卡住渲染进程。
+
+以上四条与技术债台账 `TECH_DEBT_REGISTER_20261103.md` §6（D-17 ~ D-23）一一对应，
+**本轮均未修改代码**，等业主裁定后按 `STATE.md` §5 队列推进。
+
+### 15.3 实测与未验证
+
+| 项 | 2026-11-05 结果 |
+|---|---|
+| `npm ci` / `npm test` / `npm run build` | PASS / **545 passed + 6 skipped（29 文件）** / PASS |
+| 三处版本号 | 均 `0.3.0`，一致 |
+| GitHub Actions | 23 次运行，最新 `CI #23` = **passing**（三 job 全绿） |
+| Rust 测试 / 本地 e2e / 真机 CSP / 打包 / 真模型 | **`NOT_TESTED`**（Ubuntu 沙箱 + 宪章 §3 未授权，不标 PASS） |
+
+### 15.4 下一步
+
+按优先级：① 归档本批次独立复审 → ② 子代理取消传播 + 并行批次异常处理 →
+③ MCP 工具纳入注册表并默认 `Ask`（**需业主裁定信任模型**）→ ④ 并发成本闸门与
+正则防护 → ⑤ `App.tsx` 拆分 → ⑥ 预览窗口真机 CSP 验证。
+完整验收标准见 `docs/governance/STATE.md` §5 与审计报告 §5。

@@ -10,13 +10,22 @@
   `executeTool` / `writeFiles` / `readFiles` / `readRefs` / `runTest` / `currentWorkspace`。
   给循环加副作用时必须新增 deps 字段，并同步更新 `src/app.rounds.test.tsx` 的夹具——
   那里用假上游 + 假 IPC 驱动真实 `runRounds`，装配漏一个就会当场变红。
+  `session.ts` 现在还含 `runToolBatch`（只读并发扇出 / 写与执行串行）与 `maybeCompact` 调用；
+  新增 deps 已有 `summarize` / `patchConversation` / `maxRounds`。`App.tsx` 仍是 1550 行的装配中心，
+  ADR 0001 的「< 500 行」未达成，**不要再把新能力的接线往 App 里堆**。
 
 - 前端只做展示与编排，不直接碰磁盘：本机读写统一走 Tauri IPC，校验在 Rust 侧 `src-tauri/src/fsx.rs`；受控命令同理走 `run_allowed` IPC，校验在 `src-tauri/src/runx.rs`（两模块都不依赖 tauri，fs-harness 可直接单测）。
 - `fsx.rs` 不依赖 tauri，这样 `tools/fs-harness` 可以在无窗口环境下单测路径校验与落盘。
 - 模型与程序的协议：工具调用优先，文本约定作回退。
-  - 工具调用开启时：`read_file / list_dir / search_files / write_file / edit_file /
-    apply_patch / run_command` 七个工具（定义在 `src/lib/registry.ts` 的 `TOOLS`，
-    原生 `tool_calls` 协议，下一轮展开成 assistant tool_calls + tool 消息）；
+  - 工具调用开启时：`src/lib/registry.ts` 的 `TOOLS` 是**内置工具的唯一真值源，现为 11 个**：
+    `read_file / list_dir / search_files / write_file / edit_file / apply_patch /
+    run_command / web_search / todo_write / glob / explore`
+    （原生 `tool_calls` 协议，下一轮展开成 assistant tool_calls + tool 消息）。
+    `search_files` 支持 `regex=true`；`glob` 匹配相对路径；`explore` 派只读探索子代理
+    （独立上下文、最多 4 轮、工具集 = 探索三件套 + `glob` + `web_search`）。
+    **MCP 插件工具是另一套动态清单**（`src/lib/mcp.ts` 的 `mcpToolDefs`，`App.tsx` 拼到
+    `TOOL_DEFS` 后面），**不在 `TOOLS` 注册表内**，计划/探索拦截由
+    `executeMcpToolCall` 自己实现——详见下方安全红线，别把它当内置工具改注册表；
     `file:` / `@@read:` 只作不支持工具的兼容端回退，不要在工具可用时混用两套协议。
   - 补丁工具只改已存在的文件：`edit_file` 单处精确替换、`apply_patch` 多 hunk，
     old_text 必须逐字命中且恰好一次，不做模糊匹配；落盘复用 write_file 的
@@ -66,6 +75,19 @@
   `tauri dev`/打包运行时注入，headless 测不到——改了 CSP 必须在真机 DevTools 看有无 CSP 报错再算完成。
 - 扫描技能时只给行号与语境（代码块 / 劝阻 / 正文），不给危险分：同一条命令写在
   拦截规则表里是防护，写在卸载脚本里才是风险。
+- **执行授权闸门并不覆盖 MCP 工具**（2026-11-05 审计发现，D-18）：`executeMcpToolCall`
+  只拦计划/探索模式，不经过 `perms::decide`、不弹授权、无默认 `Ask`；工具描述本身写着
+  「不受本程序受控执行白名单约束」。缺省 `context-mode` 为 `enabled: false`，且其 `ctx_execute`
+  可执行任意代码。**在权限收敛落地前，不要在任何文档或结论里写「所有执行都要批准」。**
+  好消息：`mcp.json` 在 `app.path().app_config_dir()`（工程根之外），`fsx` 会话边界使模型
+  `write_file` 改不到它，`save_config` 另有裸命令/shell 元字符/凭据键校验——不存在
+  「模型改配置 → 自动拉起任意命令」这条链。
+- **子代理不响应主「停止」**（D-17）：`App.tsx` 给 `runSubagent` 传的是独立的
+  `new AbortController().signal`，`stop()` 只 abort 主 controller。动停止链路、并行调度或
+  子代理时必须一并修，别只改一半。
+- 预览窗口 `open_preview` 接受任意 http(s) 或任意**存在的本地文件**（不限工程根、不限扩展名），
+  用 `WebviewUrl::External` 新开 WebView。External URL 的 CSP 是否生效**没有真机证据**，
+  改预览或 CSP 前先按上面那条要求做宿主 DevTools 验证（D-23）。
 
 ## 改动纪律
 
@@ -84,3 +106,10 @@ npm test            # vitest 纯逻辑单测
 npm run build       # tsc + vite build
 cargo test --manifest-path tools/fs-harness/Cargo.toml  # Rust 文件层单测
 ```
+
+2026-11-05 独立审计实测基线（HEAD `2083011`，Ubuntu 沙箱）：`npm ci` PASS、
+`npm test` **545 passed / 6 skipped（29 文件）**、`npm run build` PASS（365,04 kB）、
+三处版本号均 0.3.0、CI 23 次运行最新 `passing`。
+本环境**未跑**：Rust 测试、本地 e2e、真机 CSP、打包（均标 `NOT_TESTED`，别据此写 PASS）。
+完整结论见 `docs/audit/HEAD_2083011_INDEPENDENT_AUDIT_20261105.md` 与
+`docs/governance/STATE.md`（唯一权威状态板）。

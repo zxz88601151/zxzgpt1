@@ -3,6 +3,10 @@
 日期：2026-11-03　｜　维护者：Project Director（Agent 小队）
 口径：只收**当前 HEAD 上仍然成立**的项。已修项在 §4 列出，避免"修复了但清单还在"。
 
+> **2026-11-05 复核**：本清单 §2 的数字（单测条数、`App.tsx` 行数、CI 状态）已按
+> HEAD `2083011` 校正；新增条目见 **§6**。完整证据见
+> `docs/audit/HEAD_2083011_INDEPENDENT_AUDIT_20261105.md`。
+
 级别定义（按真实风险，不按历史标签）：
 
 | 级别 | 含义 |
@@ -38,14 +42,14 @@
 | D-03 | P2 | 执行授权按**工程目录**记账，不是按对话 | `wsx::open` 对同一目录复用会话号，Rust 只有一个桶（DEC-008） | 前端在切/新建/删除/清空对话时主动撤回，把粒度**补偿**回对话级；一旦有绕过前端的调用路径就退回工程级 | 已知取舍，已写入 README 14.2.1 |
 | D-04 | ~~P2~~ | ~~`.zxz/undo` 子目录列举失败时静默跳过~~ | `listUndo` 的 `walk()` 逐层 `catch { return }` | 会产出**看起来完整**的快照列表。不导致数据丢失（恢复时 `undo_read` 会明确报错），但用户可能据此判断"这版没改过某文件" | **已修（B11）**，见 §4 第 18 条 |
 | D-05 | P2 | 渲染进程可对任意绝对路径 `fs_list` / `fs_mkdir` | `lib.rs` 的 `fs_cmds::fs_list` / `fs_mkdir` 是无状态命令，不校验会话 | 选择器天生要能浏览（设计如此），但一旦渲染进程被攻破（XSS/恶意依赖），可枚举全盘目录、在全盘建空目录。写入/读取内容仍被会话通道挡住 | 设计取舍，未修 |
-| D-06 | P2 | `App.tsx` 1520 行上帝组件 + `stateRef` 手工双写 | ADR 0001 验收项 `App.tsx < 500 行` 仍为 `[ ]` | 任何 UI 改动的回归面都很大 | 未修（ADR 0001 未完成） |
+| D-06 | P2 | `App.tsx` **1550 行**上帝组件 + `stateRef` 手工双写（11-05 复核：B12-B3 曾降到 1338，之后新增 MCP 装配/压缩/子代理/预览接线又回升 212 行） | ADR 0001 验收项 `App.tsx < 500 行` 仍为 `[ ]`，且**反向恶化** | 任何 UI 改动的回归面都很大 | 未修（ADR 0001 未完成） |
 | D-07 | P2 | 存档单键、无 `schemaVersion` | `zxz.state.v1` 一把梭；`250ms` 全量写，含 `streaming` 中间态 | 字段语义变更无法迁移；写放大 | 未修 |
-| D-08 | P2 | e2e 进不了 CI | R3 三个成因全部处理：`msedge` 硬编码 → `tools/browser.cjs` 逐级回落；端口 5173 vs 1420 → 默认 `localhost:1420` + 子进程显式继承 `ZXZ_BASE`；`playwright` 已入 `devDependencies`（业主批准）。`ci.yml` 新增 `e2e` job | 本地四套脚本零环境变量可跑；CI 里那个 job **从未在 GitHub 上实际执行过**（本地跑不了 Actions），所以只能标 `NOT_TESTED` 而不是 `PASS` | 已接入，待首次运行确认 |
+| D-08 | P2 | e2e 进不了 CI | R3 三个成因全部处理：`msedge` 硬编码 → `tools/browser.cjs` 逐级回落；端口 5173 vs 1420 → 默认 `localhost:1420` + 子进程显式继承 `ZXZ_BASE`；`playwright` 已入 `devDependencies`（业主批准）。`ci.yml` 新增 `e2e` job | 本地四套脚本零环境变量可跑；**2026-11-05 复核：GitHub Actions 已跑 23 次，最新 `CI #23 / 2083011` badge `passing`，三 job 无 `continue-on-error` → `e2e` job 首次运行 PASS**（DEC-012） | **已修（宿主实测，非本地自证）** |
 | D-09 | ~~P2~~ | ~~release 无条件带 devtools~~ | `tauri/Cargo.toml` 的 `features=["devtools"]` 无 `cfg(debug_assertions)` 门控 | 发布物给用户附赠一个调试接口 | **已修**，见 §4 第 19 条 |
 | D-10 | P3 | 一次性授权在闸门处即扣，spawn 失败也扣 | `perms::decide` 在 `runx` 之前扣 `uses_left` | 用户要再批一次。失败方向是**更严**，不是更松 | 取舍，已写入 README 14.2.1 |
 | D-11 | P3 | `GIT_CONFIG_GLOBAL=<空设备>` 同时丢掉用户的 `safe.directory` | `runx.rs` 的 git 隔离项 | 仓库属主不同时报 `dubious ownership`。报错明确，不是静默错误结果；保留用户配置等于重新打开 `textconv` 那扇门 | 取舍（DEC-003 的直接后果） |
 | D-12 | P3 | 熵注释口径不一致（128 vs 256 位） | `proxy.rs` 的 `RandomState` | 纯注释问题 | 未修 |
-| D-13 | P3 | 测试覆盖结构失衡 | 437 条集中在 `src/lib` + `src/skills` + `src/api.ts` + `orchestration`；`App.tsx` 与组件层仍基本 0 | 与 D-02 同源（组件层没有 DOM 就没法测） | 未修 |
+| D-13 | P3 | 测试覆盖结构失衡 | **545 条**（11-05 复核）集中在 `src/lib` + `src/skills` + `src/api.ts` + `orchestration`；`App.tsx` 与组件层仍基本 0 | 与 D-02 同源（组件层没有 DOM 就没法测） | 未修 |
 | D-14 | P3 | e2e 假 IPC 需手工跟随真 IPC | `tools/workspace-e2e.cjs` 的 `__TAURI_INTERNALS__` 桩本轮才补齐 `undo_*` / `perm_*` | 新增一条 IPC 就忘一次，失效方式是**误导性超时**而不是报错 | 机制性风险，未根治 |
 | D-15 | P3 | 样式变量 `--warn` 被引用 4 次、从未定义 | `src/styles.css` 全文无 `--warn:` 声明；4 处引用各带不同 fallback（`#e3b341` / `#d08a2a` / `#b8860b`） | 每个 `var(--warn, X)` 都在用自己的 X，同一个语义在不同位置是三种颜色。改主题时改不动 | 未修（B11 只做记录，不动别人的颜色） |
 | D-16 | P3 | ~~用户点「停止」会让代理日志报"连接处理失败"~~ **已修（2026-11-04）** | `proxy.rs` 现在用 `ConnError::{PeerGone,Fatal}` 区分：`BrokenPipe` / `ConnectionReset` / `ConnectionAborted` 归 `PeerGone` 并静默，其余照旧打日志；读路径的畸形请求仍是 `Fatal` | 日志在说谎的方向是"平时天天报错"，真出故障时反而分不出来 | **已修**：`docs/audit/D16_INTERRUPT_LOG_20261104.md`；3 条 Rust 单测 + 端到端对照（旧行为打到 `os error 10053`，新行为 stderr 为空） |
@@ -129,3 +133,38 @@ D-06 排第一不代表马上动手：它要动全仓最热、零覆盖的 320 �
 2. 级别按"真实风险"定，不按"看起来严重"定。降级和撤回都要写理由（§1 就是模板）。
 3. 修完的项**从 §2 移到 §4**，并在 §4 记提交号。清单里同时出现"已修"和"在册"是清单失效的开始。
 4. 每次批量交付后重扫一遍 §2：有些项会因为别的改动而消失（这次 proxy 那条就是顺路修的）。
+
+---
+
+## 6. 2026-11-05 复核新增（HEAD `2083011`）
+
+证据与修复方案见 `HEAD_2083011_INDEPENDENT_AUDIT_20261105.md` §3 / §5。
+级别沿用 §0 定义；**本轮为独立只读审计，下列代码项均未修**。
+
+| # | 级别 | 项 | 证据 | 影响 | 状态 |
+|---|---|---|---|---|---|
+| **D-17** | **P1** | 子代理不响应「停止」 | `App.tsx:639` 传 `new AbortController().signal`；`App.tsx:893,962` 的 `stop()` 只 abort 主 controller；`session.ts:138` 的 `allSettled` 还会等整批只读工具 | 界面显示「已停止生成」，子代理仍跑最多 4 轮模型请求；与已修 D-01 同类回归，且产生真实费用（宪章 §3）；ROADMAP P5「父级 cancel → 子代理全部停止」未达成 | 未修 |
+| **D-18** | **P1** | MCP 工具未接入权限模型 | `mcp.ts:245` 描述自承「不受本程序受控执行白名单约束」；`mcp.ts:311-333` 只拦 plan/explore、无 `Ask`；`App.tsx:917` 动态清单不在 `registry.ts` 的 `TOOLS` 内；`App.tsx:649` 子代理侧靠 `startsWith("mcp_")` 硬拦 | 与 `MCP_PREREQUISITE_AUDIT.md` §4「先做 MCP 等于先把闸门拆了再装门」、ROADMAP P4-3「必须注册进 ToolRegistry + 默认 Ask」冲突；用户认知里「所有执行都要批准」被打破。缓解：默认 `enabled:false`、配置在工程根之外且有校验 | 未修，**需业主裁定信任模型**（DEC-013） |
+| **D-19** | **P1** | 11-05 批次无独立复审 | `git log --since=2026-11-05 -- docs/audit/` 为空；`docs/audit/` 最新为 11-04 `D16_*` | 20 个提交引入 6 类新攻击面（MCP stdio 子进程 / 联网搜索 / 预览窗口 / 正则 / 子代理 / 并行扇出）全部无独立复核；违反宪章 §1 与 ROADMAP 阶段间 STOP | 本轮补首次独立复审；**产品验收签字仍 `ABSENT`** |
+| **D-20** | P2 | `runToolBatch` 吞异常留下空洞记录 | `session.ts:138-142` 用 `Promise.allSettled` 且不检查 rejected，`records[i]` 可能为 `undefined`；随后 `session.ts:281` 的 `findTool(r.name)` 与 `buildMessages` 展开会 `TypeError` | 整轮崩溃而非降级为错误文本；ROADMAP P1-2「结果按 `tool_call_id` 归位」未达成 | 未修 |
+| **D-21** | P2 | 正则搜索无 ReDoS 防护 | `registry.ts:183-189` 只验语法；`:197` 用 `new RegExp(query,"i")` 逐行 `test()`；query 上限 200 字符但 `(a+)+$` 20 字符即可灾难性回溯 | 可卡死渲染进程；`c692df5` 新增、无复审 | 未修 |
+| **D-22** | P2 | 只读并发判定过宽、成本无上限 | `isParallelSafeTool = access === "read"`（`registry.ts:54`）把 `web_search` / `explore` / `todo_write` 一律判为可并发 | 一批 N 个 `explore` → N 个子代理并发 → 成本 ×N；无并发上限、无预算闸门（宪章 §3） | 未修 |
+| **D-23** | P2 | 预览窗口边界未纳入治理 | `lib.rs:312-355` 接受任意 http(s) 或任意存在本地文件（不限工程根、不限扩展名），`WebviewUrl::External` 建窗；`docs/audit/` 与 README 无记录 | External URL 的 CSP 是否生效**未真机验证**（宪章 §3.7）；触发口目前仅用户 `/preview` 与文件回执按钮，模型不可直达 | 未修；真机验证在本沙箱 `BLOCKED` |
+| **D-24** | P2 | 治理文档基线失真 | `STATE.md` 停在 `8142815` / 447 单测；`CURRENT_ARCHITECTURE.md`（11-02）写 `App.tsx 1340 行`、`send()` 在 App、9 条 IPC；`ROADMAP`（11-02）把压缩 / MCP / 子代理标为「未实现」 | 后续优先级基于错误前提 | **部分已修**：本轮对齐 `STATE.md` / 本清单 / `CLAUDE.md` / `README.md`；`CURRENT_ARCHITECTURE.md`、`ROADMAP.md` 待下批 |
+| **D-25** | P3 | `todo_write` 不持久化任何状态 | `registry.ts:508-516` 的 `run()` 只把模型传来的清单格式化回显，无 `ctx` 副作用、无 UI 状态 | 描述宣称「维护任务清单、跟踪进度」，实际没有跨轮存储 | 未修 |
+| **D-26** | P3 | 文档数字与工具清单失真 | README §9.6「447 / 20 文件」、§14.1「七个工具」；`CLAUDE.md`「七个工具」 | 与实测 545/29、11 个工具不符；`CLAUDE.md` 明确要求 README 数字等于实测 | **部分已修**：本轮同步 README 与 `CLAUDE.md` 的关键口径 |
+
+### 6.1 已复核为「不成立」的猜测（避免清单虚高）
+
+| 猜测 | 结论 | 依据 |
+|---|---|---|
+| 模型改写工程内 `mcp.json` → 自动拉起任意命令 → RCE | **不成立** | `config_path()` 用 `app.path().app_config_dir()`（工程根之外），`fsx` 会话边界不可达；`validate_server_config` 拒路径 / shell 元字符 / 凭据键；`save_config` 原子写 |
+| 版本号 0.3.0 vs 0.1.0 不一致 | **已修** | 三处均 0.3.0 |
+| e2e 进 CI 从未跑过（D-08 / B14-B） | **已 PASS** | GitHub Actions 23 次运行，最新 `#23` `passing` |
+| 11-05 新增能力无测试 | **不成立** | 545 条里含 `compact` 16、`mcp` 27、`appcontrol` 26、`session.parallel` 5、`subagent` 2、`session.explore` 2；`perf` 6 条按设计 skipped |
+
+### 6.2 复核后仍在册的旧项
+
+D-03（授权按工程目录）、D-05（`fs_list` / `fs_mkdir` 绝对路径）、D-07（无 `schemaVersion`）、
+D-15（`--warn` 未定义）、D-11 / D-12 / D-14 均未见改动；D-06 恶化（见 §2 修订行）。
+

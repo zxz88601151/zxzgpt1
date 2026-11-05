@@ -1,35 +1,41 @@
 # 项目状态板（唯一权威）
 
-最后更新：2026-11-04 10:20　｜　维护者：Project Director（Agent 小队）
+最后更新：2026-11-05（独立只读审计复核）　｜　维护者：独立只读审计（对齐真实 HEAD `2083011`）
 状态判定用词：`PASS` `PARTIAL` `FAIL` `ABSENT` `NOT_TESTED` `BLOCKED`
+
+> **本次更新缘由**：本文件上一版停在 2026-11-04 10:20 / HEAD `8142815`，
+> 而公开仓库真实 HEAD 已是 `2083011`（11-05 14:29），中间 20 个提交落地了 6 类新能力。
+> 过期状态板会导致后续所有优先级判断基于错误前提，故先对齐基线，再谈推进。
+> 完整证据见 `docs/audit/HEAD_2083011_INDEPENDENT_AUDIT_20261105.md`。
+> **上一版的历史实测数据（Windows 宿主）保留在 §1.1 作为对照，不删除、不冒充今日实测。**
 
 ---
 
-## 1. 身份基线（FACT，2026-11-04 10:18 B12-B5 实测）
+## 1. 身份基线（FACT，2026-11-05 独立审计复核）
 
 | 项 | 值 |
 |---|---|
-| 仓库 | `F:/zhuomian/zxz`（product `zxz` / `com.zxz.desktop`） |
-| 分支 / HEAD | `main` / `8142815`（B12-B3 已提交；ahead `origin/main` 与 `github/main` 各 **26**，**未推送**） |
-| 远端 | `origin` 内网 Gitea `<内网地址>/<user>/zxzgpt.git`（**当前认证失败，推送会直接报错**，见 B12-B4 §6）；`github` = `zxz88601151/zxzgpt1`（**公开仓库**，CI 只认它）。注：2026-11-04 推送前对公开可见内容做了内网信息占位处理 |
-| 版本号 | `package.json` / `tauri.conf.json` / `Cargo.toml` 三处均 `0.3.0`（一致） |
-| 技术栈 | Tauri 2 + Rust（fsx / runx / wsx / proxy / api / perms）＋ React 18 + TS + Vite 6；测试用 vitest（node 环境为主，DOM 用文件头 `@vitest-environment jsdom` 单文件声明） |
-| 规模 | 前端生产代码 8,975 行（`App.tsx` **1338** 行 + `orchestration/session.ts` 321 行），测试 4,534 行；Rust 8 文件 / 7 模块 |
-| 工作区 | **干净**（B12-B5 重编后复核 `git status --porcelain` 为空）。`.zxz/` 存旧 exe 备份与构建日志，已在 `.gitignore:15` 忽略 |
+| 仓库 | 公开仓库 `zxz88601151/zxzgpt1`（product `zxz` / `com.zxz.desktop`）；本轮工作副本 `/workspace/zxzgpt1` |
+| 分支 / HEAD | `main` / **`2083011`**（2026-11-05 14:29 +0800），工作区**干净** |
+| 远端 | `origin` = 公开 GitHub `zxz88601151/zxzgpt1`（CI 只认它，已同步到 `2083011`）；另有一路内网 Gitea `<内网地址>/<user>/zxzgpt.git`（历史记录，认证状态未复核）。2026-11-04 推送前已对公开可见内容做内网信息占位处理 |
+| 版本号 | `package.json` / `tauri.conf.json` / `Cargo.toml` 三处均 `0.3.0`（**一致**；ROADMAP §P6 记的 0.1.0 已修） |
+| 技术栈 | Tauri 2 + Rust（fsx / runx / wsx / proxy / api / perms / **mcp**）＋ React 18 + TS + Vite 6；vitest |
+| 规模 | 生产代码 15,807 行；`App.tsx` **1550 行**、`orchestration/session.ts` 390 行、`registry.ts` 688 行、`mcp.rs` 936 行；单测 **29 文件 / 551 条（545 passed + 6 skipped）** |
+| 内置工具 | **11 个**：`read_file` `list_dir` `search_files` `write_file` `edit_file` `apply_patch` `run_command` `web_search` `todo_write` `glob` `explore`（`registry.ts:586` 唯一权威）＋ MCP 动态工具（独立于注册表） |
+| 11-05 新增能力 | 内置预览窗口、`web_search`、`todo_write`、正则搜索 + `glob`、同步 Explore 子代理、工具并行执行、上下文压缩与预算、MCP 客户端、预设更新、听写 V1、补丁编辑与探索模式 |
 
 ### 1.1 基线命令与实测结果
 
-| 命令 | 结果 |
-|---|---|
-| `npm test` | **447 passed / 20 files**（2026-11-04 10:11 B12-B5 重跑；25.4s） |
-| `npm run build` | 成功；`dist/assets/index-CI0qq08X.js` **336,162 B**（sha256 `a15eb818…`），由 `tauri build` 的 `beforeBuildCommand` 于 2026-11-04 10:14 重跑 |
-| `cargo test --manifest-path tools/fs-harness/Cargo.toml` | **82 passed / 1 ignored**（GNU 工具链；msvc 必失败） |
-| `cargo test --manifest-path tools/proxy-harness/Cargo.toml` | **3 passed**（D-16 的错误分类表；同一套 GNU 工具链） |
-| `cargo check --manifest-path src-tauri/Cargo.toml` | 通过；**2 条环境级 warning**（incremental 目录 `.lock` 删除被拒 `os error 5`），非代码警告 |
-| e2e（2026-11-04 10:12 B12-B5 实跑） | `e2e.cjs` **24/24**、`workspace-e2e` **39/39**、`skill-e2e` **69/69**、`proxy-e2e` **接口 11/11 + 前端 24/24** |
-| `npx tauri build --no-bundle` | PASS（2026-11-04 10:18，4m12s）：`zxz.exe` 5,105,664 B / sha256 `66dbd4c5…`；内嵌 `index-CI0qq08X.js` + `index-DLSfHGKG.css` = `dist/assets` 同名；`remote-debugging` 0。日志 `.zxz/logs/tauri-build-20261104.log`。**该 exe 已被下一次 bundle 构建覆盖** |
-| `npx tauri build --bundles nsis` | **PASS**（2026-11-04 10:29，3m39s）：`zxz.exe` **5,105,664 B / sha256 `68b99479…`**（同源重建：体积一字不差、字节不同 → **逐字节不可复现**）；安装包 `bundle/nsis/zxz_0.3.0_x64-setup.exe` **2,230,744 B（2.13 MiB）/ sha256 `14ea02bb…`**，`FileVersion` = `ProductVersion` = `0.3.0`，`NotSigned`。日志 `.zxz/logs/tauri-bundle-nsis-20261104.log`（含 `Downloading nsis-3.13.zip`、`nsis_tauri_utils-v0.5.3.dll` 及哈希校验、`makensis`、`Finished 1 bundle`） |
-| CI 是否跑到新测试 | **是**：`.github/workflows/ci.yml` 的 `npm test` 走 vitest，`vitest.config.ts:11` 的 `include` 覆盖 `src/**/*.test.ts(x)` |
+| 命令 / 检查 | 2026-11-05 本轮实测（Ubuntu 沙箱） | 2026-11-04 Windows 宿主实测（历史对照） |
+|---|---|---|
+| `npm ci` | **PASS** | — |
+| `npm test` | **545 passed / 6 skipped（551）**；28 文件通过 + 1 跳过；6.16s | 447 / 20 文件（25.4s） |
+| `npm run build` | **PASS**；86 modules；`index-BNUoWb_l.js` 365,04 kB / gzip 131,82 kB | 336,162 B（`index-CI0qq08X.js`） |
+| `cargo test` / `cargo check` | **`NOT_TESTED`**：本沙箱 Ubuntu；fs-harness 11 条按 Windows 语义设计，宪章 §5 固定 `windows-latest` + GNU 工具链 | 82 passed / 1 ignored（fs-harness）、3 passed（proxy-harness）、`cargo check` 通过 |
+| 本地 e2e（4 套） | **`NOT_TESTED`**：需 Playwright 浏览器本体与 Rust harness 编译 | 24/24、39/39、69/69、11+24 全绿 |
+| **CI（GitHub Actions 宿主）** | **PASS**：共 **23 次运行**，最新 `CI #23 / 2083011` badge = `passing`；`ci.yml` 三 job 无 `continue-on-error` → `frontend` / `rust-fs` / `e2e` 全绿。**B14-B「首次 CI 运行」据此关闭**（宿主实测，非本地自证） | job 已写但从未跑过 → 当时标 `NOT_TESTED` |
+| 打包 / 安装包 | **`NOT_TESTED`**（本轮未授权构建；宪章 §3 需业主显式授权） | B12-B6 NSIS 安装包 PASS，业主实测安装成功、可写回代码；未签名、未测卸载、未测无 WebView2 机器 |
+| 真机 CSP（含预览窗口 External URL） | **`NOT_TESTED`**：`CLAUDE.md` 要求宿主级 DevTools 证据 | 主窗口 CSP 已配 |
 
 `[FACT]` 本机 msvc 默认工具链会在链接期被 Git for Windows 的 coreutils `link.exe` 抢占，
 报 `link: extra operand`，且后台包装器仍上报 exit 0。**Rust 测试一律用**
@@ -39,97 +45,85 @@
 
 | 阶段 | 状态 | 依据 |
 |---|---|---|
-| Phase 0 接管 | **COMPLETE** | 上表；与 `C1D_BASELINE_AND_GATE.md` 的基线差异已核对（HEAD 前移 3 个提交、版本号已统一） |
-| Phase 1 诊断 | **COMPLETE** | 三组独立只读审计（安全 / 架构 / 质量），见 §4 |
-| Phase 2 规划 | **COMPLETE** | 本文件 §5 队列 |
-| Phase 3 研发 | **IN PROGRESS** | B1/B3/B4/B5/B6/B7/B8/B10/B11/B13/B15/B16 已落地并验证 |
-| Phase 4 独立审查 | IN PROGRESS | B10 一批已做独立复审（11 条发现，逐条验证后 9 条成立、2 条驳回）；B7 一批 8 条；B12-A 待审 |
-| Phase 5/6 验收交付 | NOT_STARTED | 交付物未重编、未打安装包 |
+| Phase 0 接管 | **COMPLETE** | 见 §1.1 |
+| Phase 1 诊断 | **COMPLETE**（11-05 追加一轮） | 三组独立只读审计（安全 / 架构 / 质量）+ 本轮 `HEAD_2083011_INDEPENDENT_AUDIT_20261105.md` |
+| Phase 2 规划 | **PARTIAL** | ROADMAP 的 P3/P4/P5 条目已被 11-05 代码超前实现，规划文档未同步；§5 队列已按新证据重排 |
+| Phase 3 研发 | **IN PROGRESS** | B1–B16、B12-A/B、D-16 已落地；11-05 又落地 20 个功能提交（见 §1） |
+| Phase 4 独立审查 | **PARTIAL** | 11-03/11-04 批次有独立复审；**11-05 的 20 个提交此前 `ABSENT`，本轮补首次独立复审（审计报告 §3）** |
+| Phase 5/6 验收交付 | **PARTIAL** | 安装包 B12-B6 已 PASS 并业主实测；CI `e2e` job 首次运行 PASS；产品级验收签字仍缺 |
 
 ## 3. 当前结论（不夸大）
 
-- 代码级质量：**良好**。447 条前端单测、85 条 Rust 单测（fs-harness 82 + proxy-harness 3）全绿；安全类断言质量高（负向断言 + 解析器级判定 + 「陷阱直发能触发、走加固路径不触发」的对照写法）。新增的传输层、接线层与代理错误分类用例做过变异检验（改坏生产代码 → 对应用例必须变红），不是只看绿灯。
-- 安全态势：**PARTIAL → 明显改善**。P0 三条 + 本轮 2 条（npm `pre`/`post` 钩子绕过、`.npmrc` 改脚本 shell）+ 执行授权闸门（P0-4）已落地；其余已登记项见 §5 与 `TECHNICAL_DEBT.md`。
-- 交付状态：**NOT_READY**。无安装包；CI 不编译 `src-tauri` 本体；e2e 无法在 CI 复现；release exe 已落后于 HEAD。
-- 架构状态：**PARTIAL（明显改善）**。轮循环已搬进 `src/orchestration/session.ts`（B12-B3，321 行），`App.tsx` 1520 → **1338 行**，编排层不再 import react；工具五处手写已收成注册表（B6）。ADR 0001 的 5 条验收标准 **4 条达成**，剩「`App.tsx` < 500 行」——那 1338 行里剩的主要是 UI 状态与各面板接线，不是编排。
+- **代码级质量：良好**。545 条前端单测全绿、构建通过、CI 三 job 全绿；新增能力（压缩 / 并行 / MCP / 子代理 / 预览命令）都有对应单测文件。
+- **治理状态：PARTIAL（本轮已对齐）**。状态板曾落后 HEAD 20 个提交；`README` / `CLAUDE.md` / `CURRENT_ARCHITECTURE.md` / `ROADMAP` 仍有多处过期口径，已在审计报告 §2 逐条列出，本轮同步了 `STATE.md` / `TECH_DEBT_REGISTER` / `CLAUDE.md` / `README.md` 的关键事实，`CURRENT_ARCHITECTURE.md` 与 `ROADMAP.md` 待下批。
+- **安全态势：PARTIAL（出现新旁路）**。P0 三条 + 执行授权闸门（P0-4）仍在；但 11-05 合入的 **MCP 工具未接入权限模型**（无 `Ask`、不在注册表内），与 `MCP_PREREQUISITE_AUDIT.md` §4 的前置约束冲突。已核实「模型改写工程内 `mcp.json` → RCE」**不成立**（配置在工程根之外且有校验）。
+- **控制面：PARTIAL**。**子代理不受主「停止」信号控制**（`App.tsx:639` 新建独立 controller），与已修的 D-01 同类回归，且伴随真实模型费用。
+- **架构状态：PARTIAL（本轮恶化）**。轮循环已在 `orchestration/session.ts` 且该目录不 import react；但 `App.tsx` 从 1338 行回升到 **1550 行**，ADR 0001「< 500 行」更远了。
+- **交付状态：NOT_READY（指产品验收，非构建物）**。构建物历史上已产出并业主实测；本轮未重编、未推送、未打包。
 
-## 4. 诊断要点（摘要，证据见各审计文件）
+## 4. 诊断要点（摘要，证据见审计报告 §3）
 
 | 维度 | 关键事实 |
 |---|---|
-| 编排 | ~~`send()` 约 320 行闭包~~ **已搬（B12-B3）**：轮循环在 `orchestration/session.ts` 的 `runRounds(deps)`，App 只装配依赖；`MAX_ROUNDS` 已导出（B7）；轮末判定是纯函数 `round.ts`；`AbortController` 已能杀 `npm test`（B13 `run_cancel`）。**仍欠**：run 状态散在 `deps` 与闭包之间，未做成显式状态机（ADR D2）；`stateRef` 手工双写仍在 |
-| 工具 | ~~新增 1 个工具要改 5 处，无注册表~~ **已修（B6）**：`src/lib/registry.ts` 的 `TOOLS` 是唯一真值源，其余全部派生；`findTool` 精确匹配不归一 |
-| 持久化 | 单键 `zxz.state.v1`，**无 schemaVersion**；250ms 全量写，连 `streaming` 中间态一起写；系统消息**完全不计**上下文预算 |
-| 计划模式 | 只有布尔开关 + 两处拦截 + 一段提示词；无产物、无审批、无对账 |
-| 测试 | ~~`api.ts` 零覆盖~~ **已覆盖（B12-A）**；**接线层已有 10 条整轮用例**（B12-B1 4 条 + B12-B2 6 条，jsdom + 假上游 + 假 IPC），7 类行为等价场景全齐；组件层（`Sidebar`/`SettingsDrawer` 等 2300+ 行）仍靠 e2e 兜着，无组件单测 |
-| CI | 仅 `frontend` + `rust-fs`；无 fmt/clippy、无 e2e、无版本一致性、无覆盖率门槛 |
+| 编排 | 轮循环在 `session.ts` 的 `runRounds(deps)`，依赖注入完整；新增 `runToolBatch` 并发调度（只读扇出 / 写执行串行），但 `Promise.allSettled` 未处理 rejected，异常时可能留下 `undefined` 记录导致整轮崩溃 |
+| 工具 | `registry.ts` 的 `TOOLS` 仍是内置工具唯一真值源，但**扩到 11 个**；MCP 工具是独立动态清单，未纳入注册表与权限模型 |
+| 持久化 | 单键 `zxz.state.v1`，**无 `schemaVersion`**（D-07 仍在）；新增 `compactSummary` / `compactAfterIndex` 字段，仍无迁移链 |
+| 计划模式 | 仍是布尔开关 + 拦截 + 提示词；无产物、无审批、无对账（P3-2 未做） |
+| 停止/取消 | 主链路 `AbortController` + `run_cancel` 已能停；**子代理链路未接主 signal**（P1-1） |
+| 上下文 | 压缩引擎已落地（token 预算 + 增量摘要 + 结构化兜底），`perf` 6 条按设计 skipped；系统消息已计入预算 |
+| 测试 | 545 条，覆盖 `lib` / `api` / `orchestration` / 少量组件；`App.tsx` 与各面板组件仍基本 0 组件单测（D-13 仍在） |
+| CI | 三 job 全绿（宿主实测）；无 fmt/clippy、无覆盖率门槛、无版本一致性检查 |
 
 ## 5. 执行队列
 
-### 已交付
+### 已交付（批次索引，完整证据见各审计文件与 `git log`）
 
-| 批次 | 内容 | 状态 | 证据 |
-|---|---|---|---|
-| B1 · P0-3 | npm 脚本审计构造级拒绝 + 全分隔符切段；只读 git 三道加固；`.git/**` 写拒绝 | **PASS** | `docs/audit/P0-3_HARDENING_20261103.md`；327/327 + 58/58 |
-| B3 · 写入前置 | `fsExists` 不再吞错；存在性校验失败 / 备份失败均中止写入 | **PASS** | 328/328；提交 `6edb112` |
-| B4 · 撤销隔离 | `.zxz/undo` 专用写入通道；`fsx::read`/`list_in` 对撤销区关闭；模型不可写不可读 | **PASS** | 提交 `d4b1d83`；前端 332 + Rust 61 |
-| B5 · 输出与环境 | 输出保留上限 256 KB（管道仍读空，不死锁）；`env_clear()` + 19 项白名单；`truncated` 显式回传 | **PASS** | 提交 `554dc1d`；前端 335 + Rust 65 |
-| B6 · 工具注册表 | 五份清单收成 `src/lib/registry.ts` 的 `TOOLS`，`findTool` 精确匹配不归一 | **PASS** | 提交 `449b3a5`；前端 351；`grep -c "call.name ==="` = 0 |
-| B10 · 执行授权闸门 | `perms::decide` 三态闸门（`Deny`/`Ask`/`Allow`）；scope = 命令+子命令；会话内有效、不落盘；前端确认框 + 授权列表可逐条撤销 | **PASS** | 前端 366 + Rust 79；`cargo check` 0 warning；`docs/audit/P0-4_EXEC_GATE_20261103.md` |
-| B7 · 轮末判定抽取 | `src/orchestration/round.ts`：`nextRound` / `stopNotice` / `shouldAutoTest` 三个纯函数；`MAX_ROUNDS` 导出；App 只剩执行 | **PASS**（切片） | 前端 **396**（25 条新断言）；已过独立复审（4 条 P2 + 4 条 P3，全部处置）；`docs/adr/0001` 进度小节 |
-| B8 · 证据对账 | README 全部 e2e 数字按当日实测重写；7 个未跑脚本标 `NOT_TESTED`；修掉假 IPC 落后与过期断言 | **PASS** | 24/39/69/11+24 全过；`docs/audit/B8_EVIDENCE_RECONCILIATION_20261103.md` |
-| B15 · 代理鉴权前置 | `read_request` 拆成 `read_head` + `read_body`；Host / token 校验全部前移到读 body 之前 | **PASS** | 新增裸 socket 断言（不发 body 也必须立刻 401）；接口 11/11 + 前端 24/24 |
-| B13 · 停止真的停 | `run_cancel` + 会话级取消位；`RunResult.cancelled` 与 `timed_out` 分开；测试断言**耗时**而非标志位 | **PASS** | Rust **82**（新增 3 条取消用例，含真起 60 秒 npm test 再取消）；前端 400 |
-| B11 · 清单不完整要说出来 | `listUndo` 的 `walk()` 返回 `boolean`；子目录抛错 / 撞 400 条 / 超 8 层 → `snapshot.incomplete`；界面标「清单不完整」 | **PASS** | 提交 `8919e3f`；前端 **400**（新增 3 条：抛错 / 撞上限 / 全可读） |
-| B16 · devtools 只给 debug | `tauri` 依赖去掉 `features=["devtools"]`，改为可选特性；release 不再带右键检查元素 | **PASS** | 源码门控 `#[cfg(any(debug_assertions, feature="devtools"))]`；`cargo tree -e features` 中 devtools 边为空；`cargo check --all-targets` 0 warning；Rust 82 全绿 |
-| B12-A · 传输层判据 | 新增 `src/api.test.ts` 37 条：上游错误 / SSE 分帧 / 断流 / 工具增量 / Key 不进 URL 与请求头；独立复审后补 JSON 兜底与 `done` 唯一性两组 | **PASS** | 前端 **437**；8 次变异检验各自精确变红一条；CI `ci.yml:18` 直接覆盖；e2e 24/39/69 + 代理接口 11 全绿 |
-| B14-A · e2e 可复现 | `tools/browser.cjs` 逐级回落（env → msedge → chrome → 自带 chromium）；五个脚本去掉写死的 `channel`；默认 BASE 统一 `localhost:1420`；`proxy-e2e` 显式把 `ZXZ_BASE` 传给子进程 | **PASS** | 不传任何环境变量实测：`e2e` 24/24、`proxy-e2e` 11+24、`workspace` 39/39、`skill` 69/69；`ZXZ_BROWSER_CHANNEL="nope,msedge"` 真走进回落分支 |
-| B12-B1 · 渲染夹具 | 业主批准后装 `jsdom@25`；`vitest.config.ts` 收 `*.test.tsx`（环境仍是 node，DOM 按文件声明）；新增 `src/app.test.tsx`：jsdom 里能挂载、空输入不发请求、有输入点发送真的打到 `/chat/completions` 且流回的 delta 渲染成回答 | **PASS** | 前端 **441**（19 文件）；3 次变异检验各自变红一条（去掉空输入守卫 / 改错上游路径 / 断掉 delta 追加） |
-| B14-B · e2e 进 CI | 业主批准把 `playwright@1.64.1` 写进 `devDependencies`；`ci.yml` 新增独立 `e2e` job（`npm ci` → `playwright install chromium` → 起 vite + 假上游 → `node tools/e2e.cjs`） | **NOT_TESTED** | `npm ci --dry-run` 通过（锁文件一致）；YAML 结构自检通过（3 个 job、0 制表符）；job 内的命令与本地实跑的命令逐条一致。**但 job 本身从未在 GitHub 上执行过**——本地跑不了 Actions，不给 PASS |
-| B12-B2 · 整轮重放 | 新增 `src/app.rounds.test.tsx` 6 条：① 上游 500 → 只发 1 次请求、`HTTP 500` 与上游原话都上屏、按钮复位；② 工具轮（假 IPC + 假上游）→ 第一轮带 `tools`、`read_file` 的结果按 `tool_call_id` 回填、第二轮带 `assistant.tool_calls` + `tool` 消息、随后 502 即收摊（恰好 2 次请求）；③ 挂起的流 + 点停止 → 显示「已停止生成」、无「请求失败」、不再发请求；④ 每轮都要读文件 → 恰好 6 次请求 + 「已达到本次最多 6 轮读写」；⑤ 自动测试 3 轮不过 → 恰好 3 次请求、3 次 `run_allowed`、每轮报错原文回传进下一轮上下文 + 「测试 3 轮仍未通过」；⑥ exec 审批 → 没回答前请求数仍是 1、`perm_grant` 为 0，点「仅这一次」后记 1 条一次性授权、命令重试、结果回填并继续下一轮 | **PASS** | 前端 **447**（20 文件）；6 次变异检验各自精确变红：去掉 `!res.ok` 抛错 → ①② 红；去掉 `buildMessages` 的 tool_calls 展开 → ② 红；去掉 `AbortError` 分支 → ③ 红；`MAX_ROUNDS` 6→8 → ④ 红（`expected 8 to be 6`）；`testLoopDecision` 去掉 `give_up` → ⑤ 红（`expected 6 to be 3`）；确认框不渲染 → ⑥ 红。`npm run build` 通过 |
-| D-16 · 中断不再记故障 | `proxy.rs` 引入 `ConnError::{PeerGone,Fatal}`：写路径的 `BrokenPipe` / `ConnectionReset` / `ConnectionAborted` 归 `PeerGone` 并静默，其余照旧打日志；读路径的畸形请求仍是 `Fatal`（不改语义） | **PASS** | proxy-harness **3 passed**（分类表）；变异「BrokenPipe 归 Fatal」→ 精确红一条；端到端对照实验：旧行为 stderr 打出 `os error 10053`（FAIL），新行为 stderr 为空（PASS）。`cargo check` 通过；`docs/audit/D16_INTERRUPT_LOG_20261104.md` |
-| B12-B3 · 轮循环搬家 | 新增 `src/orchestration/session.ts`（321 行）导出 `runRounds(deps)`；`App.tsx` 只保留装配（1520 → **1338** 行）；依赖注入：`chat` / `tools()` / `commitMessages` / `patchMessage` / `executeTool` / `writeFiles` / `readFiles` / `readRefs` / `runTest` / `currentWorkspace`。只搬运不改语义（ADR D3）；rAF 在 Node 下回退 setTimeout(16)，浏览器路径不变 | **PASS** | 前端 **447** 不变；e2e 搬家后实跑 24/24 + 39/39 + 69/69；变异①`runRounds` 开头 return → 7 条红（证明 App 走新路径）；变异②测试回路计数传错 → 精确红一条。`grep -rn "from \"react\"" src/orchestration/` 无命中 |
-| B12-B5 · 重编 release | 全量回归九项 + `tauri build --no-bundle` 重编（工作区干净、HEAD `8142815`），关闭 R1 | **PASS** | 447 / 82 / 3 / 24 / 39 / 69 / 11+24 全绿；`zxz.exe` 5,105,664 B、sha256 `66dbd4c5…`、内嵌资源名 = `dist` 同名、`remote-debugging` 0；日志 `.zxz/logs/tauri-build-20261104.log`。**顺带查实一处假回归**：`tools/proxy-e2e.cjs:24` 优先取 `tools/proxy-harness/target-gnu/`，该目录里的 exe 停留在 11-03 23:20（早于 D-16），首次跑 e2e 时打出了本该已消失的 `连接处理失败 … os error 10053`；用当前源码重编该 target-dir 后该行消失、`PASS 11+24` 复现 |
-| B12-B6 · NSIS 安装包 | 业主裁定「保持 `downloadBootstrapper` + 只打 NSIS」，未改 `tauri.conf.json`；`tauri build --bundles nsis` 一次产出 | **PASS** | `zxz_0.3.0_x64-setup.exe` 2,230,744 B / sha256 `14ea02bb…` / mtime 10:29:15；`FileVersion 0.3.0`；NSIS 3.13 + utils v0.5.3 经 Tauri 下载并校验。业主实测安装成功、可启动、能写回完整代码；落地 `%LOCALAPPDATA%\zxz`（per-user）、`DisplayVersion 0.3.0`、卸载项齐全；落地 exe 与构建 exe `cmp -l` 仅 3 字节差（`__TAURI_BUNDLE_TYPE_VAR_UNK`→`NSS`）。**残留**：未签名；未测卸载；未在无 WebView2 机器上装过（本机已有 156.0.4314.58，下载分支未被走到）。附带查实：同源两次构建（`--no-bundle` vs `--bundles nsis`）体积同为 5,105,664 B 但 sha256 不同（`66dbd4c5…` → `68b99479…`），**产物逐字节不可复现**；且 `tauri build` 每次都会把 `src-tauri/Cargo.toml` 的 `tauri = { version = "2" }` 改写成带 `features = []`，已两次 `git checkout --` 还原 |
+| 批次 | 内容 | 状态 |
+|---|---|---|
+| B1–B6 / B10 / B13 / B15 / B16 | P0-3 加固、写入前置、撤销隔离、输出与环境、工具注册表、执行授权闸门、停止真的停、鉴权前置、撤销清单完整性、devtools 门控 | **PASS** |
+| B7 / B8 / B11 | 轮末判定抽取、证据对账、清单不完整要说出来 | **PASS** |
+| B12-A / B12-B1 / B12-B2 / B12-B3 | 传输层 37 条、渲染夹具、整轮重放 7 类、轮循环搬家 | **PASS** |
+| B14-A / **B14-B** | e2e 可复现；**e2e 进 CI → 本轮据 GitHub Actions `CI #23 passing` 转 PASS** | **PASS** |
+| B12-B5 / B12-B6 / D-16 | release 重编、NSIS 安装包（业主实测）、中断不再记故障 | **PASS** |
+| 11-05 批次（20 提交） | 预览 / 联网搜索 / 任务清单 / 正则+glob / 子代理 / 并行 / 压缩 / MCP / 预设 / 真机 e2e | **代码已合入、单测与 CI 全绿；独立复审本轮补做，产品验收签字 `ABSENT`** |
 
-### 下一批（按优先级）
+### 下一批（按优先级，来源：审计报告 §5）
 
-完整清单见 **`docs/audit/TECH_DEBT_REGISTER_20261103.md`**（P0–P3，带证据/影响/状态）。
-队列只列"要动手"的那几条：
+完整清单见 **`docs/audit/TECH_DEBT_REGISTER_20261103.md` §6**（P0–P3，带证据/影响/状态）。
 
-| # | 任务 | 为什么现在 | 验收 |
-|---|---|---|---|
-| 首次 CI 运行 | 看 `e2e` job 到底能不能跑通（B14-B 标的是 `NOT_TESTED`） | job 已写好，但从没在 GitHub 上执行过。首次推送后需据此改成 PASS 或按真实报错修 | 截图/日志中 `e2e` job 为绿 |
+| # | 任务 | 级别 | 为什么现在 | 验收 |
+|---|---|---|---|---|
+| 1 | 治理基线对齐到 `2083011` | P1 | 过期权威状态板比没有更危险 | **本轮已执行**：本文件 + 技术债台账 + `CLAUDE.md` + `README.md` |
+| 2 | 归档 11-05 批次独立复审记录 | P1 | 宪章 §1 要求非实施者复核 | **本轮已执行**（审计报告落盘） |
+| 3 | 子代理取消传播 + `runToolBatch` 异常处理 | P1 | 「停止」再次说谎且产生费用 | 审计报告 P1-1 / P2-2 测试点全绿 + 变异检验 |
+| 4 | MCP 工具纳入注册表 + 默认 `Ask` | P1 | 执行授权闸门被名义绕过 | 启用 server 后模型调用必弹授权，拒绝可回传错误 |
+| 5 | 并发成本闸门 + 正则 ReDoS 防护 | P2 | 成本无上限、恶意正则可卡死渲染进程 | 恶意正则限时返回；`explore` 并发有上限 |
+| 6 | `App.tsx` 拆分（ADR 0001 第 5 项） | P2 | 1550 行，回归面持续变大 | < 500 行，接线层有回归网 |
+| 7 | 预览窗口真机 CSP 验证 | P2 | 宪章 §3.7 要求宿主级证据 | Windows DevTools 无 CSP 报错（**本沙箱 BLOCKED**） |
 
-> **B12-B 路线已定**：业主选了「先装 jsdom 拿判据，再拆 `send()`」。
-> B12-B1 已完成（`jsdom@25` 已装，App 能在 jsdom 里挂载并被驱动，4 条用例 + 3 次变异检验）；
-> B12-B2 已完成（整轮边界 6 条，ADR 0001 要求的 7 类行为用例全齐，6 次变异检验）。
-> 顺序是刻意的：先有回归网，再动全仓最热的那段代码——反过来就是把"没判据"升级成"没判据且刚大改过"。
-> B12-B3 已完成（2026-11-04，业主当面批准）：轮循环搬进 `orchestration/session.ts`，
-> 搬家前后 447 条单测与 24/39/69 项 e2e 全部同数通过。
-> ADR 第 2 条据此变「已搬」，但第 3 条「`App.tsx` < 500 行」仍未达成（现 1338）。
+> **顺序纪律**：先 1→2 把判据与基线立住，再动 3/4 这两处控制面代码；4 涉及 MCP 信任模型，
+> 属宪章 §4「重大架构决策」，需业主明确裁定后再动代码。不逐条孤立修 bug，不跳阶段。
 
 ## 6. 风险与阻断
 
 | # | 项 | 级别 | 说明 |
 |---|---|---|---|
-| R1 | ~~release exe 落后于 HEAD~~ | ~~高~~ **已解除** | **B12-B5 重编（2026-11-04 10:18）**：`zxz.exe` **5,105,664 B** / sha256 `66dbd4c5…`（旧 `d15320c7…`、5,068,288 B、mtime 11-02 14:58）；内嵌 `index-CI0qq08X.js` + `index-DLSfHGKG.css`，与 `dist/assets` 同名（旧内嵌 `index-CQlZK13B.js`）；`remote-debugging` 0 命中；于干净工作区 `8142815` 编译，日志 `.zxz/logs/tauri-build-20261104.log`（`Compiling zxz v0.3.0` → `Finished release profile` 4m12s）。旧 exe 备份 `.zxz/backup/zxz-20261102-1458.exe`。构建中出现 `.rsrc merge failure: multiple non-default manifests` 警告——新旧 exe 的 manifest 关键串（`requestedExecutionLevel` / `asInvoker` / `comctl32`）计数完全一致，属 gnu 工具链既有行为，非本次回归。**注**：该 exe 已被 B12-B6 的 bundle 构建覆盖，当前磁盘上是 `68b99479…`（见 §1.1） |
-| R2 | ~~无安装包~~ | ~~高~~ **已解除（安装已验证）** | **B12-B6（2026-11-04 10:29）**：`bundle/nsis/zxz_0.3.0_x64-setup.exe` 2,230,744 B / sha256 `14ea02bb…`；NSIS 3.13 与 `nsis_tauri_utils v0.5.3` 由 Tauri 自动下载并校验哈希（日志可证）；`FileVersion`/`ProductVersion` = `0.3.0`；**`NotSigned`**（无代码签名证书 → 目标机首次运行会撞 SmartScreen）。`webviewInstallMode` 按业主 2026-11-04 裁定保持 `downloadBootstrapper`。**业主 2026-11-04 10:36 实测**：安装成功、可启动、工具模式能写回完整代码（= 打包后的 release 里 `fsx` 写入与回读链路可用，不只是单测绿）。**落地核查（本轮只读）**：per-user 安装到 `%LOCALAPPDATA%\zxz`（无需管理员），含 `zxz.exe`(5,105,664 B) + `WebView2Loader.dll`(160,880 B) + `uninstall.exe`(79,233 B)；注册表 `DisplayVersion = 0.3.0`、`Publisher = zxz`、卸载项齐全。**载荷一致性已证**：落地 exe 与构建 exe 用 `cmp -l` 逐字节比对**仅 3 字节不同**（偏移 4,193,652，`__TAURI_BUNDLE_TYPE_VAR_UNK` → `__TAURI_BUNDLE_TYPE_VAR_NSS`，即 Tauri 给 bundle 打的类型标记），无重打包损坏、无杀软改写。**仍未验证**：① 卸载流程；② **无 WebView2 的机器**——本机 `HKLM\…\EdgeUpdate\Clients\{F3017226-…}` 已有 WebView2 **156.0.4314.58**，所以这次安装根本没走下载分支，`downloadBootstrapper` 的联网取运行时的路径**仍然没被验证过** |
-| R3 | e2e 不可复现 | ~~中~~ 低 | 三个成因全部处理（B14-A + 业主批准加依赖）：`msedge` 硬编码 → `tools/browser.cjs` 逐级回落；端口 → `localhost:1420` 且子进程继承 `ZXZ_BASE`；`playwright` 入 `devDependencies`。`ci.yml` 已加 `e2e` job。**但该 job 从未在 GitHub 上实际跑过**（本地跑不了 Actions），只能标 `NOT_TESTED`；首次推送后需要看一次运行结果 |
-| R4 | ~~release 无条件带 devtools~~ | ~~中~~ | **已解除**（B16）：`tauri` 依赖不再带 devtools 特性；debug 构建行为不变 |
-| R5 | 推送/发布未授权 | — | 按宪章 §3，push / 打安装包需业主显式授权 |
+| R1 | release exe 落后于 HEAD | 已解除 | B12-B5 重编；但 11-05 又有 20 个提交，**当前发布物再次落后于 HEAD**（本轮未授权重编） |
+| R2 | 无安装包 | 已解除（安装已验证） | B12-B6；残留：未签名、未测卸载、未测无 WebView2 机器；11-05 新功能未进任何安装包 |
+| R3 | e2e 不可复现 | **已解除** | B14-A + B14-B；**2026-11-05 查证 GitHub Actions 已跑 23 次，最新 `#23` `passing`**，三 job 全绿 |
+| R4 | release 无条件带 devtools | 已解除 | B16 |
+| R5 | 推送 / 发布未授权 | — | 宪章 §3：push / 打安装包需业主显式授权。本轮未推送、未打包 |
+| **R6** | 治理基线失真 | 已修（本轮） | 状态板曾落后 20 个提交；`CURRENT_ARCHITECTURE.md` / `ROADMAP.md` 仍待同步 |
+| **R7** | MCP 权限旁路 | **P1** | `executeMcpToolCall` 无 `Ask`、不在 `TOOLS` 内；默认 `enabled:false` 缓解触发前提；需业主裁定信任模型 |
+| **R8** | 子代理不响应停止 | **P1** | `App.tsx:639` 独立 controller；点停止后子代理仍跑最多 4 轮模型请求 |
+| **R9** | 11-05 批次无独立复审 | P1 | 20 个提交、6 类新攻击面；本轮补首次独立复审，产品验收签字仍 `ABSENT` |
+| **R10** | 本轮审计环境限制 | — | Ubuntu 沙箱：Rust 测试 / 本地 e2e / 真机 CSP / 打包均为 `NOT_TESTED`，不标 PASS |
 
 ## 7. 决策记录（ADR 级，追加式）
 
 | # | 决策 | 理由 | 回滚 |
 |---|---|---|---|
-| DEC-001 | Rust 侧为唯一权威，前端镜像只做提前拦截 | 既有设计；前端可被绕过 | 不适用 |
-| DEC-002 | `.git/**` 整目录拒绝写入，而非只挡 `config` | 半开的口子会被 hooks / info/attributes 绕过 | 删除 `fsx::is_repo_metadata` 调用 |
-| DEC-003 | git 加固参数强制注入、用户不可关闭 | 依赖"用户没配置"不是安全设计 | 移除 `effective_argv` |
-| DEC-004 | 先修 RCE 链，再抽 Runtime | 抽取不改攻击面，修复直接降风险 | 调整 §5 顺序即可 |
-| DEC-005 | **撤回**"运行器配置文件构成独立 RCE 链"这一判断 | 复核后：`vite.config.*` 会被加载执行，但 `src/**/*.test.ts` 同样会被 vitest 执行——"执行模型写的代码"是编码 Agent 的既定能力，不是可被 blocklist 关闭的漏洞。真正的闸门是执行前的权限审批（P0-4），拿配置文件黑名单当安全边界只会制造虚假安全感 | 无需回滚；B2 从队列移除，改为 B10 |
-| DEC-006 | 撤销快照区对模型**读也关闭**，撤销面板改走 `undo_read` / `undo_list` 专用 IPC | 原设计只堵了写。但快照里留着"用户删掉的密钥、改过的旧内容"，可读就是泄漏；能列举全量快照还额外泄漏操作轨迹（何时改过哪些文件）。只堵写等于把敏感数据放在模型读得到的路径上 | 恢复 `read`/`list_in` 对 `.zxz/undo` 的放行即可（不推荐） |
-| DEC-007 | 执行授权 scope = 命令 + 子命令，只在内存、按会话记账 | 按"整个 `git` 允许"太粗（`git diff` 与 `git push` 天差地别）；按"完整 argv"太细，模型换个 `--stat` 就要再问一次，用户会训练成无脑点同意。落盘会把一次性批准变成永久后门 | 删除 `perms::grant` 的调用点，退回"每次必问" |
-| DEC-008 | 授权粒度实际是**工程目录级**，对话级隔离由前端主动撤回补偿 | `wsx::open` 对同一目录复用会话号，Rust 侧只有一个桶。前端在切/新建/删除/清空对话时撤销，能把粒度收回到对话级；但这是补偿不是隔离，一旦出现绕过前端的调用路径就退回工程级 | 让 `perms` 带上 convId 记账（需要新的会话维度，本版未做） |
-| DEC-009 | npm 脚本审计必须覆盖 `pre<name>` / `post<name>` | 实测可绕过：`{"pretest":"node evil.js","test":"node --test emit.js"}` 能过审并写出文件，因为只审了 `scripts.test`。`npm test` 实际跑三步，审一步等于没审 | 去掉钩子遍历（不推荐） |
-| DEC-010 | `.npmrc` / `.yarnrc` / `.yarnrc.yml` / `.pnpmfile.cjs` 与 `.git/**` 同级，写入一律拒绝 | 实测 `script-shell=C:/nonexistent/zzz-shell.exe` 会让 `npm run build` 去 spawn 那个路径——工程文件能改 npm 的脚本 shell，等于绕开"argv 里没有 shell"这条前提 | 移除 `fsx::is_toolchain_config` 的判定 |
+| DEC-001 ~ DEC-010 | 见上一版（Rust 权威、`.git/**` 拒绝、git 参数强制注入、先修 RCE 再抽 Runtime、撤回「配置文件即 RCE」、撤销区读写全关、授权 scope=命令+子命令、授权粒度工程级、npm `pre`/`post` 钩子、工具链配置拒绝） | 沿用 | 见原文 |
+| **DEC-011** | 本轮只做审计与治理文档对齐，**不改业务代码** | 宪章 §1：独立只读角色不得修改被测代码；且用户既定纪律是「先审计再修复」「先立数据主链路」 | 不适用 |
+| **DEC-012** | B14-B 从 `NOT_TESTED` 改判 `PASS`，依据为 GitHub Actions 宿主 `CI #23 passing` | 宿主实测属于外部证据，非本地自证；`ci.yml` 三 job 无 `continue-on-error`，整体绿即 e2e job 绿 | 若发现 job 被跳过，回退为 `NOT_TESTED` 并附日志 |
+| **DEC-013** | MCP 权限收敛（队列 #4）列为需业主裁定的重大架构决策，不擅自实施 | `MCP_PREREQUISITE_AUDIT.md` §4 与 ROADMAP P4-3 的前置约束涉及信任模型变更，宪章 §4 要求分歧由业主消解 | 业主裁定后按 ADR 追加新决策 |
