@@ -63,8 +63,8 @@ export const PRESETS: Preset[] = [
     id: "freellmapi",
     name: "FreeLLMAPI 聚合",
     base: "http://192.168.3.200:3001/v1",
-    models: ["auto", "glm-5.3", "qwen3.8-max", "gemini-3.8-flash", "deepseek-v4.1-flash"],
-    defaultModel: "auto",
+    models: ["glm-4.5-flash", "glm-4.7-flash", "glm-4.6v-flash", "gemini-2.5-flash", "auto"],
+    defaultModel: "glm-4.5-flash",
   },
   { id: "custom", name: "自定义（OpenAI 兼容）", base: "", models: [], defaultModel: "" },
 ];
