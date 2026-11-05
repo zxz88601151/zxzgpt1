@@ -128,6 +128,10 @@ export default function App() {
   const [focusSignal, setFocusSignal] = useState(0);
 
   const abortRef = useRef<AbortController | null>(null);
+  /** 本轮发送的取消信号。子代理必须复用它，不能自己 new 一个（D-17）。
+   *  与 abortRef 分开存：finally 会把 abortRef 置空，但已中止的 signal 要留给
+   *  还在收尾的子代理，否则它会拿到一个「全新且未中止」的信号继续跑模型请求。 */
+  const mainSignalRef = useRef<AbortSignal | null>(null);
   const busyRef = useRef(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const skillsRef = useRef<Skill[]>(skills);
@@ -636,7 +640,9 @@ export default function App() {
           settings: stateRef.current.settings,
           transport,
           chat: chatStream,
-          signal: new AbortController().signal,
+          // 复用主链路 signal：点「停止」时子代理的流式请求与后续轮次一起中止。
+          // 以前这里 new 了一个独立控制器，界面说已停止、子代理还能跑满 4 轮（D-17）。
+          signal: mainSignalRef.current ?? new AbortController().signal,
           desktop: fsAvailable,
           currentWorkspace: () => stateRef.current.settings.workspace,
           executeTool: (call) => {
@@ -892,6 +898,7 @@ export default function App() {
 
       const controller = new AbortController();
       abortRef.current = controller;
+      mainSignalRef.current = controller.signal;
 
       try {
         // 轮循环已搬到 src/orchestration/session.ts（ADR 0001 第 2 步，只搬运不改语义）。

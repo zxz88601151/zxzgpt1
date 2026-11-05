@@ -1061,22 +1061,28 @@ Rust 侧另补了边界用例（`tools/fs-harness`，当日 **82 条全过**，�
    启用后其 `ctx_execute` 可执行任意代码。
    已核实 `mcp.json` 位于应用配置目录（工程根之外）、有命令与凭据校验，
    **不存在「模型改配置 → 自动拉起任意命令」这条链**，别把这两件事混为一谈。
-2. **子代理不响应「停止」**。点停止后主链路会停，但已扇出的 `explore` 子代理
-   仍可能跑完最多 4 轮模型请求；`runToolBatch` 的 `Promise.allSettled` 也会等整批。
+2. **子代理取消传播 / 批次异常兜底（2026-11-06 已修）**。原先 `App.tsx` 给子代理
+   传的是独立 `AbortController`，点停止后界面说已停止、子代理仍可跑满 4 轮。现在
+   子代理复用主链路 `signal`，`runRounds` 每轮前检查 `signal.aborted`，
+   `runSubagent` 每轮请求前再查一次、停止后不返回残缺摘要；
+   `runToolBatch` 把执行器异常一律补成可读的 `error` 记录，`records` 不再有空洞
+   （`session.parallel.test.ts` / `subagent.test.ts` 共 5 条新增断言锁住）。
 3. **预览窗口**接受任意 http(s) 或任意存在的本地文件（不限工程根、不限扩展名），
    以 `WebviewUrl::External` 新建 WebView；External URL 的 CSP 是否生效**没有真机证据**。
 4. **只读 ≠ 无成本**。`isParallelSafeTool = access === "read"` 把 `web_search` 与
    `explore` 也判为可并发，一批 N 个 `explore` 会产生 N 个子代理的模型请求；
    另外 `search_files` 的正则没有 ReDoS 防护，复杂模式可能卡住渲染进程。
 
-以上四条与技术债台账 `TECH_DEBT_REGISTER_20261103.md` §6（D-17 ~ D-23）一一对应，
-**本轮均未修改代码**，等业主裁定后按 `STATE.md` §5 队列推进。
+以上四条与技术债台账 `TECH_DEBT_REGISTER_20261103.md` §6（D-17 ~ D-23）一一对应。
+第 2 条已于 2026-11-06 修复；其余按 `STATE.md` §5 队列继续推进，
+**进度以代码与审计报告为准，本节不预先标 PASS**。
 
 ### 15.3 实测与未验证
 
-| 项 | 2026-11-05 结果 |
+| 项 | 结果 |
 |---|---|
-| `npm ci` / `npm test` / `npm run build` | PASS / **545 passed + 6 skipped（29 文件）** / PASS |
+| `npm ci` / `npm test` / `npm run build` | 2026-11-05：PASS / **545 passed + 6 skipped（29 文件）** / PASS |
+| ② 修复后复跑（2026-11-06） | **550 passed + 6 skipped（29 文件）** / `npm run build` PASS |
 | 三处版本号 | 均 `0.3.0`，一致 |
 | GitHub Actions | 23 次运行，最新 `CI #23` = **passing**（三 job 全绿） |
 | Rust 测试 / 本地 e2e / 真机 CSP / 打包 / 真模型 | **`NOT_TESTED`**（Ubuntu 沙箱 + 宪章 §3 未授权，不标 PASS） |

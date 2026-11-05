@@ -98,4 +98,49 @@ describe("runToolBatch 并发调度", () => {
     // ghost_tool 不是注册表里的工具 → 闸控串行；read_file 并行层空，不受影响
     expect(events).toHaveLength(2);
   });
+
+  it("并发层执行器抛异常 → 补成可读 error 记录，records 无空洞", async () => {
+    const calls: Call[] = [
+      { id: "1", name: "read_file", arguments: "{}" },
+      { id: "2", name: "glob", arguments: "{}" },
+      { id: "3", name: "search_files", arguments: "{}" },
+    ];
+    const execute = async (call: Call): Promise<ToolCallRecord> => {
+      if (call.name === "read_file") throw new Error("IPC 断了");
+      return { ...call, result: "ok" };
+    };
+    const recs = await runToolBatch(calls, execute);
+    expect(recs).toHaveLength(3);
+    expect(recs.every((r) => r !== undefined)).toBe(true);
+    expect(recs[0].error).toMatch(/工具执行异常：IPC 断了/);
+    expect(recs[0].id).toBe("1");
+    expect(recs[1].result).toBe("ok");
+    expect(recs[2].result).toBe("ok");
+  });
+
+  it("闸控层（写/执行）抛异常同样补 error，不拖垮后续调用", async () => {
+    const calls: Call[] = [
+      { id: "1", name: "write_file", arguments: "{}" },
+      { id: "2", name: "run_command", arguments: "{}" },
+    ];
+    let n = 0;
+    const execute = async (call: Call): Promise<ToolCallRecord> => {
+      n += 1;
+      if (n === 1) throw new Error("写入面板崩了");
+      return { ...call, result: "ok" };
+    };
+    const recs = await runToolBatch(calls, execute);
+    expect(recs).toHaveLength(2);
+    expect(recs[0].error).toMatch(/工具执行异常：写入面板崩了/);
+    expect(recs[1].result).toBe("ok");
+    expect(n).toBe(2);
+  });
+
+  it("执行器返回 undefined 也补成错误记录，绝不留空洞", async () => {
+    const calls: Call[] = [{ id: "1", name: "read_file", arguments: "{}" }];
+    const execute = async () => undefined as unknown as ToolCallRecord;
+    const recs = await runToolBatch(calls, execute);
+    expect(recs).toHaveLength(1);
+    expect(recs[0].error).toMatch(/工具执行异常/);
+  });
 });

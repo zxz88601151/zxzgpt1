@@ -122,27 +122,54 @@ export interface RunDeps {
  * tool 消息顺序一一对应——模型才能把每条结果对上它发出的那条调用。
  * 同一批内的调用在生成时基于同一上下文、彼此结果不可见，故并发与串行语义等价。
  */
+type BatchCall = { id: string; name: string; arguments: string };
+
+/** 执行器兜底：注入的 execute 在 App 层已经 try/catch，理论上不抛；但子代理、
+ *  未来新增入口或 IPC 层的异常仍可能让它抛。`Promise.allSettled` 会把这种
+ *  rejection 静默吞掉，留下 `records[i] === undefined`——下一轮 buildMessages
+ *  把这一项展开成 tool 消息时整轮会崩。任何异常都必须变成一条可读的 error 记录。
+ */
+export function toolFailure(call: BatchCall, e: unknown): ToolCallRecord {
+  const reason = e instanceof Error ? e.message : String(e ?? "未知异常");
+  return { ...call, error: `工具执行异常：${reason}` };
+}
+
 export async function runToolBatch(
-  calls: { id: string; name: string; arguments: string }[],
-  execute: (call: { id: string; name: string; arguments: string }) => Promise<ToolCallRecord>,
+  calls: BatchCall[],
+  execute: (call: BatchCall) => Promise<ToolCallRecord>,
 ): Promise<ToolCallRecord[]> {
   const records: ToolCallRecord[] = new Array(calls.length);
   const parallelIdx: number[] = [];
-  const gatedPlan: { idx: number; call: { id: string; name: string; arguments: string } }[] = [];
+  const gatedPlan: { idx: number; call: BatchCall }[] = [];
   calls.forEach((call, i) => {
     if (isParallelSafeTool(call.name)) parallelIdx.push(i);
     else gatedPlan.push({ idx: i, call });
   });
 
+  /** 两层都走它：单次执行抛错 → error 记录，绝不把异常丢给 allSettled 吞掉。 */
+  const safe = async (call: BatchCall): Promise<ToolCallRecord> => {
+    try {
+      return await execute(call);
+    } catch (e) {
+      return toolFailure(call, e);
+    }
+  };
+
   // 只读层：并发扇出
-  await Promise.allSettled(
+  const settled = await Promise.allSettled(
     parallelIdx.map(async (i) => {
-      records[i] = await execute(calls[i]);
+      records[i] = await safe(calls[i]);
     }),
   );
+  // 双保险：万一 safe 之外还有漏网的 rejection（或 execute 返回了 undefined），
+  // 把那个下标补成错误记录，保证 records 无空洞、下标与 tool_call_id 一一对齐。
+  settled.forEach((r, k) => {
+    const i = parallelIdx[k];
+    if (!records[i]) records[i] = toolFailure(calls[i], r.status === "rejected" ? r.reason : undefined);
+  });
   // 写/执行层：串行，保持原始相对顺序
   for (const { idx, call } of gatedPlan) {
-    records[idx] = await execute(call);
+    records[idx] = await safe(call);
   }
   return records;
 }
@@ -173,6 +200,10 @@ export async function runRounds(deps: RunDeps): Promise<void> {
   const maxRounds = deps.maxRounds ?? MAX_ROUNDS;
 
   for (let round = 0; round < maxRounds; round++) {
+    // 主链路 signal 是唯一权威：即便某个上游实现不检查 signal，也不能再发一轮。
+    // 子代理以前自带独立控制器，永远等不到这道检查（D-17）；现在它复用主 signal，
+    // 点停止后这一层会立刻收摊，而不是继续跑满 maxRounds。
+    if (deps.signal?.aborted) break;
     // 上下文压缩：超 token 预算时把最旧的一批历史摘要掉，只保留最近几轮（高性能模式支柱）。
     // 不开启 autoCompact（或 settings 缺该字段）时跳过；summarize 缺省退化成结构化兜底。
     if (s.autoCompact) {

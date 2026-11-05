@@ -59,4 +59,29 @@ describe("runSubagent", () => {
     const callOpts = chat.mock.calls[0][0] as { settings: Settings };
     expect(callOpts.settings.model).toBe("glm-4.5-flash");
   });
+
+  it("主链路 signal 已中止 → 不发任何模型请求，直接返回停止提示", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const chat = vi.fn().mockResolvedValue(undefined);
+    const out = await runSubagent(
+      "摸清结构",
+      deps({ settings: baseSettings({ subagentModel: "glm-4.5-flash" }), signal: controller.signal, chat })
+    );
+    expect(chat).not.toHaveBeenCalled();
+    expect(out).toMatch(/已停止/);
+  });
+
+  it("子代理把主链路 signal 原样传给每一轮 chat（不是独立控制器）", async () => {
+    const controller = new AbortController();
+    const chat = vi.fn().mockImplementation(async (opts: { signal: AbortSignal; onEvent: (e: { type: string; text: string }) => void }) => {
+      expect(opts.signal).toBe(controller.signal);
+      opts.onEvent({ type: "delta", text: "摘要" });
+    });
+    await runSubagent(
+      "摸清结构",
+      deps({ settings: baseSettings({ subagentModel: "glm-4.5-flash" }), signal: controller.signal, chat })
+    );
+    expect(chat).toHaveBeenCalled();
+  });
 });

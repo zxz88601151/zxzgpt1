@@ -84,7 +84,12 @@ export async function runSubagent(query: string, deps: SubagentDeps): Promise<st
     baseMessages: messages,
     maxRounds: SUBAGENT_MAX_ROUNDS,
     transport: deps.transport,
-    chat: deps.chat,
+    // 每轮请求前再看一次主链路 signal。这样即便上游流式实现完全不理会 signal，
+    // 用户点「停止」之后子代理也不会再发起模型请求（D-17 的第二道保险）。
+    chat: async (opts) => {
+      if (deps.signal.aborted) throw new DOMException("已停止生成", "AbortError");
+      return deps.chat({ ...opts, signal: deps.signal });
+    },
     tools: () => subagentToolDefs(),
     signal: deps.signal,
     desktop: deps.desktop,
@@ -106,6 +111,10 @@ export async function runSubagent(query: string, deps: SubagentDeps): Promise<st
   };
 
   await runRounds(runDeps);
+
+  // 用户点了停止：不要把「跑到一半的探索」当成正经摘要交回主对话，
+  // 否则主模型会基于一份残缺的上下文继续作答。
+  if (deps.signal.aborted) return "（子代理已停止）";
 
   const last = [...messages].reverse().find((m) => m.role === "assistant" && m.content && !m.error);
   const summary = last?.content?.trim() || "（子代理没有产出）";
