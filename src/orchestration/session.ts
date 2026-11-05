@@ -16,7 +16,7 @@
  */
 
 import { buildReadPayload, parseFileBlocks, parseReadRequests, type FileBlock, type ReadOutcome } from "../lib/files";
-import { findTool } from "../lib/registry";
+import { findTool, isParallelSafeTool } from "../lib/registry";
 import {
   MAX_TEST_ROUNDS,
   runResultHead,
@@ -100,6 +100,44 @@ export interface RunDeps {
   readRefs: (refs: SkillRef[]) => Promise<ReadOutcome[]>;
   /** 跑一次白名单命令（测试回路用） */
   runTest: (argv: string[]) => Promise<RunResult>;
+}
+
+/**
+ * 一批工具调用并发调度（"高性能代码模式"核心）。
+ *
+ * 同一轮模型可能一次返回多个工具调用。其中：
+ *   - 只读工具（access==='read'，含 explore 子代理）：无副作用、不弹审批模态，
+ *     全部并发跑（`Promise.allSettled`），长链路探索任务提速数倍；
+ *   - 写（write）/执行（exec）工具：跑前可能弹「写入前确认」面板或 exec 授权弹窗，
+ *     必须串行（仍按原始相对顺序），否则多个模态会叠在一起。
+ *
+ * 关键不变量：结果按下标回填到 `records`，保证 `tool_call_id` 与下一轮展开出的
+ * tool 消息顺序一一对应——模型才能把每条结果对上它发出的那条调用。
+ * 同一批内的调用在生成时基于同一上下文、彼此结果不可见，故并发与串行语义等价。
+ */
+export async function runToolBatch(
+  calls: { id: string; name: string; arguments: string }[],
+  execute: (call: { id: string; name: string; arguments: string }) => Promise<ToolCallRecord>,
+): Promise<ToolCallRecord[]> {
+  const records: ToolCallRecord[] = new Array(calls.length);
+  const parallelIdx: number[] = [];
+  const gatedPlan: { idx: number; call: { id: string; name: string; arguments: string } }[] = [];
+  calls.forEach((call, i) => {
+    if (isParallelSafeTool(call.name)) parallelIdx.push(i);
+    else gatedPlan.push({ idx: i, call });
+  });
+
+  // 只读层：并发扇出
+  await Promise.allSettled(
+    parallelIdx.map(async (i) => {
+      records[i] = await execute(calls[i]);
+    }),
+  );
+  // 写/执行层：串行，保持原始相对顺序
+  for (const { idx, call } of gatedPlan) {
+    records[idx] = await execute(call);
+  }
+  return records;
 }
 
 /**
@@ -205,15 +243,14 @@ export async function runRounds(deps: RunDeps): Promise<void> {
     if (exploreMode && blocks.length) deps.toast("探索模式：本轮 file: 块未落盘，只保留方案", "");
     const files = ws && blocks.length && !planMode && !exploreMode ? await deps.writeFiles(blocks) : undefined;
 
-    // 工具调用：按顺序执行，结果挂在助手消息上，下一轮 buildMessages
-    // 会把它展开成原生 tool_calls + tool 消息发给上游，模型才能对上号。
-    // 工具模式下即使没有 file: 块，写文件也是通过 write_file 工具发生的。
-    const toolRecords: ToolCallRecord[] = [];
-    if (!aborted && !failed && roundToolCalls.length) {
-      for (const call of roundToolCalls) {
-        toolRecords.push(await deps.executeTool(call));
-      }
-    }
+    // 工具调用：同一批里只读工具并发跑、写/执行工具串行（见 runToolBatch），
+    // 结果挂在助手消息上，下一轮 buildMessages 会把它展开成原生 tool_calls +
+    // tool 消息发给上游，模型才能对上号。工具模式下即使没有 file: 块，写文件
+    // 也是通过 write_file 工具发生的。
+    const toolRecords: ToolCallRecord[] =
+      !aborted && !failed && roundToolCalls.length
+        ? await runToolBatch(roundToolCalls, deps.executeTool)
+        : [];
     // 按权限等级判断"这一轮动过磁盘"，而不是按工具名：
     // 将来新增任何 write 级工具都会自动纳入测试回路，不会漏跑。
     const wroteSomething =

@@ -44,6 +44,17 @@ export function planModeBlocks(access: ToolAccess): boolean {
   return access !== "read";
 }
 
+/**
+ * 并行安全判据（"高性能代码模式"并行工具执行的分流点，单一权威源）。
+ *
+ * 只读工具（access==='read'，含 explore 子代理）无副作用、不弹审批模态，
+ * 可以一批并发跑；写（write）/执行（exec）工具跑前可能弹「写入前确认」面板
+ * 或 exec 授权弹窗，必须串行。新增工具自动按 access 继承，无需改这里。
+ */
+export function isParallelSafeTool(name: string): boolean {
+  return findTool(name)?.access === "read";
+}
+
 /** 一次工具执行的结果：要么有正文，要么有错误，不会两者都有。 */
 export interface ToolRunResult {
   result?: string;
