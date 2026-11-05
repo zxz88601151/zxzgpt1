@@ -58,6 +58,14 @@ import {
   type ReadOutcome,
 } from "./lib/files";
 import { EXPLORE_TOOL_NAMES, exploreToolDefs, findTool, isExploreTool, parseToolArgs, planModeBlocks, TOOL_DEFS, type ToolContext } from "./lib/registry";
+import {
+  executeMcpToolCall,
+  loadMcpServers,
+  mcpCallTool,
+  mcpToolDefs,
+  stopMcpServers,
+  type McpToolSpec,
+} from "./lib/mcp";
 import { runRounds } from "./orchestration/session";
 import { forceCompact } from "./orchestration/compact";
 import { runSubagent } from "./orchestration/subagent";
@@ -134,6 +142,53 @@ export default function App() {
     setToasts((list) => [...list, { id, text, kind }]);
     window.setTimeout(() => setToasts((list) => list.filter((t) => t.id !== id)), 2600);
   }, []);
+
+  /* ------------------------------------------------------------ MCP 插件：随工程会话启动/停止 */
+  //
+  // MCP 服务器随工程走：
+  //  - 工程一打开，读 mcp.json，把 enabled 的服务器拉起来、列出工具，
+  //    工具定义进模型；
+  //  - 换工程 / 关工程，先停掉旧服务器（服务器的 cwd 跟着工程走，
+  //    不停就串目录），再按新工程重拉；
+  //  - 单个服务器挂了只 toast 报错，不阻断主流程（失败隔离）。
+  // 启用开关在 mcp.json 里（默认 context-mode 是关的），本批不做管理页。
+  const mcpSpecsRef = useRef<McpToolSpec[]>([]);
+  const mcpSessionRef = useRef<string | null>(null);
+  const mcpLoadGen = useRef(0);
+  useEffect(() => {
+    const ws = state.settings.workspace;
+    if (!ws || !fsAvailable()) {
+      // 没接工程 / 浏览器直开：停掉已拉起的服务器、清空动态工具
+      if (mcpSessionRef.current) {
+        const names = [...new Set(mcpSpecsRef.current.map((s) => s.server))];
+        mcpSessionRef.current = null;
+        mcpSpecsRef.current = [];
+        void stopMcpServers(names);
+      }
+      return;
+    }
+    if (mcpSessionRef.current === ws.sessionId) return;
+    const prevSession = mcpSessionRef.current;
+    const prevNames = [...new Set(mcpSpecsRef.current.map((s) => s.server))];
+    mcpSessionRef.current = ws.sessionId;
+    mcpSpecsRef.current = [];
+    const gen = ++mcpLoadGen.current;
+    const run = async () => {
+      if (prevSession) await stopMcpServers(prevNames);
+      const { specs, errors } = await loadMcpServers(ws.sessionId);
+      if (gen !== mcpLoadGen.current) return;
+      mcpSpecsRef.current = specs;
+      for (const e of errors) toast(`MCP 服务器 ${e.server} 启动失败：${e.error}`, "error");
+      if (specs.length) {
+        const servers = [...new Set(specs.map((s) => s.server))].join("、");
+        toast(`MCP 插件已就绪：${specs.length} 个工具（${servers}）`, "");
+      }
+    };
+    run().catch((e) => {
+      if (gen !== mcpLoadGen.current) return;
+      toast(`MCP 配置读取失败：${(e as Error).message}`, "error");
+    });
+  }, [state.settings.workspace?.sessionId, toast]);
 
   /* ------------------------------------------------------------ 持久化 */
 
@@ -588,6 +643,11 @@ export default function App() {
             const fn = executeToolRef.current;
             if (!fn)
               return Promise.resolve({ id: call.id, name: call.name, arguments: call.arguments, error: "子代理执行器未就绪" });
+            // 子代理是只读探索：MCP 插件工具不在它的工具定义里（subagentToolDefs），
+            // 万一模型凭空拼出一个 mcp_ 名字，这里也要拦——context-mode 的
+            // ctx_execute 会跑任意代码，不能让它绕过探索模式的只读三道门。
+            if (call.name.startsWith("mcp_"))
+              return Promise.resolve({ id: call.id, name: call.name, arguments: call.arguments, error: "子代理不能调 MCP 插件工具" });
             return fn(call);
           },
           readFiles: async (paths) => {
@@ -615,13 +675,26 @@ export default function App() {
       const base: ToolCallRecord = { id: call.id, name: call.name, arguments: call.arguments };
       // 精确匹配，不做归一化：`Run_Command`、`run_command ` 这类变形一律落到「未知工具」，
       // 不允许它绕过下面按 spec.access 做的拦截。
-      const spec = findTool(call.name);
-      if (!spec) return { ...base, error: `未知工具：${call.name}` };
       const ws = stateRef.current.settings.workspace;
       if (!ws) return { ...base, error: "未接入工程目录，工具不可用" };
       const parsedArgs = parseToolArgs(call.arguments);
       if (!parsedArgs.ok) return { ...base, error: parsedArgs.error };
       const args = parsedArgs.args;
+      const spec = findTool(call.name);
+      if (!spec) {
+        // MCP 插件工具：只认「已加载的动态清单」，精确匹配，不做归一化。
+        // 计划/探索拦截与参数校验都在 executeMcpToolCall 里，与内置 exec
+        // 工具同一口径——不在内置注册表里，不等于绕过拦截。
+        const out = await executeMcpToolCall({
+          name: call.name,
+          args,
+          specs: mcpSpecsRef.current,
+          planMode: Boolean(stateRef.current.settings.planMode),
+          exploreMode: Boolean(stateRef.current.settings.exploreMode),
+          call: (server, tool, a) => mcpCallTool(server, tool, a),
+        });
+        return { ...base, ...(out.error ? { error: out.error } : { result: out.result ?? "" }) };
+      }
       // 探索模式第二道门（第一道在 tools()：发给模型的定义里已经没有写/跑工具）：
       // 模型就算硬调写与跑命令，执行层也到不了磁盘和子进程。名单制，不按权限推导，
       // 将来新增的工具默认不认。
@@ -839,7 +912,9 @@ export default function App() {
             s.toolCalls !== false && stateRef.current.settings.workspace
               ? stateRef.current.settings.exploreMode
                 ? exploreToolDefs()
-                : TOOL_DEFS
+                : // 探索模式第一道门只剩三件套，MCP 工具不进探索模式；
+                  // 正常模式下把已加载的 MCP 动态工具拼在内置工具后面。
+                  [...TOOL_DEFS, ...mcpToolDefs(mcpSpecsRef.current)]
               : undefined,
           signal: controller.signal,
           desktop: fsAvailable,

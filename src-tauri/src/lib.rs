@@ -6,6 +6,7 @@
 
 mod api;
 mod fsx;
+mod mcp;
 mod perms;
 mod proxy;
 mod runx;
@@ -232,6 +233,75 @@ mod perm_cmds {
     }
 }
 
+/// MCP 客户端 IPC：配置、启动、停止、工具列表、工具调用、状态查询。
+///
+/// 安全边界：`mcp_start` 只接受调用方传来的注册表配置（用户在 mcp.json 里
+/// 明确写过的命令），Rust 侧 `mcp::validate_server_config` 再查一遍裸命令名
+/// 与 shell 元字符；模型没有任何通道能把启动命令传进来——没有任何模型工具
+/// 能调到这里，唯一调用路径是前端「读配置 → 按 enabled 启动」。
+/// 阻塞的 stdio 读写一律丢进 spawn_blocking，绝不能同步阻塞 IPC 主线程
+/// （与 run_allowed 同款原因：否则 `mcp_stop` 排队等，停止形同虚设）。
+mod mcp_cmds {
+    /// 读 mcp.json（文件不存在时 Rust 侧写一份默认配置再返回）。
+    #[tauri::command]
+    pub fn mcp_config_read(app: tauri::AppHandle) -> Result<crate::mcp::McpConfigRead, String> {
+        crate::mcp::read_config(&app)
+    }
+
+    /// 保存整份 mcp.json（Rust 侧解析 + 校验后原子写入，不合法直接拒绝）。
+    #[tauri::command]
+    pub fn mcp_config_save(app: tauri::AppHandle, content: String) -> Result<(), String> {
+        crate::mcp::save_config(&app, &content)
+    }
+
+    /// 启动一台服务器并握手。session_id 只用来换工程根目录当子进程 cwd，
+    /// 前端不传、也不认任何绝对路径。
+    #[tauri::command]
+    pub async fn mcp_start(
+        config: crate::mcp::McpServerConfig,
+        session_id: String,
+    ) -> Result<crate::mcp::McpServerStatus, String> {
+        let root = crate::root_for(&session_id, "启动 MCP 服务器")?;
+        tauri::async_runtime::spawn_blocking(move || crate::mcp::start_server(config, Some(root)))
+            .await
+            .map_err(|e| format!("MCP 启动线程失败：{e}"))?
+    }
+
+    /// 停掉一台服务器（没在跑也算成功，幂等）。
+    #[tauri::command]
+    pub async fn mcp_stop(name: String) -> Result<(), String> {
+        tauri::async_runtime::spawn_blocking(move || crate::mcp::stop_server(&name))
+            .await
+            .map_err(|e| format!("MCP 停止线程失败：{e}"))?
+    }
+
+    /// 列出工具（tools/list，Rust 侧缓存）。
+    #[tauri::command]
+    pub async fn mcp_list_tools(name: String) -> Result<Vec<crate::mcp::McpTool>, String> {
+        tauri::async_runtime::spawn_blocking(move || crate::mcp::list_tools(&name))
+            .await
+            .map_err(|e| format!("MCP 工具列表线程失败：{e}"))?
+    }
+
+    /// 调一次工具（tools/call，60 秒超时；超时后 Rust 侧会杀掉该服务器）。
+    #[tauri::command]
+    pub async fn mcp_call_tool(
+        name: String,
+        tool: String,
+        arguments: serde_json::Value,
+    ) -> Result<String, String> {
+        tauri::async_runtime::spawn_blocking(move || crate::mcp::call_tool(&name, &tool, arguments))
+            .await
+            .map_err(|e| format!("MCP 工具调用线程失败：{e}"))?
+    }
+
+    /// 所有服务器的运行状态（含已挂的，带失败原因）。
+    #[tauri::command]
+    pub fn mcp_status() -> Vec<crate::mcp::McpServerStatus> {
+        crate::mcp::list_status()
+    }
+}
+
 /// 内置预览窗口：打开一个 http(s) 地址或本地 HTML 文件。
 ///
 /// 不涉及工程会话、不读工程文件内容、也不跑命令——只是让 WebView 开个新窗口去
@@ -425,11 +495,27 @@ pub fn run() {
             perm_cmds::perm_revoke,
             perm_cmds::perm_list,
             preview_cmds::open_preview,
-            web_cmds::web_search
+            web_cmds::web_search,
+            mcp_cmds::mcp_config_read,
+            mcp_cmds::mcp_config_save,
+            mcp_cmds::mcp_start,
+            mcp_cmds::mcp_stop,
+            mcp_cmds::mcp_list_tools,
+            mcp_cmds::mcp_call_tool,
+            mcp_cmds::mcp_status
         ])
         .setup(|_app| {
             let _ = PROXY.set(proxy::spawn());
             Ok(())
+        })
+        // 主窗口销毁时停掉全部 MCP 服务器：子进程不会随父进程自动退出，
+        // 不在这里杀，context-mode 的 npx 进程会变成孤儿留在后台。
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::Destroyed = event {
+                    crate::mcp::stop_all();
+                }
+            }
         })
         .run(tauri::generate_context!())
         .expect("zxz 启动失败");

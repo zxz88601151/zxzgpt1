@@ -17,7 +17,11 @@ export type ToolName = "read_file" | "list_dir" | "search_files" | "write_file" 
 export interface ToolDefinition {
 type: "function";
 function: {
-name: ToolName;
+// 内置工具的名字是 ToolName 联合类型；MCP 动态工具的名字是运行期生成的
+// 字符串（mcp_<server>_<tool>），所以这里放宽成 string。
+// 类型放宽不等于校验放宽：执行时仍由 registry 的 findTool 与 MCP 动态清单
+// 精确匹配，`Run_Command`、`run_command ` 这类变形一律落到「未知工具」。
+name: string;
 description: string;
 parameters: Record<string, unknown>;
 };

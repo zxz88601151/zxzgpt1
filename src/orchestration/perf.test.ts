@@ -5,6 +5,9 @@ import { buildMessages, filterUsable } from "../state";
 import { estimateTokens, estimateWireTokens } from "../lib/tokens";
 import type { Conversation, Message, Settings, ToolCallRecord } from "../types";
 
+// Vitest 运行于 Node 环境，process 在运行时可用；此处仅做编译期类型声明，避免引入 @types/node 污染浏览器构建。
+declare const process: { env: Record<string, string | undefined> };
+
 /**
  * 性能基准：量化「并行工具执行」与「上下文压缩引擎」两个功能的真实收益。
  * 默认 skip，避免拖慢全量测试；手动跑：RUN_PERF=1 npx vitest run src/orchestration/perf.test.ts
