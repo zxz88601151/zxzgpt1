@@ -375,3 +375,49 @@ describe("探索模式：名单制三件套", () => {
     expect(buildToolsPrompt(false, false)).toContain("edit_file");
   });
 });
+
+describe("todo_write：任务清单", () => {
+  const spec = findTool("todo_write")!;
+
+  it("参数校验：合法清单放行，空数组/重复id/非法status拒绝", () => {
+    expect(
+      spec.validate({
+        todos: [
+          { id: "1", content: "读文件", status: "in_progress" },
+          { id: "2", content: "改文件", status: "pending" },
+        ],
+      })
+    ).toBeNull();
+    expect(spec.validate({ todos: [] })).toContain("不能为空");
+    expect(
+      spec.validate({
+        todos: [
+          { id: "1", content: "a", status: "pending" },
+          { id: "1", content: "b", status: "pending" },
+        ],
+      })
+    ).toContain("重复");
+    expect(spec.validate({ todos: [{ id: "1", content: "a", status: "done" }] })).toContain("status");
+  });
+
+  it("执行：返回进度 + 完成/进行/待办三种标记", async () => {
+    const r = await spec.run(
+      {
+        todos: [
+          { id: "1", content: "读文件", status: "completed" },
+          { id: "2", content: "改文件", status: "in_progress" },
+          { id: "3", content: "跑测试", status: "pending" },
+        ],
+      },
+      fakeCtx()
+    );
+    expect(r.result).toContain("1/3");
+    expect(r.result).toContain("✓ 读文件");
+    expect(r.result).toContain("▶ 改文件");
+    expect(r.result).toContain("· 跑测试");
+  });
+
+  it("计划模式不拦 todo_write（access=read）", () => {
+    expect(planModeBlocks(spec.access)).toBe(false);
+  });
+});

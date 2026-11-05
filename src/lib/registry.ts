@@ -436,8 +436,63 @@ const webSearch: ToolSpec = {
   },
 };
 
+const todoWrite: ToolSpec = {
+  name: "todo_write",
+  access: "read",
+  summary: "任务清单",
+  description:
+    "维护本次任务的分步清单，跟踪进度。每次调用传完整清单（覆盖旧清单），每项 status 是 pending / in_progress / completed。多步任务先写清单再逐项完成，完成一项就更新一次状态，不要一次把没做的标成完成。",
+  parameters: {
+    type: "object",
+    properties: {
+      todos: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "稳定编号，如 1、2、3" },
+            content: { type: "string", description: "这一步要做什么" },
+            status: { type: "string", enum: ["pending", "in_progress", "completed"] },
+          },
+          required: ["id", "content", "status"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["todos"],
+    additionalProperties: false,
+  },
+  validate: (args) => {
+    if (!Array.isArray(args.todos)) return "todo_write 需要 todos 数组";
+    if (!args.todos.length) return "todo_write 的 todos 不能为空";
+    if (args.todos.length > 50) return "todo_write 的 todos 太多（上限 50 项）";
+    const seen = new Set<string>();
+    for (let i = 0; i < args.todos.length; i++) {
+      const t = args.todos[i] as Record<string, unknown> | null;
+      if (!t || typeof t !== "object" || Array.isArray(t)) return `todo_write 第 ${i + 1} 项必须是对象`;
+      if (typeof t.id !== "string" || !t.id) return `todo_write 第 ${i + 1} 项需要非空 id`;
+      if (typeof t.content !== "string" || !t.content.trim()) return `todo_write 第 ${i + 1} 项需要非空 content`;
+      const status = t.status;
+      if (status !== "pending" && status !== "in_progress" && status !== "completed")
+        return `todo_write 第 ${i + 1} 项 status 只能是 pending/in_progress/completed`;
+      if (seen.has(t.id as string)) return `todo_write 第 ${i + 1} 项 id 重复：${t.id}`;
+      seen.add(t.id as string);
+    }
+    return null;
+  },
+  run: async (args) => {
+    const todos = args.todos as { id: string; content: string; status: string }[];
+    const done = todos.filter((t) => t.status === "completed").length;
+    const lines = todos.map((t) => {
+      const mark = t.status === "completed" ? "✓" : t.status === "in_progress" ? "▶" : "·";
+      return `${mark} ${t.content}`;
+    });
+    return { result: `任务进度 ${done}/${todos.length}\n${lines.join("\n")}` };
+  },
+};
+
 /** 唯一权威清单。加工具只改这里，其余（Schema / 校验 / 提示 / 分发 / 权限）自动跟上。 */
-export const TOOLS: readonly ToolSpec[] = [readFile, listDir, searchFiles, writeFile, editFile, applyPatch, runCommand, webSearch];
+export const TOOLS: readonly ToolSpec[] = [readFile, listDir, searchFiles, writeFile, editFile, applyPatch, runCommand, webSearch, todoWrite];
 
 const BY_NAME = new Map<string, ToolSpec>(TOOLS.map((t) => [t.name, t]));
 
