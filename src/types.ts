@@ -116,6 +116,9 @@ export interface Settings {
   /** 探索模式开关（C1 只负责存取这个开关；只读拦截行为属 A2，不在本批）。
    *  缺省 undefined 按关处理，老设置无此字段兼容 */
   exploreMode?: boolean;
+  /** 子代理模型：explore 工具触发子代理时用的模型名。复用主对话的 baseUrl/apiKey，只换 model。
+   *  空/未设置 = 不启用子代理（explore 工具会拒绝并提示先配）。 */
+  subagentModel?: string;
 }
 
 export interface AppState {

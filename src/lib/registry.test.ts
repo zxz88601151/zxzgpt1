@@ -20,6 +20,7 @@ function fakeCtx(over: Partial<ToolContext> = {}): ToolContext {
     writeFile: async () => [],
     runCommand: async (): Promise<RunResult> => ({ exit_code: 0, stdout: "", stderr: "", timed_out: false, truncated: false }),
     webSearch: async () => [],
+    runSubagent: async () => "",
     ...over,
   };
 }
@@ -465,5 +466,21 @@ describe("search_files 正则 + glob", () => {
 
   it("glob 校验：空 pattern 拒绝", () => {
     expect(findTool("glob")!.validate({ pattern: "" })).toContain("非空");
+  });
+});
+
+describe("explore：派子代理探索", () => {
+  it("参数校验：空 query 拒绝", () => {
+    expect(findTool("explore")!.validate({ query: "" })).toContain("非空");
+  });
+
+  it("执行：把 query 交给子代理，返回摘要", async () => {
+    const spec = findTool("explore")!;
+    const r = await spec.run({ query: "摸清 src 结构" }, fakeCtx({ runSubagent: async () => "这是探索摘要" }));
+    expect(r.result).toBe("这是探索摘要");
+  });
+
+  it("计划模式不拦 explore（access=read）", () => {
+    expect(planModeBlocks(findTool("explore")!.access)).toBe(false);
   });
 });

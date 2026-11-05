@@ -34,6 +34,8 @@ export interface RoundSignals {
   skillRefs: number;
   /** 当前轮次，0 起 */
   round: number;
+  /** 本次发送的轮数上限（主对话 6，子代理 4） */
+  maxRounds: number;
 }
 
 /**
@@ -67,7 +69,7 @@ export function nextRound(s: RoundSignals): RoundEnd {
   const wantsContext = s.reads > 0 || s.skillRefs > 0;
   if (s.toolCalls === 0 && !wantsContext) return { kind: "stop", reason: "no_followup" };
 
-  if (s.round >= MAX_ROUNDS - 1) return { kind: "stop", reason: "rounds_exhausted" };
+  if (s.round >= s.maxRounds - 1) return { kind: "stop", reason: "rounds_exhausted" };
 
   return { kind: "continue" };
 }

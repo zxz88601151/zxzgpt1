@@ -12,7 +12,7 @@
 * `;`、`|`、`&`、`$`、反引号这类 shell 元字符，带这些字符的参数直接拒绝。
 */
 
-export type ToolName = "read_file" | "list_dir" | "search_files" | "write_file" | "edit_file" | "apply_patch" | "run_command" | "web_search" | "todo_write" | "glob";
+export type ToolName = "read_file" | "list_dir" | "search_files" | "write_file" | "edit_file" | "apply_patch" | "run_command" | "web_search" | "todo_write" | "glob" | "explore";
 
 export interface ToolDefinition {
 type: "function";

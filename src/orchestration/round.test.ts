@@ -7,7 +7,7 @@ import { MAX_TEST_ROUNDS } from "../lib/tools";
 
 /** 一个"正常推进中"的默认信号，用例里只改要测的那几个字段 */
 function sig(over: Partial<RoundSignals> = {}): RoundSignals {
-  return { aborted: false, failed: false, testGiveUp: false, toolCalls: 0, reads: 0, skillRefs: 0, round: 0, ...over };
+  return { aborted: false, failed: false, testGiveUp: false, toolCalls: 0, reads: 0, skillRefs: 0, round: 0, maxRounds: MAX_ROUNDS, ...over };
 }
 
 describe("nextRound：六种出口", () => {

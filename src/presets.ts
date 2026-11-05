@@ -93,6 +93,9 @@ export const DEFAULT_SETTINGS: Settings = {
   // 探索模式默认关；A2 已实施：开后模型只能调只读三件套，写/跑命令在发工具定义
   // 与执行层两道门拦截，file: 块也不落盘；查完要改请先关掉它。
   exploreMode: false,
+  // 子代理模型：默认不启用（未设置时 explore 工具会拒绝并提示先配）。
+  // 启用时填模型名，如 "glm-4.5-flash"，复用主对话的 baseUrl/apiKey，只换 model。
+  subagentModel: undefined,
 };
 
 /** 空会话时的引导卡片 */

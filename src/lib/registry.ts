@@ -68,6 +68,8 @@ export interface ToolContext {
   runCommand: (argv: string[]) => Promise<RunResult>;
   /** 联网搜索（只读，走 Rust 侧） */
   webSearch: (query: string) => Promise<SearchResult[]>;
+  /** 派一个只读探索子代理，返回摘要文本 */
+  runSubagent: (query: string) => Promise<string>;
 }
 
 export interface WriteOutcome {
@@ -546,8 +548,31 @@ const globFiles: ToolSpec = {
   },
 };
 
+const explore: ToolSpec = {
+  name: "explore",
+  access: "read",
+  summary: "派子代理探索代码",
+  description:
+    "派一个只读子代理去探索工程、搞清楚一个代码问题（目录结构、某功能的实现、调用关系等），返回探索摘要。子代理用独立上下文和只读工具，探索过程不进主对话。改动前先摸清现状时优先用它。",
+  parameters: {
+    type: "object",
+    properties: { query: { type: "string", description: "要探索搞清楚的问题，尽量具体" } },
+    required: ["query"],
+    additionalProperties: false,
+  },
+  validate: (args) => {
+    if (typeof args.query !== "string" || !args.query.trim()) return "explore 需要非空 query";
+    if (args.query.length > 500) return "explore 的 query 太长（上限 500 字符）";
+    return null;
+  },
+  run: async (args, ctx) => {
+    const summary = await ctx.runSubagent(args.query as string);
+    return { result: summary };
+  },
+};
+
 /** 唯一权威清单。加工具只改这里，其余（Schema / 校验 / 提示 / 分发 / 权限）自动跟上。 */
-export const TOOLS: readonly ToolSpec[] = [readFile, listDir, searchFiles, writeFile, editFile, applyPatch, runCommand, webSearch, todoWrite, globFiles];
+export const TOOLS: readonly ToolSpec[] = [readFile, listDir, searchFiles, writeFile, editFile, applyPatch, runCommand, webSearch, todoWrite, globFiles, explore];
 
 const BY_NAME = new Map<string, ToolSpec>(TOOLS.map((t) => [t.name, t]));
 
@@ -614,6 +639,12 @@ export function isExploreTool(name: string): boolean {
 /** 发给模型的工具定义在探索模式下只剩三件套，原 TOOL_DEFS 不改动。 */
 export function exploreToolDefs(): ToolDefinition[] {
   return TOOL_DEFS.filter((d) => isExploreTool(d.function.name));
+}
+
+/** 子代理（只读探索）的工具集：探索三件套 + glob + web_search。 */
+export function subagentToolDefs(): ToolDefinition[] {
+  const names = new Set<string>([...EXPLORE_TOOL_NAMES, "glob", "web_search"]);
+  return TOOL_DEFS.filter((d) => names.has(d.function.name));
 }
 
 /** 给模型看的工具说明：放在工作区提示词之后、计划提示词之前 */

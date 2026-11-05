@@ -69,6 +69,8 @@ export interface RunDeps {
   skills: Skill[];
   /** 已含本轮用户消息的初始消息列表（重新生成时是裁剪后的历史） */
   baseMessages: Message[];
+  /** 轮数上限。默认 MAX_ROUNDS（主对话 6）；子代理传 4。 */
+  maxRounds?: number;
 
   transport: Transport;
   /** 发一次流式请求。注入而非直接 import，测试可以换成假上游 */
@@ -120,8 +122,9 @@ export async function runRounds(deps: RunDeps): Promise<void> {
 
   // 测试回路计数：本次发送里已经跑完的 npm test 轮数，上限 MAX_TEST_ROUNDS
   let testRounds = 0;
+  const maxRounds = deps.maxRounds ?? MAX_ROUNDS;
 
-  for (let round = 0; round < MAX_ROUNDS; round++) {
+  for (let round = 0; round < maxRounds; round++) {
     const assist: Message = {
       role: "assistant",
       content: "",
@@ -300,6 +303,7 @@ export async function runRounds(deps: RunDeps): Promise<void> {
       reads: reads.length,
       skillRefs: refs.length,
       round,
+      maxRounds,
     });
     if (step.kind === "stop") {
       const notice = stopNotice(step.reason);

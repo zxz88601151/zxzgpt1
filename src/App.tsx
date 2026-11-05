@@ -59,6 +59,7 @@ import {
 } from "./lib/files";
 import { EXPLORE_TOOL_NAMES, exploreToolDefs, findTool, isExploreTool, parseToolArgs, planModeBlocks, TOOL_DEFS, type ToolContext } from "./lib/registry";
 import { runRounds } from "./orchestration/session";
+import { runSubagent } from "./orchestration/subagent";
 import type { AppState, Conversation, FileWriteResult, Message, Settings, Theme, ToolCallRecord, Transport } from "./types";
 import type { ToastKind } from "./components/ui";
 
@@ -533,7 +534,14 @@ export default function App() {
    *
    * 用 stateRef 取会话而不是闭包捕获 workspace，所以 ctx 不随工作区切换重建；
    * 真正让不同工具表现得不同的是 registry 里的 spec，不是这里的分支。
+   *
+   * ctx 与 executeTool 互相引用（ctx.runSubagent 要派子代理、子代理又要 executeTool），
+   * 用 ref 打破循环：executeTool 读 ctxRef，runSubagent 读 executeToolRef，赋值在两者
+   * 都定义之后。
    */
+  const ctxRef = useRef<ToolContext | null>(null);
+  const executeToolRef = useRef<((call: { id: string; name: string; arguments: string }) => Promise<ToolCallRecord>) | null>(null);
+
   const ctx = useMemo<ToolContext>(
     () => ({
       readFile: async (rel) => {
@@ -567,9 +575,30 @@ export default function App() {
         }
       },
       webSearch: (query) => webSearchApi(query),
+      runSubagent: (query) =>
+        runSubagent(query, {
+          settings: stateRef.current.settings,
+          transport,
+          chat: chatStream,
+          signal: new AbortController().signal,
+          desktop: fsAvailable,
+          currentWorkspace: () => stateRef.current.settings.workspace,
+          executeTool: (call) => {
+            const fn = executeToolRef.current;
+            if (!fn)
+              return Promise.resolve({ id: call.id, name: call.name, arguments: call.arguments, error: "子代理执行器未就绪" });
+            return fn(call);
+          },
+          readFiles: async (paths) => {
+            const w = stateRef.current.settings.workspace;
+            return w ? readForModel(w.sessionId, paths) : [];
+          },
+          toast,
+        }),
     }),
-    [requestApplyFiles, askExec]
+    [requestApplyFiles, askExec, transport, readForModel, toast]
   );
+  ctxRef.current = ctx;
 
   /**
    * 执行一次模型发起的工具调用。顺序执行、不并行，避免两个写操作互相覆盖。
@@ -605,14 +634,15 @@ export default function App() {
         return { ...base, error: "跑命令只在桌面端可用，浏览器直开时不可用" };
       }
       try {
-        const out = await spec.run(args, ctx);
+        const out = await spec.run(args, ctxRef.current!);
         return { ...base, ...(out.error ? { error: out.error } : { result: out.result ?? "" }) };
       } catch (e) {
         return { ...base, error: (e as Error).message };
       }
     },
-    [ctx]
+    [ctxRef]
   );
+  executeToolRef.current = executeTool;
 
   /* ------------------------------------------------------------ 发送 */
 
