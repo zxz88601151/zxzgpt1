@@ -17,6 +17,7 @@ import {
   sessionFor,
   undoWrite,
   openPreview,
+  webSearch as webSearchApi,
   wsClose,
   wsInfo,
   wsOpen as openSession,
@@ -565,6 +566,7 @@ export default function App() {
           }
         }
       },
+      webSearch: (query) => webSearchApi(query),
     }),
     [requestApplyFiles, askExec]
   );

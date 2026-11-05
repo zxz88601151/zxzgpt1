@@ -28,7 +28,7 @@ import {
   type ToolDefinition,
   type ToolName,
 } from "./tools";
-import type { FsEntry, RunResult } from "./fsapi";
+import type { FsEntry, RunResult, SearchResult } from "./fsapi";
 
 /**
  * 权限等级。这不是装饰：计划模式与将来的审批流程都按它拦，而不是按工具名手写。
@@ -66,6 +66,8 @@ export interface ToolContext {
   writeFile: (rel: string, content: string) => Promise<WriteOutcome[]>;
   /** 起子进程跑白名单命令 */
   runCommand: (argv: string[]) => Promise<RunResult>;
+  /** 联网搜索（只读，走 Rust 侧） */
+  webSearch: (query: string) => Promise<SearchResult[]>;
 }
 
 export interface WriteOutcome {
@@ -410,8 +412,32 @@ const runCommand: ToolSpec = {
   },
 };
 
+const webSearch: ToolSpec = {
+  name: "web_search",
+  access: "read",
+  summary: "联网搜索",
+  description:
+    "联网搜索一个词或短语，返回「标题 / 链接 / 摘要」列表。用于查 API 文档、技术资料、报错信息、外部事实。不写文件、不跑命令，任何模式下都可用。",
+  parameters: {
+    type: "object",
+    properties: { query: { type: "string", description: "要搜索的词或短语" } },
+    required: ["query"],
+    additionalProperties: false,
+  },
+  validate: (args) => {
+    if (typeof args.query !== "string" || !args.query.trim()) return "web_search 需要非空 query";
+    if (args.query.length > 200) return "web_search 的 query 太长（上限 200 字符）";
+    return null;
+  },
+  run: async (args, ctx) => {
+    const results = await ctx.webSearch(args.query as string);
+    const text = results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join("\n\n");
+    return { result: text || "(没有结果)" };
+  },
+};
+
 /** 唯一权威清单。加工具只改这里，其余（Schema / 校验 / 提示 / 分发 / 权限）自动跟上。 */
-export const TOOLS: readonly ToolSpec[] = [readFile, listDir, searchFiles, writeFile, editFile, applyPatch, runCommand];
+export const TOOLS: readonly ToolSpec[] = [readFile, listDir, searchFiles, writeFile, editFile, applyPatch, runCommand, webSearch];
 
 const BY_NAME = new Map<string, ToolSpec>(TOOLS.map((t) => [t.name, t]));
 

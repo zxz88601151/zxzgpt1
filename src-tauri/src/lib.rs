@@ -285,6 +285,123 @@ mod preview_cmds {
     }
 }
 
+/// 联网搜索：只读动作，走 Rust 侧 reqwest（绕浏览器 CORS、也不把搜索词交给前端之外的通道），
+/// 解析 Bing 结果页，返回「标题 / 链接 / 摘要」给模型。
+mod web_cmds {
+    use regex::Regex;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    pub struct SearchResult {
+        title: String,
+        url: String,
+        snippet: String,
+    }
+
+    const MAX_RESULTS: usize = 8;
+    const MAX_SNIPPET_CHARS: usize = 280;
+
+    /// 解码 HTML 实体（含数字实体 &#0183; → ·）。
+    fn unescape(s: &str) -> String {
+        let re_num = Regex::new(r"&#(\d+);").unwrap();
+        let with_num = re_num.replace_all(s, |c: &regex::Captures| {
+            c[1]
+                .parse::<u32>()
+                .ok()
+                .and_then(char::from_u32)
+                .map(|ch| ch.to_string())
+                .unwrap_or_default()
+        });
+        with_num
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&nbsp;", " ")
+            .replace("&ensp;", " ")
+    }
+
+    /// 去标签 + 解码实体 + 压缩空白。
+    fn strip_html(s: &str) -> String {
+        let re_tag = Regex::new(r"<[^>]*>").unwrap();
+        let re_ws = Regex::new(r"\s+").unwrap();
+        let no_tag = re_tag.replace_all(s, " ");
+        let decoded = unescape(&no_tag);
+        re_ws.replace_all(&decoded, " ").trim().to_string()
+    }
+
+    /// 从 Bing 结果页 HTML 抽出「标题 / 链接 / 摘要」。
+    fn parse_bing(html: &str) -> Vec<SearchResult> {
+        let re_title = Regex::new(r#"<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>"#).unwrap();
+        let re_snippet = Regex::new(r#"<p[^>]*class="[^"]*b_lineclamp[^"]*"[^>]*>([\s\S]*?)</p>"#).unwrap();
+
+        let mut out: Vec<SearchResult> = Vec::new();
+        // 按结果块切：Rust regex 不支持 look-ahead，改用 split（第一个 <li 之前的内容跳过）
+        for block in html.split(r#"<li class="b_algo""#).skip(1) {
+            if out.len() >= MAX_RESULTS {
+                break;
+            }
+            let Some(t) = re_title.captures(block) else {
+                continue;
+            };
+            let url = t[1].trim().to_string();
+            let title = strip_html(&t[2]);
+            if title.is_empty() {
+                continue;
+            }
+            let snippet = re_snippet
+                .captures(block)
+                .map(|c| strip_html(&c[1]))
+                .unwrap_or_default();
+            let snippet = if snippet.chars().count() > MAX_SNIPPET_CHARS {
+                let mut s: String = snippet.chars().take(MAX_SNIPPET_CHARS).collect();
+                s.push('…');
+                s
+            } else {
+                snippet
+            };
+            out.push(SearchResult { title, url, snippet });
+        }
+        out
+    }
+
+    #[tauri::command]
+    pub async fn web_search(query: String) -> Result<Vec<SearchResult>, String> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Err("搜索词不能为空".into());
+        }
+        if q.chars().count() > 200 {
+            return Err("搜索词太长（上限 200 字符）".into());
+        }
+        if q.chars().any(|c| c == '\0' || c == '\n' || c == '\r') {
+            return Err("搜索词不能含控制字符".into());
+        }
+
+        let html = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36")
+            .build()
+            .map_err(|e| format!("构建请求失败：{e}"))?
+            .get("https://www.bing.com/search")
+            .query(&[("q", q)])
+            .send()
+            .await
+            .map_err(|e| format!("搜索请求失败：{e}"))?
+            .error_for_status()
+            .map_err(|e| format!("搜索返回错误：{e}"))?
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败：{e}"))?;
+
+        let results = parse_bing(&html);
+        if results.is_empty() {
+            return Err("没有解析到搜索结果（页面结构可能变化）".into());
+        }
+        Ok(results)
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -307,7 +424,8 @@ pub fn run() {
             perm_cmds::perm_grant,
             perm_cmds::perm_revoke,
             perm_cmds::perm_list,
-            preview_cmds::open_preview
+            preview_cmds::open_preview,
+            web_cmds::web_search
         ])
         .setup(|_app| {
             let _ = PROXY.set(proxy::spawn());

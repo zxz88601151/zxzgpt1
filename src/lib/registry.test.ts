@@ -19,6 +19,7 @@ function fakeCtx(over: Partial<ToolContext> = {}): ToolContext {
     listDir: async () => [],
     writeFile: async () => [],
     runCommand: async (): Promise<RunResult> => ({ exit_code: 0, stdout: "", stderr: "", timed_out: false, truncated: false }),
+    webSearch: async () => [],
     ...over,
   };
 }

@@ -359,3 +359,15 @@ export async function buildTree(sessionId: string, depth = 2): Promise<string> {
 export async function openPreview(target: string): Promise<void> {
   await call<void>("open_preview", { target });
 }
+
+/** 联网搜索的结果条目（Rust 侧解析 Bing 返回） */
+export interface SearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+/** 联网搜索：走 Rust 侧（绕 CORS），返回标题/链接/摘要列表。 */
+export async function webSearch(query: string): Promise<SearchResult[]> {
+  return call<SearchResult[]>("web_search", { query });
+}

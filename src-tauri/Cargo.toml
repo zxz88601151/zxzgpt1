@@ -28,6 +28,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-uti
 futures-util = "0.3"
 # 关闭默认特性以避免 native-tls/OpenSSL，改用 rustls，Windows/Linux 均免装 OpenSSL
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# 联网搜索：解析 Bing 结果页的标题/链接/摘要
+regex = "1"
 
 [features]
 # 生产构建（frontendDist 走本地资源）需要此特性，勿删
