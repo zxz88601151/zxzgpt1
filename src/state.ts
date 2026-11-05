@@ -47,17 +47,41 @@ export function titleFrom(text: string): string {
 }
 
 /**
+ * 抽出「可用消息」：剔除报错 / 流式中 / 空内容的消息。
+ * buildMessages 与压缩引擎都基于同一份过滤规则，索引才能严格对齐。
+ */
+export function filterUsable(messages: Message[]): Message[] {
+  return messages.filter((m) => !m.error && !m.streaming && (m.content || m.toolCalls?.length));
+}
+
+/** 会话当前可被发给模型的可用消息（与 filterUsable 同义，语义更直白，供压缩引擎用）。 */
+export function usableMessages(conv: Conversation): Message[] {
+  return filterUsable(conv.messages);
+}
+
+/**
  * 组装发给上游的消息。
- * 先剔除出错 / 流式中 / 内容为空的消息，再按「最近 N 轮」截取 —— 顺序反过来的话，
- * 本次刚插入的空助手占位会占掉窗口名额，导致实际少带一轮上下文。
+ * 先剔除出错 / 流式中 / 内容为空的消息，再按「压缩截止 + 最近 N 轮」截取。
  *
- * 系统消息的顺序：人设 → 本地工程约定 → 已加载技能。越具体的越靠后，
+ * 压缩逻辑：若 `conv.compactAfterIndex` 存在，只发送该索引之后的可用消息，
+ * 并在系统段注入 `conv.compactSummary` 作为较早历史的精炼回顾——UI 里仍保留
+ * 完整消息列表，模型侧则只看摘要 + 最近上下文，长会话不再膨胀退化。
+ *
+ * 系统消息的顺序：人设 → 压缩摘要 → 本地工程约定 → 已加载技能。越具体的越靠后，
  * 模型对最近的那条系统消息服从度最高。
  */
 export function buildMessages(conv: Conversation, settings: Settings, skillPrompt = ""): WireMessage[] {
   const out: WireMessage[] = [];
   const sys = settings.systemPrompt.trim();
   if (sys) out.push({ role: "system", content: sys });
+
+  // 较早对话的压缩摘要：作为系统上下文注入，模型据此延续任务而不必重读全部历史
+  if (conv.compactSummary) {
+    out.push({
+      role: "system",
+      content: `[对话历史压缩摘要 · 以下为较早对话的精炼回顾，模型据此延续任务]\n${conv.compactSummary}`,
+    });
+  }
 
   // 本地工程模式：把根目录、目录树和落盘格式约定放在最后，离用户消息最近
   const ws = settings.workspace;
@@ -89,9 +113,12 @@ export function buildMessages(conv: Conversation, settings: Settings, skillPromp
   // 计划模式指令放最后：离用户消息最近，模型最不容易把它当成可忽略的背景
   if (settings.planMode) out.push({ role: "system", content: buildPlanPrompt() });
 
-  const usage = conv.messages.filter((m) => !m.error && !m.streaming && (m.content || m.toolCalls?.length));
+  const usage = filterUsable(conv.messages);
+  // 压缩截止：只发送该索引之后的可用消息（更早的已被摘要进 compactSummary）
+  const after = conv.compactAfterIndex ?? 0;
+  const windowMsgs = after > 0 ? usage.slice(after) : usage;
   const turns = clamp(Number(settings.contextTurns) || 0, 0, 100);
-  for (const m of sliceContext(usage, turns)) {
+  for (const m of sliceContext(windowMsgs, turns)) {
     // 带工具调用的助手消息要展开成原生协议：先是带 tool_calls 的助手消息，
     // 后面跟每一次调用对应的 tool 消息（tool_call_id 对上），模型才能把
     // “我调了什么、结果是什么”对上号；只发文本会丢掉这层对应关系。

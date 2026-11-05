@@ -202,6 +202,40 @@ export function SettingsDrawer({
               />
             </div>
             <div className="field">
+              <label className="row">
+                <input
+                  type="checkbox"
+                  checked={!!draft.autoCompact}
+                  onChange={(e) => patch({ autoCompact: e.target.checked })}
+                />
+                自动压缩上下文（超出预算时）
+              </label>
+            </div>
+            <div className="field">
+              <label htmlFor="contextBudget">上下文 token 预算（超出自动压缩）</label>
+              <input
+                id="contextBudget"
+                type="number"
+                min={2000}
+                max={1000000}
+                step={1000}
+                value={draft.contextBudget ?? 100000}
+                onChange={(e) => patch({ contextBudget: clamp(Number(e.target.value) || 0, 0, 1000000) })}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="compactKeepRounds">压缩后保留最近轮数</label>
+              <input
+                id="compactKeepRounds"
+                type="number"
+                min={1}
+                max={20}
+                step={1}
+                value={draft.compactKeepRounds ?? 3}
+                onChange={(e) => patch({ compactKeepRounds: clamp(Number(e.target.value) || 0, 1, 20) })}
+              />
+            </div>
+            <div className="field">
               <label htmlFor="theme">主题</label>
               <select
                 id="theme"

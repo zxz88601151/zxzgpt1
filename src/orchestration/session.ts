@@ -27,6 +27,7 @@ import {
 import { parseSkillRefs, type Skill, type SkillRef } from "../lib/skill";
 import type { RunResult } from "../lib/fsapi";
 import { buildMessages } from "../state";
+import { maybeCompact, structuralSummary } from "./compact";
 import type {
   Conversation,
   FileWriteResult,
@@ -78,6 +79,12 @@ export interface RunDeps {
   /** 发给模型的工具定义；返回 undefined 表示本轮按纯聊天发（工具模式关闭或没接工程）。
    *  做成函数而不是值：旧代码每轮都重新判断一次 workspace 是否还在。 */
   tools: () => ToolDefinition[] | undefined;
+  /** 模型摘要：把一批历史消息压成结构化摘要，供上下文压缩引擎使用。
+   *  缺省时用结构化兜底（structuralSummary），故为可选——压缩功能不依赖网络也能跑。 */
+  summarize?: (window: Message[]) => Promise<string>;
+  /** 把压缩后的元数据（compactSummary / compactAfterIndex）写回会话。
+   *  缺省时只在本次发送的内存态生效，不跨发送持久化。 */
+  patchConversation?: (patch: Partial<Conversation>) => void;
   signal: AbortSignal;
   /** 是否为桌面端（决定能不能跑命令）。每次求值，与原来的 `fsAvailable()` 一致 */
   desktop: () => boolean;
@@ -150,6 +157,9 @@ export async function runToolBatch(
 export async function runRounds(deps: RunDeps): Promise<void> {
   const s = deps.settings;
   const target = deps.conversation;
+  // 本地可变副本：压缩引擎每轮可能更新 compactSummary / compactAfterIndex，
+  // 这些元数据既要喂给 buildMessages，也要通过 patchConversation 持久化回会话。
+  let conv: Conversation = { ...target };
   let baseMessages = deps.baseMessages.slice();
 
   /** 把 baseMessages 写回会话。旧代码用 update() 逐次展开，这里收敛成一个入口。 */
@@ -163,6 +173,20 @@ export async function runRounds(deps: RunDeps): Promise<void> {
   const maxRounds = deps.maxRounds ?? MAX_ROUNDS;
 
   for (let round = 0; round < maxRounds; round++) {
+    // 上下文压缩：超 token 预算时把最旧的一批历史摘要掉，只保留最近几轮（高性能模式支柱）。
+    // 不开启 autoCompact（或 settings 缺该字段）时跳过；summarize 缺省退化成结构化兜底。
+    if (s.autoCompact) {
+      const patch = await maybeCompact(conv, baseMessages, s, deps.skillPrompt, {
+        summarize: deps.summarize ?? ((w) => Promise.resolve(structuralSummary(w))),
+        budget: Number(s.contextBudget) || 0,
+        keepRounds: Number(s.compactKeepRounds) || 3,
+      });
+      if (patch) {
+        conv = { ...conv, compactSummary: patch.summary, compactAfterIndex: patch.afterIndex };
+        deps.patchConversation?.({ compactSummary: patch.summary, compactAfterIndex: patch.afterIndex });
+      }
+    }
+
     const assist: Message = {
       role: "assistant",
       content: "",
@@ -198,7 +222,7 @@ export async function runRounds(deps: RunDeps): Promise<void> {
       await deps.chat({
         settings: s,
         transport: deps.transport,
-        messages: buildMessages({ ...target, messages }, s, deps.skillPrompt),
+        messages: buildMessages({ ...conv, messages }, s, deps.skillPrompt),
         signal: deps.signal,
         tools: deps.tools(),
         onEvent: (evt) => {

@@ -67,6 +67,12 @@ export interface Conversation {
   messages: Message[];
   createdAt: number;
   updatedAt: number;
+  /** 上下文压缩：较早对话已被压成结构化摘要，这是摘要文本（模型据此延续任务）。
+   *  为空表示尚未压缩过。UI 用它展示「已压缩 N 条」徽标。 */
+  compactSummary?: string;
+  /** 上下文压缩：usableMessages（过滤后的可用消息）中被摘要掉的前导条数；
+   *  buildMessages / planCompaction 都只在 usableMessages 的索引空间内操作，二者严格对齐。 */
+  compactAfterIndex?: number;
 }
 
 export type Theme = "dark" | "light";
@@ -119,6 +125,14 @@ export interface Settings {
   /** 子代理模型：explore 工具触发子代理时用的模型名。复用主对话的 baseUrl/apiKey，只换 model。
    *  空/未设置 = 不启用子代理（explore 工具会拒绝并提示先配）。 */
   subagentModel?: string;
+  /** 上下文自动压缩：超出 token 预算时把最旧的历史摘要掉，只保留最近几轮（默认开）。
+   *  这是「高性能代码模式」的支柱之一——长会话不再因上下文膨胀而退化。 */
+  autoCompact?: boolean;
+  /** 上下文 token 预算（估算）：输入 tokens 超过则触发自动压缩；<=0 视为不限制。
+   *  中文混排按 CJK≈1 token/字、其余≈4 字符/token 估算。 */
+  contextBudget?: number;
+  /** 压缩后保留的最近轮数（1 轮 = 用户+助手一组），默认 3。被摘要的窗口始终是「最旧且不在保留区」的那段。 */
+  compactKeepRounds?: number;
 }
 
 export interface AppState {

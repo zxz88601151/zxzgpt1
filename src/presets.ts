@@ -96,6 +96,10 @@ export const DEFAULT_SETTINGS: Settings = {
   // 子代理模型：默认不启用（未设置时 explore 工具会拒绝并提示先配）。
   // 启用时填模型名，如 "glm-4.5-flash"，复用主对话的 baseUrl/apiKey，只换 model。
   subagentModel: undefined,
+  // 上下文自动压缩（高性能模式支柱）：超出 token 预算时把最旧历史摘要掉，保留最近 3 轮。
+  autoCompact: true,
+  contextBudget: 100000,
+  compactKeepRounds: 3,
 };
 
 /** 空会话时的引导卡片 */

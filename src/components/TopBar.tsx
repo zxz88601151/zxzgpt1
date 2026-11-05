@@ -15,6 +15,10 @@ interface TopBarProps {
   onOpenWorkspace: () => void;
   /** 写入历史（只在本地工程模式下出现） */
   onOpenUndo: () => void;
+  /** 手动压缩较早对话历史（节省上下文） */
+  onCompact?: () => void;
+  /** 已被压缩掉的可用消息条数；>0 时显示「已压缩 N 条」徽标 */
+  compactCount?: number;
 }
 
 export function TopBar({
@@ -30,6 +34,8 @@ export function TopBar({
   onOpenSettings,
   onOpenWorkspace,
   onOpenUndo,
+  onCompact,
+  compactCount,
 }: TopBarProps) {
   return (
     <header className="topbar">
@@ -37,6 +43,11 @@ export function TopBar({
       <h1 className="conv-title" id="convTitle">
         {title}
       </h1>
+      {compactCount ? (
+        <span className="compact-pill" id="compactPill" title="较早的对话已被压缩为摘要，仅保留最近上下文">
+          已压缩 {compactCount} 条
+        </span>
+      ) : null}
       <button
         className={"model-pill" + (model ? "" : " unset")}
         id="modelPill"
@@ -67,6 +78,7 @@ export function TopBar({
       />
       <IconButton id="btnRegen" title="重新生成最后一条回复" name="refresh" onClick={onRegen} hidden={!showRegen} />
       <IconButton id="btnClearConv" title="清空当前对话" name="trash" onClick={onClear} />
+      <IconButton id="btnCompact" title="压缩较早的对话历史以节省上下文" name="layers" onClick={onCompact} hidden={!onCompact} />
       <IconButton id="btnTheme" title="切换主题" name={theme === "light" ? "sun" : "moon"} onClick={onToggleTheme} />
     </header>
   );

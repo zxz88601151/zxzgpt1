@@ -979,6 +979,23 @@ body:not(.collapsed) #btnOpenSidebar { display: none; }
 .ws-chip.on .ico { color: var(--accent); }
 .ws-chip .ws-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 130px; }
 
+/* ---------------- 上下文压缩徽标 ---------------- */
+
+.compact-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--text);
+  font-size: 11.5px;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: default;
+}
+
 /* ---------------- 弹层（文件夹选择） ---------------- */
 
 .modal-scrim {

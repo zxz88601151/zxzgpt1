@@ -59,6 +59,7 @@ import {
 } from "./lib/files";
 import { EXPLORE_TOOL_NAMES, exploreToolDefs, findTool, isExploreTool, parseToolArgs, planModeBlocks, TOOL_DEFS, type ToolContext } from "./lib/registry";
 import { runRounds } from "./orchestration/session";
+import { forceCompact } from "./orchestration/compact";
 import { runSubagent } from "./orchestration/subagent";
 import type { AppState, Conversation, FileWriteResult, Message, Settings, Theme, ToolCallRecord, Transport } from "./types";
 import type { ToastKind } from "./components/ui";
@@ -648,6 +649,68 @@ export default function App() {
 
   /* ------------------------------------------------------------ 发送 */
 
+  /** 上下文压缩用的模型摘要：把一批历史消息压成结构化中文要点。网络失败返回空，由引擎兜底。 */
+  const summarizeWindow = useCallback(async (window: Message[]): Promise<string> => {
+    const settings = stateRef.current.settings;
+    const sys =
+      "你是上下文压缩器。把下面这段对话历史压缩为结构化摘要，保留：1) 用户的核心目标与已确认需求；" +
+      "2) 涉及的文件路径与已做的修改/创建；3) 关键决策与未解决的问题；4) 重要的命令或错误信息。" +
+      "用简洁中文要点列出，不要复述寒暄，控制在 300 字以内。";
+    const userText = window
+      .map(
+        (m) =>
+          `${m.role === "assistant" ? "助手" : "用户"}: ${
+            m.content || (m.toolCalls ? "[工具调用: " + m.toolCalls.map((t) => t.name).join(", ") + "]" : "")
+          }`,
+      )
+      .join("\n\n");
+    const controller = new AbortController();
+    let acc = "";
+    try {
+      await chatStream({
+        settings: { ...settings, stream: false, maxTokens: 600 },
+        transport,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: userText },
+        ],
+        signal: controller.signal,
+        onEvent: (evt) => {
+          if (evt.type === "delta") acc += evt.text;
+        },
+      });
+    } catch {
+      acc = "";
+    }
+    return acc.trim();
+  }, [transport]);
+
+  /** 手动压缩：用户点「压缩上下文」时触发，无论是否超预算都压一步。 */
+  const runCompactNow = useCallback(async () => {
+    const conv0 = findActive(stateRef.current);
+    if (!conv0) return;
+    if (conv0.messages.length < 4) {
+      toast("对话太短，暂无需压缩", "");
+      return;
+    }
+    const patch = await forceCompact(conv0, conv0.messages, {
+      summarize: summarizeWindow,
+      budget: 0,
+      keepRounds: Number(stateRef.current.settings.compactKeepRounds) || 3,
+    });
+    if (patch) {
+      update((prev) => ({
+        ...prev,
+        conversations: prev.conversations.map((c) =>
+          c.id === conv0.id ? { ...c, compactSummary: patch.summary, compactAfterIndex: patch.afterIndex, updatedAt: Date.now() } : c,
+        ),
+      }));
+      toast(`已压缩 ${patch.summarizedCount} 条历史，保留最近上下文`, "ok");
+    } else {
+      toast("没有可压缩的历史（已较短或仅剩最近轮次）", "");
+    }
+  }, [summarizeWindow, toast]);
+
   const send = useCallback(
     async (opts?: { reuseUser?: boolean }) => {
       const reuse = Boolean(opts?.reuseUser);
@@ -802,6 +865,13 @@ export default function App() {
             if (!w) throw new Error('未接入工程目录');
             return runAllowed(w.sessionId, argv);
           },
+          // 上下文压缩引擎：用模型把最旧历史压成摘要（离线/限流时退化成结构化兜底）
+          summarize: summarizeWindow,
+          patchConversation: (patch) =>
+            update((prev) => ({
+              ...prev,
+              conversations: prev.conversations.map((c) => (c.id === convId ? { ...c, ...patch, updatedAt: Date.now() } : c)),
+            })),
         });
       } finally {
         abortRef.current = null;
@@ -1246,6 +1316,8 @@ export default function App() {
             onOpenSettings={() => setDrawerOpen(true)}
             onOpenWorkspace={openWorkspace}
             onOpenUndo={() => setUndoOpen(true)}
+            onCompact={runCompactNow}
+            compactCount={activeConv?.compactAfterIndex ?? 0}
           />
 
           {activeConv && activeConv.messages.length > 0 ? (
