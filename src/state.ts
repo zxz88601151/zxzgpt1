@@ -1,7 +1,8 @@
 /** 本地状态：读写 localStorage、会话增删、上下文窗口计算。
  *
- * 存储结构（键 `zxz.state.v1`）与旧版前端完全一致，
- * 这样升级到 React 版之后用户的历史对话与 API Key 不会丢。
+ * 存储键仍是 `zxz.state.v1`（改键名会让老用户丢历史与 API Key），但写入时
+ * 会附加 `schemaVersion: 2`；读取走 `lib/migration.ts` 的显式迁移链，旧版裸存档
+ * 在迁移前先备份到 `zxz.state.v1.backup.*`。内存里的 AppState 形状不变。
  */
 
 import { DEFAULT_SETTINGS } from "./presets";
@@ -9,27 +10,32 @@ import { buildWorkspacePrompt } from "./lib/files";
 import { buildPlanPrompt, buildProjectMemoryPrompt } from "./lib/project";
 import { buildToolsPrompt } from "./lib/registry";
 import { clamp, sliceContext, uid } from "./lib/text";
+import { decodeState, encodeState } from "./lib/migration";
 import type { AppState, Conversation, Message, Settings, WireMessage } from "./types";
 
 export const STORE_KEY = "zxz.state.v1";
+export { STATE_SCHEMA_VERSION } from "./lib/migration";
 
 export function loadState(): AppState {
   try {
-    const raw = localStorage.getItem(STORE_KEY);
-    if (!raw) throw new Error("empty");
-    const parsed = JSON.parse(raw) as Partial<AppState>;
-    return {
-      settings: { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) },
-      conversations: Array.isArray(parsed.conversations) ? parsed.conversations : [],
-      activeId: parsed.activeId || null,
-    };
+    const decoded = decodeState(localStorage.getItem(STORE_KEY));
+    // 迁移 / 未来版本 / 损坏存档：先把原始内容备份下来再返回可用状态。
+    // 备份写失败（配额满）也必须能启动，不能把用户锁在门外。
+    if (decoded.backup) {
+      try {
+        localStorage.setItem(decoded.backup.key, decoded.backup.raw);
+      } catch {
+        /* 备份失败不阻断启动：原始存档仍在主键里，下次启动会再试 */
+      }
+    }
+    return decoded.state;
   } catch {
     return { settings: { ...DEFAULT_SETTINGS }, conversations: [], activeId: null };
   }
 }
 
 export function persist(state: AppState): void {
-  localStorage.setItem(STORE_KEY, JSON.stringify(state));
+  localStorage.setItem(STORE_KEY, encodeState(state));
 }
 
 export function newConversation(now = Date.now()): Conversation {
