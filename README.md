@@ -40,7 +40,7 @@ zxz/
 │   │   ├── tools.ts            工具定义、白名单、tool_calls 合并、测试回路决策（纯逻辑）
 │   │   ├── pending.ts          写入前确认：待批清单（纯逻辑，不碰 IPC）
 │   │   ├── fsapi.ts            本机文件 IPC 封装（列目录 / 读 / 写 / 拼目录树）
-│   │   └── *.test.ts           本目录 23 个单测文件（全仓 40 个 / 726 passed + 6 skipped，见 §9.6）
+│   │   └── *.test.ts           本目录 23 个单测文件（全仓 42 个 / 758 passed + 6 skipped，见 §9.6）
 │   ├── skills/
 │   │   ├── index.ts            内建技能装配（?raw 导入，与外部技能同一套解析）
 │   │   ├── sources.ts          外部来源登记表（29 条）+ 分组汇总 + 审计清单生成
@@ -316,7 +316,7 @@ node tools/e2e.cjs                       # 24 项，2026-11-03 实测 24/24
 按文件头 `@vitest-environment jsdom` 单文件声明，全局环境仍是 node：
 
 ```bash
-npm test                  # vitest run，726 passed + 6 skipped（40 个文件），2026-11-06 实测
+npm test                  # vitest run，758 passed + 6 skipped（42 个文件），2026-11-06 实测
 ```
 
 **两个本机踩过的坑，写下来省得再踩**：
@@ -1125,7 +1125,7 @@ Rust 侧另补了边界用例（`tools/fs-harness`，当日 **82 条全过**，�
 | ⑥ | 预览窗口真机 CSP 验证 | **BLOCKED / NOT_TESTED**：交付 `docs/audit/PREVIEW_CSP_HOST_VERIFICATION_20261106.md` | — |
 
 **未验证项**：Rust `src-tauri` 全量编译、本地 e2e、真机 CSP、打包、真模型一律
-`NOT_TESTED`；自 `2083011` 起 **12 笔（截至 `e40c03f`）提交均为本地提交、未推送远端**，CI 未覆盖新提交。
+`NOT_TESTED`；自 `2083011` 起 **16 笔（截至 `1ef427d`）提交均为本地提交、未推送远端**，CI 未覆盖新提交。
 完整状态与证据见 `docs/governance/STATE.md`（唯一权威）与技术债台账 §8。
 
 ### 15.5 第二轮队列（业主「按下一步继续做」，2026-11-06）
@@ -1143,5 +1143,22 @@ Rust 侧另补了边界用例（`tools/fs-harness`，当日 **82 条全过**，�
 DEC-015 不冒进，只抽纯逻辑，未硬拆 30+ props 的 JSX 大组件；③ 遵循宪章 §3.5
 不做不可逆迁移。
 
-**仍待办**：②③ 的独立复核（R15）、组件层 DOM 单测后继续拆 JSX（R9）、D-29 MCP
-信任模型裁定（R14）、Windows 宿主执行 CSP 清单（R10）、业主授权后推送与打包。
+**仍待办**：继续拆 JSX（R9）、D-25 / D-07 写节流、D-29 信任模型裁定（R14）、
+Windows 宿主执行 CSP 清单（R10）、业主授权后推送与打包。
+
+### 15.6 第三轮队列（业主「根据下一步建议继续做」，2026-11-06）
+
+| 序 | 动作 | 结果 | 本地提交 |
+|---|---|---|---|
+| ① | 独立只读子 Agent 复核 ②③ 代码改动 | **已完成**：首轮 `PARTIAL` 抓到 2 条 P1 + 1 条 P2；经**六轮**「复审 → 根因修复 → 再复审」，第 6 轮 `PASS`（代码级），R15 / D-32 解除 | `QUEUE_0203_RECHECK_ROUNDS_2_6_20261106.md` |
+| ①′ | 收敛 P1 / P2 | **已完成**：导出装配假 PASS 补断言（MUT-A/B/C 精确变红、MUT-C 冗余度 2）；备份脱敏收敛为「reviver 按解析后真实键名重建 / 异常零原文摘要」二分策略 | `a13bf53` |
+| ② | 补组件层 DOM 单测（R9 第一步） | **已完成**：`Welcome.test.tsx` 4 条 + `SkillChips.test.tsx` 5 条；未硬拆 JSX | `1ef427d` |
+| ③~⑥ | Rust 信任模型裁定 / Windows 宿主 CSP / D-25+写节流 / 推送打包 | **待裁定 · `BLOCKED` · 登记下批 · 需授权**，均未动代码 | — |
+
+**本轮纪律**：复核由非实施者执行，五轮 `PARTIAL` 逐条对应可复现缺陷、未粉饰为 `PASS`；
+每笔提交只做一件事；未新增依赖、未推远端、未打包、未产生费用；真机 CSP 与
+`src-tauri` 全量编译仍 `NOT_TESTED` / `BLOCKED`，不冒充 PASS。
+
+**实测基线**：`npm test` **758 passed / 6 skipped（42 文件）**、`npm run build` PASS
+（97 modules / 375.53 kB / gzip 135.54 kB）、三处版本号均 `0.3.0`、
+`origin` 仍 `2083011`（16 笔本地提交未推送，CI 未覆盖）。

@@ -121,9 +121,9 @@ npm run build       # tsc + vite build
 cargo test --manifest-path tools/fs-harness/Cargo.toml  # Rust 文件层单测
 ```
 
-2026-11-06 两轮队列推进后实测基线（Ubuntu 沙箱）：`npm ci` PASS、
-`npm test` **726 passed / 6 skipped（40 文件）**、`npm run build` PASS（375.01 kB / 97 modules）、
-三处版本号均 0.3.0、CI 23 次运行最新 `passing`（**自 `2083011` 起 12 笔（截至 `e40c03f`）提交未推送，CI 未覆盖**）。
+2026-11-06 三轮队列推进后实测基线（当前，Ubuntu 沙箱）：`npm ci` PASS、
+`npm test` **758 passed / 6 skipped（42 文件）**、`npm run build` PASS（375.53 kB / 97 modules）、
+三处版本号均 0.3.0、CI 23 次运行最新 `passing`（**自 `2083011` 起 16 笔（截至 `1ef427d`）提交未推送，CI 未覆盖**）。
 Rust `tools/fs-harness`：76 passed / 6 failed / 1 ignored；6 条失败经 HEAD 版 `perms.rs`
 基线对照确认为**预存平台性失败**（Windows 路径语义 / 宿主 `PWD`），6 条 MCP 闸门测试全 PASS。
 **独立只读子 Agent 三轮复核**：`PARTIAL` → `FAIL` → `PASS`（`QUEUE_0105_CODE_INDEPENDENT_REVIEW_20261106.md` §5）；
@@ -133,3 +133,14 @@ Rust `tools/fs-harness`：76 passed / 6 failed / 1 ignored；6 条失败经 HEAD
 `docs/audit/BATCH_20261105_INDEPENDENT_REVIEW.md`、
 `docs/audit/QUEUE_0105_CODE_INDEPENDENT_REVIEW_20261106.md` 与
 `docs/governance/STATE.md`（唯一权威状态板）。
+
+2026-11-06 第三轮补充：②③ 代码改动经独立只读子 Agent **六轮复核**（第 1~5 轮 `PARTIAL`，
+逐轮抓到可复现绕过），第 6 轮 `PASS`（代码级），R15 / D-32 解除。归档见
+`docs/audit/QUEUE_0203_CODE_INDEPENDENT_REVIEW_20261106.md` 与
+`docs/audit/QUEUE_0203_RECHECK_ROUNDS_2_6_20261106.md`。
+**存档备份脱敏**：`lib/migration.ts::redactBackupRaw` 按解析结果二分——合法 JSON 用
+`JSON.parse` 的 reviver 按「解析后的真实键名」重建（见过 `apiKey` 键就重建，重复键前值
+在 parse 阶段已丢弃）；任何结构化异常返回零原文 `safeSummary`。`BackupRequest.raw`
+从 `decodeState` 产出时即脱敏，**不要再在 `state.ts` 传原始 localStorage 内容**。
+组件层 DOM 单测已补 `Welcome` / `SkillChips` 两个 jsdom 文件；拆 `App.tsx` 的 JSX
+前先给对应组件补同名单测（DEC-020 / DEC-026）。

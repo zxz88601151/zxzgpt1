@@ -177,9 +177,19 @@ ADR 0001 的验收项「`App.tsx` < 500 行」**仍未达成**，详见技术债
 | `runToolBatch` | 两参、分波 | **三参**（`calls, execute, signal`）；取消时 `cancelRest()` 补 `CANCELLED_TOOL_ERROR` 回执，`tool_call_id` 仍逐 idx 对齐 |
 | 正则防护 | 静态拒绝已知构造 | 逐字符扫描 `scanRegexRisk` + **风险向父组传播**；独立复审第三轮 10430 候选 fuzz → 0 挂死 |
 | 持久化 | 单键、无 `schemaVersion` | **`schemaVersion = 2`**；`lib/migration.ts` 迁移链 + 迁移前备份 `zxz.state.v1.backup.*`；键名不变 |
-| 单测 | 609 条 / 34 文件 | **726 条 / 40 文件** |
-| 构建 | 369.72 kB / 93 modules | **375.01 kB / 97 modules** |
-| 独立审查 | 本轮代码改动待复审 | ①~⑤ 代码经独立只读子 Agent **三轮复核，第三轮 `PASS`**；②③ 仍待复核（R15） |
+| 单测 | 609 条 / 34 文件 | **758 条 / 42 文件** |
+| 构建 | 369.72 kB / 93 modules | **375.53 kB / 97 modules** |
+| 独立审查 | 本轮代码改动待复审 | ①~⑤ 三轮复核 `PASS`；②③ 经**六轮**独立复核，第 6 轮 `PASS`（R15 解除，代码级）；归档 `QUEUE_0203_RECHECK_ROUNDS_2_6_20261106.md` |
 
 ADR 0001「`App.tsx` < 500 行」**仍未达成**；按 DEC-020，下一批应先补组件层 DOM 单测再拆 JSX 装配层，
 不硬拆 30+ props 的大组件。
+
+## 2026-11-06 第三轮校正（追加）
+
+| 项 | 当前 |
+|---|---|
+| 单测 | **758 条 / 42 文件**（新增 `Welcome` / `SkillChips` 组件层 DOM 单测 9 条） |
+| 构建 | **375.53 kB / 97 modules** |
+| 存档备份 | `redactBackupRaw` 按解析结果二分：合法 JSON 由 reviver 按真实键名重建，结构化异常返回零原文安全摘要；`BackupRequest.raw` 产出即脱敏 |
+| 独立审查 | ②③ 六轮独立复核，第 6 轮 `PASS`；R15 / D-32 解除（代码级），产品验收签字仍 `ABSENT` |
+| 组件层 | 5 个 jsdom 文件 / 23 条（`app.test.tsx` / `app.rounds.test.tsx` / `FileWrites` / `Welcome` / `SkillChips`）；`App.tsx` 本体仍无直接 DOM 断言 |

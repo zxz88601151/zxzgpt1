@@ -206,7 +206,7 @@ D-15（`--warn` 未定义）、D-11 / D-12 / D-14 均未见改动；D-06 恶化�
 |---|---|---|---|---|
 | D-06 | `App.tsx` 1296 行 | 抽出 `lib/conversations.ts`、`lib/exports.ts` 及配套单测 | **PARTIAL**：**1283 行**（累计 -287），ADR 0001「< 500 行」仍 `[ ]` | `576407f`；+16 条断言 |
 | D-07 | 存档单键、无 `schemaVersion` | `lib/migration.ts` 的 `decodeState`/`encodeState` + `state.ts` 备份副作用 | **PARTIAL**：`schemaVersion = 2` + v1→v2 迁移 + 损坏/未来版本备份 + 不丢未知字段；**250ms 写放大与节流未动** | `8091709`；`migration.test.ts` 13 条 + `state.persistence.test.ts` 5 条 |
-| D-13 | 609 条 / 34 文件，组件层 0 | 接线层纯逻辑继续抽成可单测模块 | **PARTIAL**：726 条 / 40 文件；组件层 DOM 单测仍 `ABSENT` | 每步 `npm test` 全绿 |
+| D-13 | 609 条 / 34 文件，组件层 0 | 接线层纯逻辑继续抽成可单测模块 | **PARTIAL**：726 条 / 40 文件；组件层 DOM 单测仍 `ABSENT`（口径更正见 §9） | 每步 `npm test` 全绿 |
 | D-21 | 正则防护「已修」但可绕过 | 扫描器补 `?`/`{m,n}`，再补**风险向父组传播**（`((a+))+$` 根因） | **已修（经复核）**：第三轮 10430 候选 fuzz → 0 SLOW / 0 HANG | `2761391`；`regexsafe.test.ts` 81 条 + `registry.test.ts` run 入口 6 例 |
 | D-27 | P1：①~⑤ 代码改动无独立复审 | 独立只读子 Agent 三轮复核（第 2 轮 `FAIL` 不粉饰，第 3 轮 `PASS`） | **已修**（代码级；产品验收签字仍 `ABSENT`） | `QUEUE_0105_CODE_INDEPENDENT_REVIEW_20261106.md` §5；`2761391` |
 | D-23 | CSP 无真机证据 | 本轮确认无 Windows WebView2 宿主，未改任何 CSP | **BLOCKED / NOT_TESTED**（不变） | `PREVIEW_CSP_HOST_VERIFICATION_20261106.md` |
@@ -220,3 +220,23 @@ D-15（`--warn` 未定义）、D-11 / D-12 / D-14 均未见改动；D-06 恶化�
 > **复核后仍在册**：D-03（授权按工程目录）、D-05（绝对路径）、D-15（`--warn` 未定义）、
 > D-25（`todo_write` 不持久化）、D-07 剩余部分（写节流）。
 > **§7 的状态列以 §8 为准**：D-07 由「未修」改为 `PARTIAL`，D-27 由「P1 新增」改为「已修」。
+
+## 9. 2026-11-06 第三轮队列登记（本轮最新，覆盖 §8 的状态列）
+
+> 依据：`QUEUE_0203_CODE_INDEPENDENT_REVIEW_20261106.md`、
+> `QUEUE_0203_RECHECK_ROUNDS_2_6_20261106.md`（六轮独立复核记录）、`git log`。
+> 判定：已修标提交号，**未验证项仍标 `NOT_TESTED` / `BLOCKED`**，不冒充 `PASS`。
+
+| # | 原状态 | 本轮动作 | 新状态 | 提交 / 证据 |
+|---|---|---|---|---|
+| D-32 | P2：②③ 代码改动尚无独立复审 | 独立只读子 Agent **六轮复核**（1~5 轮 `PARTIAL`，第 6 轮 `PASS`） | **已解除（代码级）** | `6196622`；复核归档 §3 |
+| **D-33** | — | 第 1 轮复审新增 2 条 P1（导出装配假 PASS）与 P2（备份含 `apiKey` 明文），经五轮根因收敛 | **已修（经独立复核 `PASS`）** | `a13bf53`；7 组变异精确变红 |
+| D-13 | 726 条 / 40 文件，组件层 `ABSENT` | 更正口径：组件层此前已有 3 个 jsdom 文件（14 条），本轮补 `Welcome` 4 条 + `SkillChips` 5 条 | **PARTIAL**：758 条 / 42 文件；组件层 5 个 jsdom 文件 / 23 条；`App.tsx` 本体仍无直接 DOM 断言 | `1ef427d` |
+| D-06 | `App.tsx` 1283 行 | 本轮**未拆**（DEC-020：先有回归网再拆，避免 scope creep） | **PARTIAL（不变）**：1283 行，ADR 0001「< 500 行」仍 `[ ]` | — |
+| D-29 / R14 | `HYPOTHESIS`，待业主裁定 | **未动代码**（Rust 信任模型变更需显式裁定） | 不变 | `STATE.md` R14 |
+| D-23 / R10 | CSP `BLOCKED` | **未改任何 CSP**（无 Windows WebView2 宿主） | `BLOCKED / NOT_TESTED`（不变） | `PREVIEW_CSP_HOST_VERIFICATION_20261106.md` |
+| D-25 / D-07 剩余 | P3 `todo_write` 持久化 / 250ms 写节流 | **登记下一批，未动代码** | 不变 | 本文件 §9 |
+| **D-34** | — | 六轮复核暴露并如实登记的 11 条 P3 遗留（畸形输入语义漂移、畸形 `schemaVersion`、顶层未知字段、`repairs` 无消费点、`hasApiKeyName` 启发式漏判、非 `apiKey` 字段同字节、备份键不自动清理、深嵌套备份降级为摘要等） | **P3 在册，未修** | `QUEUE_0203_RECHECK_ROUNDS_2_6_20261106.md` §5 |
+
+> **§8 的状态列以 §9 为准**：D-32 由「P2 新增」改为「已解除（代码级）」；D-13 由
+> 「组件层 `ABSENT`」更正为「覆盖稀疏但非 0」。
