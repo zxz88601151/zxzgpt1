@@ -18,12 +18,18 @@ import {
   wsOpen as openSession,
 } from "./lib/fsapi";
 import { filterConversations, findActive, loadState, newConversation, persist, titleFrom } from "./state";
-import { clamp, copyText, uid } from "./lib/text";
+import { clamp, copyText } from "./lib/text";
 import { stampNow } from "./lib/undo";
 import { builtinSkills } from "./skills";
-import { SOURCES, buildAuditMarkdown } from "./skills/sources";
-import { buildAuditReportMarkdown } from "./skills/audit";
-import { buildScanMarkdown, scanSkill } from "./lib/skillscan";
+import {
+  addConversation,
+  clearMessagesIn,
+  normalizeImportedConversations,
+  removeConversation,
+  renameConversationIn,
+  switchActive,
+} from "./lib/conversations";
+import { buildAuditBundle, buildSkillScanBundle } from "./lib/exports";
 import {
   buildSkillPrompt,
   matchSkills,
@@ -58,7 +64,7 @@ import {
 import { buildSummarizeMessages } from "./orchestration/summarize";
 import { useMcpServers } from "./hooks/useMcpServers";
 import { useExecApproval } from "./hooks/useExecApproval";
-import type { AppState, Conversation, FileWriteResult, Message, Settings, Theme, ToolCallRecord, Transport } from "./types";
+import type { AppState, FileWriteResult, Message, Settings, Theme, ToolCallRecord, Transport } from "./types";
 import type { ToastKind } from "./components/ui";
 
 import { ConfirmExec } from "./components/ConfirmExec";
@@ -196,7 +202,7 @@ export default function App() {
   const createConv = useCallback(() => {
     void dropExecGrants();
     const conv = newConversation();
-    update((s) => ({ ...s, conversations: [...s.conversations, conv], activeId: conv.id }));
+    update((s) => addConversation(s, conv));
     setInput("");
     setScrollSignal((n) => n + 1);
     setFocusSignal((n) => n + 1);
@@ -208,7 +214,7 @@ export default function App() {
     (id: string) => {
       // 切对话就把上一个对话批过的执行许可收回，理由见 dropExecGrants
       if (id !== stateRef.current.activeId) void dropExecGrants();
-      update((s) => ({ ...s, activeId: id }));
+      update((s) => switchActive(s, id));
       setScrollSignal((n) => n + 1);
       if (window.innerWidth <= 860) setCollapsed(true);
     },
@@ -223,7 +229,7 @@ export default function App() {
       if (next === null) return;
       update((s) => ({
         ...s,
-        conversations: s.conversations.map((c) => (c.id === id ? { ...c, title: next.trim() || c.title } : c)),
+        conversations: renameConversationIn(s.conversations, id, next),
       }));
     },
     [update]
@@ -236,11 +242,7 @@ export default function App() {
       // 删后台对话则不影响当前授权（Rust 侧按会话记账，只有一个桶）。
       const switching = stateRef.current.activeId === id;
       if (switching) void dropExecGrants();
-      update((s) => {
-        const conversations = s.conversations.filter((c) => c.id !== id);
-        const activeId = s.activeId === id ? conversations[0]?.id || null : s.activeId;
-        return { ...s, conversations, activeId };
-      });
+      update((s) => removeConversation(s, id));
     },
     [dropExecGrants, update]
   );
@@ -253,7 +255,7 @@ export default function App() {
     void dropExecGrants();
     update((s) => ({
       ...s,
-      conversations: s.conversations.map((c) => (c.id === conv.id ? { ...c, messages: [] } : c)),
+      conversations: clearMessagesIn(s.conversations, conv.id),
     }));
   }, [dropExecGrants, update]);
 
@@ -962,16 +964,10 @@ export default function App() {
    */
   const exportAudit = useCallback(async () => {
     const when = new Date().toLocaleString("zh-CN", { hour12: false });
-    const md = [
-      buildAuditMarkdown(SOURCES, {
-        when,
-        skills: skillsRef.current.map((s) => ({ id: s.id, name: s.name, category: s.category, stage: s.stage })),
-      }),
-      "",
-      "---",
-      "",
-      buildAuditReportMarkdown(),
-    ].join("\n");
+    const md = buildAuditBundle(
+      when,
+      skillsRef.current.map((s) => ({ id: s.id, name: s.name, category: s.category, stage: s.stage })),
+    );
     const where = await persistMarkdown("source-audit", md);
     toast(`审计底稿${where}（清单 + 实测报告）`, "ok");
   }, [persistMarkdown, toast]);
@@ -987,8 +983,7 @@ export default function App() {
       return;
     }
     const when = new Date().toLocaleString("zh-CN", { hour12: false });
-    const results = local.map((s) => scanSkill(s.id, s.name, s.body));
-    const where = await persistMarkdown("skill-scan", buildScanMarkdown(results, when));
+    const where = await persistMarkdown("skill-scan", buildSkillScanBundle(when, local));
     toast(`扫描结果${where}（${local.length} 个技能）`, "ok");
   }, [persistMarkdown, toast]);
 
@@ -1035,24 +1030,8 @@ export default function App() {
       const reader = new FileReader();
       reader.onload = () => {
         try {
-          const data = JSON.parse(String(reader.result)) as Conversation | Conversation[];
-          const list = Array.isArray(data) ? data : [data];
-          const imported: Conversation[] = [];
-          for (const conv of list) {
-            if (!conv || !Array.isArray(conv.messages)) continue;
-            imported.push({
-              id: uid(),
-              title: conv.title || "导入的对话",
-              messages: conv.messages.map((m) => ({
-                role: m.role === "assistant" ? "assistant" : "user",
-                content: String(m.content || ""),
-                reasoning: m.reasoning || "",
-                createdAt: m.createdAt || Date.now(),
-              })),
-              createdAt: Date.now(),
-              updatedAt: Date.now(),
-            });
-          }
+          const data = JSON.parse(String(reader.result)) as unknown;
+          const imported = normalizeImportedConversations(data);
           update((s) => ({ ...s, conversations: [...s.conversations, ...imported] }));
           toast(imported.length ? `已导入 ${imported.length} 个对话` : "文件中没有可用对话", imported.length ? "ok" : "error");
         } catch {
