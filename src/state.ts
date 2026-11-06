@@ -2,7 +2,8 @@
  *
  * 存储键仍是 `zxz.state.v1`（改键名会让老用户丢历史与 API Key），但写入时
  * 会附加 `schemaVersion: 2`；读取走 `lib/migration.ts` 的显式迁移链，旧版裸存档
- * 在迁移前先备份到 `zxz.state.v1.backup.*`。内存里的 AppState 形状不变。
+ * 在迁移前先备份到 `zxz.state.v1.backup.*`（备份请求里的 apiKey 已脱敏）。
+ * 内存里的 AppState 形状不变。
  */
 
 import { DEFAULT_SETTINGS } from "./presets";
@@ -23,6 +24,8 @@ export function loadState(): AppState {
     // 备份写失败（配额满）也必须能启动，不能把用户锁在门外。
     if (decoded.backup) {
       try {
+        // decoded.backup.raw 在 decodeState 产出时已脱敏，这里只负责落盘，
+        // 不要再传原始 localStorage 内容（明文 API Key 只允许留在主键）。
         localStorage.setItem(decoded.backup.key, decoded.backup.raw);
       } catch {
         /* 备份失败不阻断启动：原始存档仍在主键里，下次启动会再试 */

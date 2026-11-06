@@ -18,7 +18,9 @@
   + `lib/exports.ts`），但 ADR 0001「< 500 行」仍未达成，
   **不要再把新能力的接线往 App 里堆**。
   存档读写走 `lib/migration.ts` 的 `decodeState` / `encodeState`（`schemaVersion = 2`），
-  键名 `zxz.state.v1` **不变**、迁移前先备份——改键名会让老用户丢历史与 API Key。
+  键名 `zxz.state.v1` **不变**、迁移前先备份（备份经 `redactBackupRaw` 脱敏：
+  含 `apiKey` 键的存档不会把明文写进备份，无敏感字段时逐字节原样）——改键名
+  会让老用户丢历史与 API Key。
 
 - 前端只做展示与编排，不直接碰磁盘：本机读写统一走 Tauri IPC，校验在 Rust 侧 `src-tauri/src/fsx.rs`；受控命令同理走 `run_allowed` IPC，校验在 `src-tauri/src/runx.rs`（两模块都不依赖 tauri，fs-harness 可直接单测）。
 - `fsx.rs` 不依赖 tauri，这样 `tools/fs-harness` 可以在无窗口环境下单测路径校验与落盘。
@@ -69,7 +71,10 @@
   确认没有借符号链接逃出工程根；目标若已是符号链接，要确认指向仍在工程内。
 - 读文件上限 4MB、只接受 UTF-8 文本；目录树深度 2，忽略 `node_modules / .git / target / dist / .zxz`。
 - API Key 只存本机 `localStorage`（键 `zxz.state.v1`），明文存放、不外发；不要把它写进
-  任何导出的审计清单、扫描结果或日志里。
+  任何导出的审计清单、扫描结果或日志里。迁移备份键 `zxz.state.v1.backup.*` 只存
+  `redactBackupRaw` 脱敏后的快照（`apiKey` 换成 `[已脱敏]`），**含 API Key 的存档
+  不要把原串写进备份**；
+  备份键目前仍不自动清理，属已登记的 P3 取舍。
 - 本机代理 `src-tauri/src/proxy.rs` 只监听 127.0.0.1、每次请求要带一次性 token
   （令牌用 OS 熵初始化的 `RandomState` 生成 256 位，别退回「时间 ^ pid」那种可预测写法）；
   进入后还要校验 Host 是回环名（`127.0.0.1`/`localhost`），挡 DNS rebinding。
