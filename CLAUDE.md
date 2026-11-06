@@ -12,10 +12,13 @@
   那里用假上游 + 假 IPC 驱动真实 `runRounds`，装配漏一个就会当场变红。
   `session.ts` 现在还含 `runToolBatch`（经 `budget.planToolBatch` 分波：cheap 按 4 并发 /
   expensive 每批最多 1 / gated 串行）与 `maybeCompact` 调用；新增 deps 已有
-  `summarize` / `patchConversation` / `maxRounds`。`App.tsx` 已从 1570 降到 **1296 行**
+  `summarize` / `patchConversation` / `maxRounds`。`App.tsx` 已从 1570 降到 **1283 行**
   （工程逻辑 → `lib/workspace.ts`、压缩 prompt → `orchestration/summarize.ts`、
-  MCP 生命周期与授权桥 → `hooks/`），但 ADR 0001「< 500 行」仍未达成，
+  MCP 生命周期与授权桥 → `hooks/`、会话 CRUD / 导入 / 导出装配 → `lib/conversations.ts`
+  + `lib/exports.ts`），但 ADR 0001「< 500 行」仍未达成，
   **不要再把新能力的接线往 App 里堆**。
+  存档读写走 `lib/migration.ts` 的 `decodeState` / `encodeState`（`schemaVersion = 2`），
+  键名 `zxz.state.v1` **不变**、迁移前先备份——改键名会让老用户丢历史与 API Key。
 
 - 前端只做展示与编排，不直接碰磁盘：本机读写统一走 Tauri IPC，校验在 Rust 侧 `src-tauri/src/fsx.rs`；受控命令同理走 `run_allowed` IPC，校验在 `src-tauri/src/runx.rs`（两模块都不依赖 tauri，fs-harness 可直接单测）。
 - `fsx.rs` 不依赖 tauri，这样 `tools/fs-harness` 可以在无窗口环境下单测路径校验与落盘。
@@ -113,12 +116,15 @@ npm run build       # tsc + vite build
 cargo test --manifest-path tools/fs-harness/Cargo.toml  # Rust 文件层单测
 ```
 
-2026-11-06 队列推进后实测基线（Ubuntu 沙箱）：`npm ci` PASS、
-`npm test` **609 passed / 6 skipped（34 文件）**、`npm run build` PASS（369.72 kB）、
-三处版本号均 0.3.0、CI 23 次运行最新 `passing`（**新提交未推送，CI 未覆盖**）。
+2026-11-06 两轮队列推进后实测基线（Ubuntu 沙箱）：`npm ci` PASS、
+`npm test` **726 passed / 6 skipped（40 文件）**、`npm run build` PASS（375.01 kB / 97 modules）、
+三处版本号均 0.3.0、CI 23 次运行最新 `passing`（**自 `2083011` 起 11 笔提交未推送，CI 未覆盖**）。
 Rust `tools/fs-harness`：76 passed / 6 failed / 1 ignored；6 条失败经 HEAD 版 `perms.rs`
-基线对照确认为**预存平台性失败**（Windows 路径语义 / 宿主 `PWD`），新增 6 条 MCP
-闸门测试全 PASS。
-本环境**未跑**：`src-tauri` 全量编译、本地 e2e、真机 CSP、打包（均标 `NOT_TESTED`，别据此写 PASS）。
+基线对照确认为**预存平台性失败**（Windows 路径语义 / 宿主 `PWD`），6 条 MCP 闸门测试全 PASS。
+**独立只读子 Agent 三轮复核**：`PARTIAL` → `FAIL` → `PASS`（`QUEUE_0105_CODE_INDEPENDENT_REVIEW_20261106.md` §5）；
+第 2 轮实测抓到正则嵌套组穿透，第 3 轮 10430 候选 fuzz 0 挂死。实施方不得自审自签。
+本环境**未跑**：`src-tauri` 全量编译、本地 e2e、真机 CSP（**BLOCKED**）、打包（均标 `NOT_TESTED`，别据此写 PASS）。
 完整结论见 `docs/audit/HEAD_2083011_INDEPENDENT_AUDIT_20261105.md`、
-`docs/audit/BATCH_20261105_INDEPENDENT_REVIEW.md` 与 `docs/governance/STATE.md`（唯一权威状态板）。
+`docs/audit/BATCH_20261105_INDEPENDENT_REVIEW.md`、
+`docs/audit/QUEUE_0105_CODE_INDEPENDENT_REVIEW_20261106.md` 与
+`docs/governance/STATE.md`（唯一权威状态板）。

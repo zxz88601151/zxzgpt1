@@ -145,7 +145,7 @@ App.tsx:526 send()
 
 ---
 
-## 2026-11-06 状态校正（追加，覆盖上文过期口径）
+## 2026-11-06 第一轮状态校正（历史留档，数值已被文末第二轮校正覆盖）
 
 > 本文件上一次更新停在 2026-11-02，下表中的行数、`App.tsx:601` 行号引用、
 > 「压缩 / MCP / 子代理未实现」等结论**均已过期**，仅作历史留档。
@@ -163,3 +163,23 @@ App.tsx:526 send()
 | 单测 | 447 条 | **609 passed / 6 skipped（34 文件）** |
 
 ADR 0001 的验收项「`App.tsx` < 500 行」**仍未达成**，详见技术债台账 §7（D-06）。
+
+---
+
+## 2026-11-06 第二轮校正（追加，覆盖上文与第一轮校正的过期口径）
+
+> 当前唯一权威仍以 `docs/governance/STATE.md` 为准。下表只列**本轮发生变化**的项。
+
+| 项 | 第一轮校正口径 | 第二轮（当前） |
+|---|---|---|
+| `App.tsx` | 1296 行 | **1283 行**；会话 CRUD / 导入 / 导出装配已抽到 `lib/conversations.ts`、`lib/exports.ts` |
+| 取消链路 | 主 signal 贯穿子代理 | 贯穿 chat / 子代理 / 压缩 / `runToolBatch` / MCP 审批（call·ask·grant）/ 轮内落盘与读取；`lib/abort.ts::waitAbortable` 让挂起等待可结算，`stop()` 结算挂起授权框 |
+| `runToolBatch` | 两参、分波 | **三参**（`calls, execute, signal`）；取消时 `cancelRest()` 补 `CANCELLED_TOOL_ERROR` 回执，`tool_call_id` 仍逐 idx 对齐 |
+| 正则防护 | 静态拒绝已知构造 | 逐字符扫描 `scanRegexRisk` + **风险向父组传播**；独立复审第三轮 10430 候选 fuzz → 0 挂死 |
+| 持久化 | 单键、无 `schemaVersion` | **`schemaVersion = 2`**；`lib/migration.ts` 迁移链 + 迁移前备份 `zxz.state.v1.backup.*`；键名不变 |
+| 单测 | 609 条 / 34 文件 | **726 条 / 40 文件** |
+| 构建 | 369.72 kB / 93 modules | **375.01 kB / 97 modules** |
+| 独立审查 | 本轮代码改动待复审 | ①~⑤ 代码经独立只读子 Agent **三轮复核，第三轮 `PASS`**；②③ 仍待复核（R15） |
+
+ADR 0001「`App.tsx` < 500 行」**仍未达成**；按 DEC-020，下一批应先补组件层 DOM 单测再拆 JSX 装配层，
+不硬拆 30+ props 的大组件。

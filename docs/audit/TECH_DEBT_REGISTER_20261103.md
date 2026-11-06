@@ -195,3 +195,28 @@ D-15（`--warn` 未定义）、D-11 / D-12 / D-14 均未见改动；D-06 恶化�
 >
 > **复核后仍在册**：D-03（授权按工程目录）、D-05（绝对路径）、D-07（无 `schemaVersion`）、
 > D-15（`--warn` 未定义）、D-25（`todo_write` 不持久化）。
+
+## 8. 2026-11-06 第二轮队列 ①′ / ② / ③ / ④ 登记（本轮最新，覆盖 §2 / §7 的状态列）
+
+> 依据：`docs/audit/QUEUE_0105_CODE_INDEPENDENT_REVIEW_20261106.md`（三轮独立复核原文）、
+> `git log`、`docs/governance/STATE.md`。判定：已修标提交号，**未验证项仍标 `NOT_TESTED`**，
+> 不冒充 `PASS`。
+
+| # | 原状态 | 本轮动作 | 新状态 | 提交 / 证据 |
+|---|---|---|---|---|
+| D-06 | `App.tsx` 1296 行 | 抽出 `lib/conversations.ts`、`lib/exports.ts` 及配套单测 | **PARTIAL**：**1283 行**（累计 -287），ADR 0001「< 500 行」仍 `[ ]` | `576407f`；+16 条断言 |
+| D-07 | 存档单键、无 `schemaVersion` | `lib/migration.ts` 的 `decodeState`/`encodeState` + `state.ts` 备份副作用 | **PARTIAL**：`schemaVersion = 2` + v1→v2 迁移 + 损坏/未来版本备份 + 不丢未知字段；**250ms 写放大与节流未动** | `8091709`；`migration.test.ts` 13 条 + `state.persistence.test.ts` 5 条 |
+| D-13 | 609 条 / 34 文件，组件层 0 | 接线层纯逻辑继续抽成可单测模块 | **PARTIAL**：726 条 / 40 文件；组件层 DOM 单测仍 `ABSENT` | 每步 `npm test` 全绿 |
+| D-21 | 正则防护「已修」但可绕过 | 扫描器补 `?`/`{m,n}`，再补**风险向父组传播**（`((a+))+$` 根因） | **已修（经复核）**：第三轮 10430 候选 fuzz → 0 SLOW / 0 HANG | `2761391`；`regexsafe.test.ts` 81 条 + `registry.test.ts` run 入口 6 例 |
+| D-27 | P1：①~⑤ 代码改动无独立复审 | 独立只读子 Agent 三轮复核（第 2 轮 `FAIL` 不粉饰，第 3 轮 `PASS`） | **已修**（代码级；产品验收签字仍 `ABSENT`） | `QUEUE_0105_CODE_INDEPENDENT_REVIEW_20261106.md` §5；`2761391` |
+| D-23 | CSP 无真机证据 | 本轮确认无 Windows WebView2 宿主，未改任何 CSP | **BLOCKED / NOT_TESTED**（不变） | `PREVIEW_CSP_HOST_VERIFICATION_20261106.md` |
+| D-26 | 文档数字失真 | 两轮均同步 README / CLAUDE / STATE / 架构 / 路线图 | **已修** | `432895a` + 本笔提交 |
+| **D-28** | — | 独立复审新增 P1-1（取消未贯穿 MCP 审批/IO）与 P1-2（正则绕过） | **已修**（三轮复核 `PASS`） | `2761391`；`lib/abort.ts`、`lib/regexsafe.ts` |
+| **D-29** | — | 复审 §2 P2-4：MCP 闸门与执行目标未绑定、`perm_grant` 无二次确认 | **P2 新增 / `HYPOTHESIS`，未改 Rust**：沿用 exec 既有信任模型、非本轮新增；改 Rust 信任模型属架构裁定，**待业主明确授权** | `QUEUE_0105_CODE_INDEPENDENT_REVIEW_20261106.md` §2；`STATE.md` R14 |
+| **D-30** | — | 复审 §2 P3：`mcpCallTool` 的 `refused` 回传原始 JSON（模型看到噪声）、`parseMcpGrantRequired` 死分支；`toolpolicy` 的 MCP `cost` 与调度分类语义不一致 | **P3 新增，登记不改**（不扩大本轮范围） | 同上 §2 P3-7 / P3-8 |
+| **D-31** | — | 三项**架构限制**：Rust `mcp_call_tool` 60s 不可中断（前端已不等待）、波内已启动 `execute` 不可取消、已发起文件 IO 不可中断 | **已知边界，非 bug**；建议后续由 Rust 侧取消机制收口 | 同上 §5.1；`STATE.md` R13 |
+| **D-32** | — | 第二轮 ②③ 代码改动尚无独立复审 | **P2 新增**：34 条单测不构成验收结论（宪章 §1） | `STATE.md` R15 |
+
+> **复核后仍在册**：D-03（授权按工程目录）、D-05（绝对路径）、D-15（`--warn` 未定义）、
+> D-25（`todo_write` 不持久化）、D-07 剩余部分（写节流）。
+> **§7 的状态列以 §8 为准**：D-07 由「未修」改为 `PARTIAL`，D-27 由「P1 新增」改为「已修」。

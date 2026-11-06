@@ -40,7 +40,7 @@ zxz/
 │   │   ├── tools.ts            工具定义、白名单、tool_calls 合并、测试回路决策（纯逻辑）
 │   │   ├── pending.ts          写入前确认：待批清单（纯逻辑，不碰 IPC）
 │   │   ├── fsapi.ts            本机文件 IPC 封装（列目录 / 读 / 写 / 拼目录树）
-│   │   └── *.test.ts           本目录 19 个单测文件（全仓 34 个 / 609 passed + 6 skipped，见 §9.6）
+│   │   └── *.test.ts           本目录 23 个单测文件（全仓 40 个 / 726 passed + 6 skipped，见 §9.6）
 │   ├── skills/
 │   │   ├── index.ts            内建技能装配（?raw 导入，与外部技能同一套解析）
 │   │   ├── sources.ts          外部来源登记表（29 条）+ 分组汇总 + 审计清单生成
@@ -316,7 +316,7 @@ node tools/e2e.cjs                       # 24 项，2026-11-03 实测 24/24
 按文件头 `@vitest-environment jsdom` 单文件声明，全局环境仍是 node：
 
 ```bash
-npm test                  # vitest run，609 passed + 6 skipped（34 个文件），2026-11-06 实测
+npm test                  # vitest run，726 passed + 6 skipped（40 个文件），2026-11-06 实测
 ```
 
 **两个本机踩过的坑，写下来省得再踩**：
@@ -423,7 +423,7 @@ node tools/desktop-skill-e2e.cjs    # 静态 21 项，本轮未跑（见 9.6，�
 ### 9.6 覆盖范围（2026-11-03 重测；2026-11-05 按 HEAD `2083011` 复核）
 
 **2026-11-05 本轮实测（Ubuntu 沙箱，HEAD `2083011`）**：`npm ci` PASS、
-`npm test` **609 passed / 6 skipped（34 文件）**、`npm run build` PASS（产物 369.72 kB）。
+`npm test` **726 passed / 6 skipped（40 文件）**、`npm run build` PASS（产物 375.01 kB）。
 本环境**未跑**：Rust 测试、本地四套 e2e、真机 CSP、打包——一律 `NOT_TESTED`，不标 PASS。
 CI 由 GitHub Actions 宿主跑过 **23 次**，最新 `CI #23 / 2083011` = **passing**
 （`frontend` / `rust-fs` / `e2e` 三 job 全绿，无 `continue-on-error`），
@@ -439,7 +439,7 @@ B14-B「首次 CI 运行」据此关闭。完整审计见
 | `tools/skill-e2e.cjs`（假 IPC 技能库） | 69 | **69 PASS / 0 FAIL** |
 | `tools/proxy-e2e.cjs`（真实 Rust 代理，重编后） | 11 + 24 | **11/11 接口 + 24/24 前端** |
 | `cargo test --manifest-path tools/fs-harness/Cargo.toml` | 82 + 1 ignored | **82 PASS** |
-| `npx vitest run` | 609 / 34 文件 | **609 PASS**（2026-11-06 实测，见 §15.3） |
+| `npx vitest run` | 726 / 40 文件 | **726 PASS**（2026-11-06 实测，见 §15.3） |
 
 **当日没跑，只有静态计数**（下表数字是脚本里 `check(...)` 的调用点数量，
 不是运行结果；未跑的原因逐个写在最后一列）：
@@ -1083,10 +1083,18 @@ Rust 侧另补了边界用例（`tools/fs-harness`，当日 **82 条全过**，�
 
 以上四条与技术债台账 `TECH_DEBT_REGISTER_20261103.md` §6（D-17 ~ D-23）一一对应。
 第 1、2、4 条已于 2026-11-06 修复（ADR 0004 / D-17、D-18、D-20~D-22）；
-第 3 条需 Windows + WebView2 真机（队列 ⑥，**本沙箱 BLOCKED**）。
-**独立复审（`QUEUE_0105_CODE_INDEPENDENT_REVIEW_20261106.md`）又发现两条 P1 残留**：
-取消信号未贯穿工具层 / MCP 审批等待（点停止可能 UI 死锁）、正则静态规则可被
-`(a?)+$` / `(a{1,}){1,}$` 绕过。二者已在 ①′ 收敛，详见 §15.4。
+第 3 条需 Windows + WebView2 真机（队列 ⑥，**本沙箱 BLOCKED / NOT_TESTED**）。
+
+**独立复审与三轮收敛**：`QUEUE_0105_CODE_INDEPENDENT_REVIEW_20261106.md` 记录了独立只读
+子 Agent 对 ①~⑤ 代码的三轮复核：第 1 轮 `PARTIAL`（发现取消未贯穿工具层/MCP 审批等待、
+正则可被 `(a?)+$` / `(a{1,}){1,}$` 绕过），第 2 轮 **`FAIL`**（实测 `((a+))+$` 等嵌套组
+仍能穿透、n=28 挂死 >4s），第 3 轮 **`PASS`**（风险向父组传播后，10430 个候选 fuzz
+→ 0 SLOW / 0 HANG）。两项 P1 已在 ①′ 收敛，详见 §15.5。
+
+**仍属已知边界、非未修 bug**（归档 §5.1）：Rust `mcp_call_tool` 60s 不可中断（前端已不等待）、
+波内已启动的 `execute` 不可取消、已发起的文件 IO 不可中断。
+**仍待裁定**：MCP 闸门与执行目标未绑定 / `perm_grant` 自授权（复审 §2 P2-4，标 `HYPOTHESIS`，
+属 Rust 信任模型变更，需业主明确授权）。
 **进度以代码与审计报告为准，本节不预先标 PASS**。
 
 ### 15.3 实测与未验证
@@ -1098,6 +1106,8 @@ Rust 侧另补了边界用例（`tools/fs-harness`，当日 **82 条全过**，�
 | ③ 修复后复跑（2026-11-06） | **568 passed + 6 skipped（30 文件）** / `npm run build` PASS；Rust harness 新增 6 条 MCP 闸门测试全 PASS |
 | ④ 修复后复跑（2026-11-06） | **601 passed + 6 skipped（32 文件）** / `npm run build` PASS |
 | ⑤ 拆分后复跑（2026-11-06） | **609 passed + 6 skipped（34 文件）** / `npm run build` PASS（369.72 kB） |
+| ①′ 收敛后复跑（2026-11-06，三轮复核 PASS） | **692 passed + 6 skipped（36 文件）** / `npm run build` PASS（371.74 kB） |
+| ②③ 完成后最终复跑（2026-11-06） | **726 passed + 6 skipped（40 文件）** / `npm run build` PASS（375.01 kB，97 modules） |
 | 三处版本号 | 均 `0.3.0`，一致 |
 | GitHub Actions | 23 次运行，最新 `CI #23` = **passing**（三 job 全绿） |
 | Rust `tools/fs-harness`（纯逻辑，真实 `cargo test`） | 76 passed / 6 failed / 1 ignored；6 条失败经基线对照确认为**预存 Windows 路径语义失败**，新增 6 条 MCP 闸门测试全 PASS |
@@ -1115,5 +1125,23 @@ Rust 侧另补了边界用例（`tools/fs-harness`，当日 **82 条全过**，�
 | ⑥ | 预览窗口真机 CSP 验证 | **BLOCKED / NOT_TESTED**：交付 `docs/audit/PREVIEW_CSP_HOST_VERIFICATION_20261106.md` | — |
 
 **未验证项**：Rust `src-tauri` 全量编译、本地 e2e、真机 CSP、打包、真模型一律
-`NOT_TESTED`；本轮 6 笔提交均为**本地提交、未推送远端**，CI 未覆盖新提交。
-完整状态与证据见 `docs/governance/STATE.md`（唯一权威）与技术债台账 §7。
+`NOT_TESTED`；自 `2083011` 起 **11 笔提交均为本地提交、未推送远端**，CI 未覆盖新提交。
+完整状态与证据见 `docs/governance/STATE.md`（唯一权威）与技术债台账 §8。
+
+### 15.5 第二轮队列（业主「按下一步继续做」，2026-11-06）
+
+| 序 | 动作 | 结果 | 本地提交 |
+|---|---|---|---|
+| ① | 独立只读子 Agent 复审 ①~⑤ 代码改动 | **已完成**：第 1 轮 `PARTIAL`，抓到 2 条真实 P1 + 4 条 P2/P3 | `QUEUE_0105_CODE_INDEPENDENT_REVIEW_20261106.md` §2 |
+| ①′ | 收敛复审发现的 P1 | **已完成**：`PARTIAL` → **`FAIL`** → **`PASS`**（三轮复核，第三轮 10430 候选 fuzz 0 挂死）；取消贯穿 chat/子代理/压缩/工具批/MCP 审批/轮内 IO，正则风险向父组传播 | `2761391` |
+| ② | 继续分批拆 `App.tsx` | **部分完成**：1296 → **1283 行**；抽出 `lib/conversations.ts`、`lib/exports.ts` 等 4 个可单测纯模块 + 34 条断言；ADR 0001「< 500 行」仍 `[ ]` | `576407f` |
+| ③ | `schemaVersion` 迁移链（D-07） | **已完成主体**：`schemaVersion = 2`、旧版/未来版本/损坏存档迁移前备份、不丢未知字段、18 条新断言；键名 `zxz.state.v1` 不变；250ms 写节流未动 | `8091709` |
+| ④ | CSP 状态确认 + 全轮验收 | CSP 仍 **BLOCKED / NOT_TESTED**（无 Windows WebView2 宿主，未改任何配置）；验收与治理文档同步**完成** | 本笔提交 |
+
+**本轮纪律**：① 由非实施者独立只读子 Agent 执行（宪章 §1），实施方未自审自签；①′ 的
+第 2 轮 `FAIL` 如实登记后继续修到 `PASS`，没有把「开发自测通过」当验收结论；② 依
+DEC-015 不冒进，只抽纯逻辑，未硬拆 30+ props 的 JSX 大组件；③ 遵循宪章 §3.5
+不做不可逆迁移。
+
+**仍待办**：②③ 的独立复核（R15）、组件层 DOM 单测后继续拆 JSX（R9）、D-29 MCP
+信任模型裁定（R14）、Windows 宿主执行 CSP 清单（R10）、业主授权后推送与打包。
