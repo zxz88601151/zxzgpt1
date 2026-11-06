@@ -118,7 +118,7 @@ cargo test --manifest-path tools/fs-harness/Cargo.toml  # Rust 文件层单测
 
 2026-11-06 两轮队列推进后实测基线（Ubuntu 沙箱）：`npm ci` PASS、
 `npm test` **726 passed / 6 skipped（40 文件）**、`npm run build` PASS（375.01 kB / 97 modules）、
-三处版本号均 0.3.0、CI 23 次运行最新 `passing`（**自 `2083011` 起 11 笔提交未推送，CI 未覆盖**）。
+三处版本号均 0.3.0、CI 23 次运行最新 `passing`（**自 `2083011` 起 12 笔（截至 `e40c03f`）提交未推送，CI 未覆盖**）。
 Rust `tools/fs-harness`：76 passed / 6 failed / 1 ignored；6 条失败经 HEAD 版 `perms.rs`
 基线对照确认为**预存平台性失败**（Windows 路径语义 / 宿主 `PWD`），6 条 MCP 闸门测试全 PASS。
 **独立只读子 Agent 三轮复核**：`PARTIAL` → `FAIL` → `PASS`（`QUEUE_0105_CODE_INDEPENDENT_REVIEW_20261106.md` §5）；

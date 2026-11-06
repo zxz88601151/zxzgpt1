@@ -1125,7 +1125,7 @@ Rust 侧另补了边界用例（`tools/fs-harness`，当日 **82 条全过**，�
 | ⑥ | 预览窗口真机 CSP 验证 | **BLOCKED / NOT_TESTED**：交付 `docs/audit/PREVIEW_CSP_HOST_VERIFICATION_20261106.md` | — |
 
 **未验证项**：Rust `src-tauri` 全量编译、本地 e2e、真机 CSP、打包、真模型一律
-`NOT_TESTED`；自 `2083011` 起 **11 笔提交均为本地提交、未推送远端**，CI 未覆盖新提交。
+`NOT_TESTED`；自 `2083011` 起 **12 笔（截至 `e40c03f`）提交均为本地提交、未推送远端**，CI 未覆盖新提交。
 完整状态与证据见 `docs/governance/STATE.md`（唯一权威）与技术债台账 §8。
 
 ### 15.5 第二轮队列（业主「按下一步继续做」，2026-11-06）

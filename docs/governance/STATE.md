@@ -9,6 +9,7 @@
 > ④ 确认 CSP 仍 `BLOCKED` 并完成全轮验收与文档同步。
 > 证据：`docs/audit/QUEUE_0105_CODE_INDEPENDENT_REVIEW_20261106.md`（含三轮复核原文）、
 > `docs/adr/0004-mcp-permission.md`、`git log`、本文件 §1.1 实测。
+> 提交数统一锚定到 `e40c03f` 计数，避免「文档提交自身又让数字过期」的自指失真。
 
 ---
 
@@ -18,7 +19,7 @@
 |---|---|
 | 仓库 | 公开仓库 `zxz88601151/zxzgpt1`；本轮工作副本 `/workspace/zxzgpt1` |
 | 分支 / HEAD | `main` / **`8091709`**（本地，2026-11-06）；工作区**干净** |
-| 远端 | `origin` 仍停在 `2083011`。**自 2083011 起 11 笔本地提交全部未推送**（宪章 §3.1，push 需业主显式授权） |
+| 远端 | `origin` 仍停在 `2083011`。**自 2083011 起 12 笔（截至 `e40c03f`）本地提交全部未推送**（宪章 §3.1，push 需业主显式授权） |
 | 版本号 | `package.json` / `tauri.conf.json` / `Cargo.toml` 三处均 `0.3.0`，一致 |
 | 技术栈 | Tauri 2 + Rust（fsx / runx / wsx / proxy / api / perms / mcp）＋ React 18 + TS + Vite 6；vitest |
 | 规模 | `App.tsx` **1283 行**（1570 → 1296 → 1283，累计 -287）；新增 `lib/abort.ts`、`lib/conversations.ts`、`lib/exports.ts`、`lib/migration.ts`、`lib/regexsafe.ts`、`lib/toolpolicy.ts`、`orchestration/budget.ts`、`orchestration/summarize.ts`、`hooks/` |
@@ -62,7 +63,7 @@
 - **MCP 信任模型：已裁定并落地**（ADR 0004）。Rust `guard_mcp` 唯一入口、scope 隔离、fail-closed。
 - **架构状态：PARTIAL**。`App.tsx` 1283 行；本轮新增 4 个可单测纯模块 + 34 条断言；ADR 0001「`< 500 行`」**仍为 `[ ]`**，剩余为 JSX 装配与状态接线层。
 - **持久化：PARTIAL**。`schemaVersion = 2` + 迁移链 + 备份已落地（D-07 主体收口）；写放大 / 250ms 节流未动。
-- **交付状态：NOT_READY**。11 笔本地提交未推送、未打包、未产生费用、未新增依赖。
+- **交付状态：NOT_READY**。12 笔（截至 `e40c03f`）本地提交未推送、未打包、未产生费用、未新增依赖。
 
 ## 4. 诊断要点（当前）
 
@@ -109,7 +110,7 @@
 
 | # | 项 | 级别 | 说明 |
 |---|---|---|---|
-| R1 | release exe / 安装包落后于 HEAD | 中 | 11 笔本地提交未打包；宪章 §3 需业主显式授权 |
+| R1 | release exe / 安装包落后于 HEAD | 中 | 12 笔（截至 `e40c03f`）本地提交未打包；宪章 §3 需业主显式授权 |
 | R2 | 推送 / 发布未授权 | — | `origin` 仍 `2083011`；本轮未推送、未打包、未产生费用 |
 | R3 | e2e 不可复现 | 已解除 | GitHub Actions 23 次运行，`CI #23` `passing`；但新提交未推送 |
 | R4 | 治理基线失真 | 已修 | 本笔同步；D-24 / D-26 收口 |
@@ -143,4 +144,4 @@
 3. D-29 / R14：MCP 闸门与执行目标绑定属 Rust 信任模型变更，**需业主明确裁定**后才动代码。
 4. 在 Windows + WebView2 宿主执行 `PREVIEW_CSP_HOST_VERIFICATION_20261106.md` 并回填证据（R10）。
 5. D-25（`todo_write` 持久化）与 D-07 剩余部分（250ms 写节流）。
-6. 业主授权后单独推送 11 笔提交并打包。
+6. 业主授权后单独推送 12 笔（截至 `e40c03f`）提交并打包。
