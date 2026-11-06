@@ -123,7 +123,7 @@ cargo test --manifest-path tools/fs-harness/Cargo.toml  # Rust 文件层单测
 
 2026-11-06 三轮队列推进后实测基线（当前，Ubuntu 沙箱）：`npm ci` PASS、
 `npm test` **758 passed / 6 skipped（42 文件）**、`npm run build` PASS（375.53 kB / 97 modules）、
-三处版本号均 0.3.0、CI 23 次运行最新 `passing`（**自 `2083011` 起 16 笔（截至 `1ef427d`）提交未推送，CI 未覆盖**）。
+三处版本号均 0.3.0、CI **24 次运行最新 `CI #24 / cf7cc0e` `success`**（**17 笔已推送至 `origin/main`，未推送 0 笔，CI 已覆盖新提交**）。
 Rust `tools/fs-harness`：76 passed / 6 failed / 1 ignored；6 条失败经 HEAD 版 `perms.rs`
 基线对照确认为**预存平台性失败**（Windows 路径语义 / 宿主 `PWD`），6 条 MCP 闸门测试全 PASS。
 **独立只读子 Agent 三轮复核**：`PARTIAL` → `FAIL` → `PASS`（`QUEUE_0105_CODE_INDEPENDENT_REVIEW_20261106.md` §5）；
@@ -144,3 +144,9 @@ Rust `tools/fs-harness`：76 passed / 6 failed / 1 ignored；6 条失败经 HEAD
 从 `decodeState` 产出时即脱敏，**不要再在 `state.ts` 传原始 localStorage 内容**。
 组件层 DOM 单测已补 `Welcome` / `SkillChips` 两个 jsdom 文件；拆 `App.tsx` 的 JSX
 前先给对应组件补同名单测（DEC-020 / DEC-026）。
+
+2026-11-06 第四轮补充（推送完成）：业主显式授权后 `2083011..cf7cc0e` 共 **17 笔**已推送至
+`origin/main`，未推送 0 笔；推送后 **CI #24 / `cf7cc0e` = `success`**（Actions API 实查），但
+CI 绿 ≠ 产品级验收，验收签字仍 `ABSENT`；打包 / 发布未执行、未授权。凭证仅经环境变量 / 临时文件
+与 `GIT_ASKPASS` 传入，**不写入 `.git/config` 或任何项目文件**，用完即弃。不要再沿用「未推送 16 笔 /
+`origin` 仍 `2083011`」的旧口径；历史轮次记录中的此类表述均为当时快照，当前状态见 STATE §1 / §5.4。

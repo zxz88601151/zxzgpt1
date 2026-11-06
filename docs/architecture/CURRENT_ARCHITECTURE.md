@@ -193,3 +193,13 @@ ADR 0001「`App.tsx` < 500 行」**仍未达成**；按 DEC-020，下一批应�
 | 存档备份 | `redactBackupRaw` 按解析结果二分：合法 JSON 由 reviver 按真实键名重建，结构化异常返回零原文安全摘要；`BackupRequest.raw` 产出即脱敏 |
 | 独立审查 | ②③ 六轮独立复核，第 6 轮 `PASS`；R15 / D-32 解除（代码级），产品验收签字仍 `ABSENT` |
 | 组件层 | 5 个 jsdom 文件 / 23 条（`app.test.tsx` / `app.rounds.test.tsx` / `FileWrites` / `Welcome` / `SkillChips`）；`App.tsx` 本体仍无直接 DOM 断言 |
+
+## 2026-11-06 第四轮校正（追加，覆盖上文与第三轮校正）
+
+| 项 | 当前 |
+|---|---|
+| 远端 / 提交 | `2083011..cf7cc0e` 共 **17 笔**已推送至 `origin/main`，未推送 **0 笔**（宪章 §3.1 授权已履行） |
+| CI | **24 次运行**，最新 `CI #24 / cf7cc0e` = `success`（推送后自动触发，Actions API 实查）；CI 绿 ≠ 产品验收，签字仍 `ABSENT` |
+| 单测 / 构建 | **758 条 / 42 文件**、**375.53 kB / 97 modules**（不变） |
+| 独立审查 | ②③ 六轮独立复核第 6 轮 `PASS`（代码级）不变；产品验收签字仍 `ABSENT` |
+| 打包 / 发布 / 真机 CSP / D-29 / D-25 | 仍 `NOT_TESTED` / `BLOCKED` / 待裁定 / 登记下批，均未动代码 |
