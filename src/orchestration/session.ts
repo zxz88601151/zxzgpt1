@@ -145,42 +145,63 @@ function classifyBatchTool(name: string): BatchClass {
   return "gated";
 }
 
+export const CANCELLED_TOOL_ERROR = "已停止：本轮工具调用已取消";
+
 export async function runToolBatch(
   calls: BatchCall[],
   execute: (call: BatchCall) => Promise<ToolCallRecord>,
+  signal?: AbortSignal,
 ): Promise<ToolCallRecord[]> {
   const records: ToolCallRecord[] = new Array(calls.length);
   const plan = planToolBatch(calls, classifyBatchTool);
   // 成本闸门跳过的调用也要有一条 tool 消息，否则 tool_call_id 对不上
   for (const { idx, reason } of plan.skipped) records[idx] = { ...calls[idx], error: reason };
+  const filled = new Set<number>(plan.skipped.map((s) => s.idx));
 
-  /** 所有执行都走它：单次抛错 → error 记录，绝不把异常丢给 allSettled 吞掉。 */
+  /** 所有执行都走它：抛错或违约返回 undefined 都补成 error 记录，绝不留空洞。 */
   const safe = async (call: BatchCall): Promise<ToolCallRecord> => {
     try {
-      return await execute(call);
+      const r = await execute(call);
+      return r ?? toolFailure(call, undefined);
     } catch (e) {
       return toolFailure(call, e);
     }
   };
+  /** 停止后把尚未执行的调用全部补成取消记录：模型仍收到一一对应的 tool 回执。 */
+  const cancelRest = () => {
+    for (let i = 0; i < calls.length; i++) {
+      if (!filled.has(i) && !records[i]) records[i] = { ...calls[i], error: CANCELLED_TOOL_ERROR };
+    }
+  };
+
+  if (signal?.aborted) {
+    cancelRest();
+    return records;
+  }
 
   // cheap 层：按窗口分波，波内并发、波间串行（MAX_CONCURRENT_READS）
   for (const wave of plan.waves) {
+    if (signal?.aborted) break;
     const settled = await Promise.allSettled(
       wave.map(async (i) => {
         records[i] = await safe(calls[i]);
+        filled.add(i);
       }),
     );
-    // 双保险：漏网的 rejection 或 execute 返回 undefined 都补成错误记录，
-    // 保证 records 无空洞、下标与 tool_call_id 一一对齐。
+    // 双保险：漏网的 rejection 补成错误记录，保证下标与 tool_call_id 一一对齐。
     settled.forEach((r, k) => {
       const i = wave[k];
       if (!records[i]) records[i] = toolFailure(calls[i], r.status === "rejected" ? r.reason : undefined);
+      filled.add(i);
     });
   }
   // expensive / gated 层：串行，按原始相对顺序，避免模态与授权框叠加
   for (const idx of plan.serial) {
+    if (signal?.aborted) break;
     records[idx] = await safe(calls[idx]);
+    filled.add(idx);
   }
+  cancelRest();
   return records;
 }
 
@@ -193,6 +214,9 @@ export async function runToolBatch(
  */
 export async function runRounds(deps: RunDeps): Promise<void> {
   const s = deps.settings;
+  /** 轮内每个新副作用前都复查一次：chat 完成后用户才点停止时，
+   *  落盘 / 自动测试 / 读文件 / 发下一轮都不该再发生（复审 P1-1 残留）。 */
+  const stopped = () => Boolean(deps.signal?.aborted);
   const target = deps.conversation;
   // 本地可变副本：压缩引擎每轮可能更新 compactSummary / compactAfterIndex，
   // 这些元数据既要喂给 buildMessages，也要通过 patchConversation 持久化回会话。
@@ -301,12 +325,12 @@ export async function runRounds(deps: RunDeps): Promise<void> {
     // 探索模式同样不落盘：工具调用有执行层拦，文本协议这条旁路也要拦，
     // 否则模型绕开工具、用 file: 块一样能写盘。
     const ws = deps.currentWorkspace();
-    const blocks = aborted || failed ? [] : parseFileBlocks(acc.content);
+    const blocks = aborted || failed || stopped() ? [] : parseFileBlocks(acc.content);
     const planMode = Boolean(s.planMode);
     const exploreMode = Boolean(s.exploreMode);
     if (planMode && blocks.length) deps.toast("计划模式：本轮 file: 块未落盘，只保留方案", "");
     if (exploreMode && blocks.length) deps.toast("探索模式：本轮 file: 块未落盘，只保留方案", "");
-    const files = ws && blocks.length && !planMode && !exploreMode ? await deps.writeFiles(blocks) : undefined;
+    const files = ws && blocks.length && !planMode && !exploreMode && !stopped() ? await deps.writeFiles(blocks) : undefined;
 
     // 工具调用：同一批里只读工具并发跑、写/执行工具串行（见 runToolBatch），
     // 结果挂在助手消息上，下一轮 buildMessages 会把它展开成原生 tool_calls +
@@ -314,7 +338,7 @@ export async function runRounds(deps: RunDeps): Promise<void> {
     // 也是通过 write_file 工具发生的。
     const toolRecords: ToolCallRecord[] =
       !aborted && !failed && roundToolCalls.length
-        ? await runToolBatch(roundToolCalls, deps.executeTool)
+        ? await runToolBatch(roundToolCalls, deps.executeTool, deps.signal)
         : [];
     // 按权限等级判断"这一轮动过磁盘"，而不是按工具名：
     // 将来新增任何 write 级工具都会自动纳入测试回路，不会漏跑。
@@ -346,6 +370,7 @@ export async function runRounds(deps: RunDeps): Promise<void> {
     let testGiveUp = false;
     if (
       ws &&
+      !stopped() &&
       shouldAutoTest({
         wroteSomething,
         autoTest: s.autoTest,
@@ -418,6 +443,8 @@ export async function runRounds(deps: RunDeps): Promise<void> {
     // buildReadPayload([]) 仍会产出一句"基于以上真实内容继续"的引导，
     // 这是既有行为，本批只做抽取，没有改它。
 
+    // 停止后不再读取文件、不再回传隐藏消息；下一轮也由轮首 break 挡住。
+    if (stopped()) break;
     const outcomes = ws ? await deps.readFiles(reads) : [];
     const refOutcomes = await deps.readRefs(refs);
     const toolMsg: Message = {

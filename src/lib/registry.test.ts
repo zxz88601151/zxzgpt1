@@ -484,3 +484,16 @@ describe("explore：派子代理探索", () => {
     expect(planModeBlocks(findTool("explore")!.access)).toBe(false);
   });
 });
+
+describe("search_files：run 入口二次校验挡住复审发现的绕过（P1-2）", () => {
+  it.each(["(a?)+$", "(a{1,}){1,}$", "(a+)+$", "((a+))+$", "(?:(a+))+$", "((a{1,}))+$"])("绕过模式 %s 在 run 入口被拒，不遍历文件", async (query) => {
+    const spec = findTool("search_files")!;
+    let listed = 0;
+    const out = await spec.run(
+      { query, regex: true },
+      fakeCtx({ listDir: async () => { listed += 1; return []; } })
+    );
+    expect(out.error).toMatch(/正则不可用/);
+    expect(listed).toBe(0);
+  });
+});

@@ -355,3 +355,74 @@ describe("parseMcpGrantRequired：闸门错误通道", () => {
     expect(parseMcpGrantRequired(JSON.stringify({ kind: "refused", reason: "x" }))).toBeNull();
   });
 });
+
+describe("executeMcpToolCall：取消信号贯穿（独立复审 P1-1）", () => {
+  it("signal 已中止 → 不调服务器、不弹审批，直接返回取消错误", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const call = vi.fn();
+    const ask = vi.fn();
+    const out = await executeMcpToolCall(mcpOpts({ signal: controller.signal, call, ask }));
+    expect(out.error).toMatch(/已停止/);
+    expect(call).not.toHaveBeenCalled();
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("审批框挂起时 abort → 立刻收摊，不重试、不记账、不死锁", async () => {
+    const controller = new AbortController();
+    const call = vi.fn().mockRejectedValue(needGrant());
+    let settleAsk!: (v: "session") => void;
+    const ask = vi.fn().mockImplementation(() => new Promise<"session">((r) => { settleAsk = r; }));
+    const grant = vi.fn();
+    const p = executeMcpToolCall(mcpOpts({ signal: controller.signal, call, ask, grant }));
+    await Promise.resolve();
+    await Promise.resolve();
+    controller.abort();
+    const out = await p;
+    expect(out.error).toMatch(/已停止/);
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(grant).not.toHaveBeenCalled();
+    settleAsk("session"); // 晚到的人点「允许」不能让已停止的调用继续
+  });
+
+  it("call 返回后才发现已停止 → 不把结果交给模型", async () => {
+    const controller = new AbortController();
+    const call = vi.fn().mockImplementation(async () => {
+      controller.abort();
+      return "ok";
+    });
+    const out = await executeMcpToolCall(mcpOpts({ signal: controller.signal, call }));
+    expect(out.error).toMatch(/已停止/);
+  });
+});
+
+describe("executeMcpToolCall：IO 挂起时也能被停止结算（第二轮复审）", () => {
+  it("call 挂起 60s 时 abort → 前端立刻收摊，不死锁", async () => {
+    const controller = new AbortController();
+    const call = vi.fn().mockImplementation(() => new Promise<string>(() => {}));
+    const p = executeMcpToolCall(mcpOpts({ signal: controller.signal, call }));
+    await Promise.resolve();
+    controller.abort();
+    const out = await p;
+    expect(out.error).toMatch(/已停止/);
+  });
+
+  it("grant 挂起时 abort → 不重试，立刻收摊", async () => {
+    const controller = new AbortController();
+    const call = vi.fn().mockRejectedValue(needGrant());
+    const grant = vi.fn().mockImplementation(() => new Promise<void>(() => {}));
+    const p = executeMcpToolCall(mcpOpts({
+      signal: controller.signal,
+      call,
+      grant,
+      ask: vi.fn().mockResolvedValue("session"),
+    }));
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    controller.abort();
+    const out = await p;
+    expect(out.error).toMatch(/已停止/);
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+});

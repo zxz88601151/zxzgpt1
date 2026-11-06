@@ -185,3 +185,61 @@ describe("runToolBatch 并发调度", () => {
     expect(Date.now() - t0).toBeGreaterThanOrEqual(30);
   });
 });
+
+describe("runToolBatch：取消信号贯穿（独立复审 P1-1）", () => {
+  it("signal 一开始就中止 → 一个工具都不执行，全部补成取消记录", async () => {
+    const calls: Call[] = [
+      { id: "1", name: "read_file", arguments: "{}" },
+      { id: "2", name: "write_file", arguments: "{}" },
+    ];
+    const { execute, events } = makeExecutor({});
+    const controller = new AbortController();
+    controller.abort();
+    const recs = await runToolBatch(calls, execute, controller.signal);
+    expect(events).toHaveLength(0);
+    expect(recs).toHaveLength(2);
+    expect(recs.map((r) => r.id)).toEqual(["1", "2"]);
+    expect(recs.every((r) => r.error?.includes("已停止"))).toBe(true);
+  });
+
+  it("批中途 abort → 后续调用不执行，records 仍无空洞", async () => {
+    const controller = new AbortController();
+    const calls: Call[] = [
+      { id: "1", name: "read_file", arguments: "{}" },
+      { id: "2", name: "write_file", arguments: "{}" },
+    ];
+    const execute = async (call: Call): Promise<ToolCallRecord> => {
+      controller.abort(); // 第一条执行时用户点了停止
+      return { ...call, result: "ok" };
+    };
+    const recs = await runToolBatch(calls, execute, controller.signal);
+    expect(recs).toHaveLength(2);
+    expect(recs.every((r) => r !== undefined)).toBe(true);
+    expect(recs[0].result).toBe("ok");
+    expect(recs[1].error).toMatch(/已停止/);
+  });
+
+  it("闸控层执行器违约返回 undefined 也补成错误记录（复审 P2-6）", async () => {
+    const calls: Call[] = [{ id: "1", name: "write_file", arguments: "{}" }];
+    const execute = async () => undefined as unknown as ToolCallRecord;
+    const recs = await runToolBatch(calls, execute);
+    expect(recs[0].error).toMatch(/工具执行异常/);
+  });
+});
+
+describe("runToolBatch：取消后 tool_call_id 仍逐 idx 对齐（第二轮复审）", () => {
+  it("混合批中途 abort → 每个 idx 都有且仅有一条记录，id 与原顺序一致", async () => {
+    const controller = new AbortController();
+    const calls: Call[] = ["read_file", "write_file", "write_file", "read_file"].map((name, i) => ({
+      id: String(i + 1), name, arguments: "{}",
+    }));
+    const execute = async (call: Call): Promise<ToolCallRecord> => {
+      controller.abort();
+      return { ...call, result: "ok" };
+    };
+    const recs = await runToolBatch(calls, execute, controller.signal);
+    expect(recs.map((r) => r.id)).toEqual(["1", "2", "3", "4"]);
+    expect(recs.every((r) => r !== undefined)).toBe(true);
+    expect(recs.every((r) => r.result === "ok" || r.error?.includes("已停止"))).toBe(true);
+  });
+});

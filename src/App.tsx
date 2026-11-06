@@ -444,6 +444,8 @@ export default function App() {
           planMode: Boolean(stateRef.current.settings.planMode),
           exploreMode: Boolean(stateRef.current.settings.exploreMode),
           scope: mcpScope(policy.server, policy.tool),
+          // 停止信号贯穿到审批等待：abort 时 waitAbortable 以 deny 结算，不挂死串行层
+          signal: mainSignalRef.current ?? undefined,
           // 默认 Ask：Rust 侧 guard_mcp 未授权 → need_grant → 问用户 →
           // permGrant 记账 → 重试；会话级授权批过之后首次调用直接放行。
           call: (server, tool, a) => mcpCallTool(server, tool, a, ws.sessionId),
@@ -485,14 +487,16 @@ export default function App() {
   /** 上下文压缩用的模型摘要：拼 prompt 的纯逻辑在 orchestration/summarize.ts。 */
   const summarizeWindow = useCallback(async (window: Message[]): Promise<string> => {
     const settings = stateRef.current.settings;
-    const controller = new AbortController();
+    // 复用主链路 signal（复审 P2-3）：点停止后压缩用的模型请求也要能被中断；
+    // 手动压缩（不在 send 生命周期内）时用一次性控制器，语义不变。
+    const signal = mainSignalRef.current ?? new AbortController().signal;
     let acc = "";
     try {
       await chatStream({
         settings: { ...settings, stream: false, maxTokens: 600 },
         transport,
         messages: buildSummarizeMessages(window),
-        signal: controller.signal,
+        signal,
         onEvent: (evt) => {
           if (evt.type === "delta") acc += evt.text;
         },
@@ -696,6 +700,7 @@ export default function App() {
         });
       } finally {
         abortRef.current = null;
+        mainSignalRef.current = null;
         busyRef.current = false;
         setBusy(false);
         setScrollSignal((n) => n + 1);
@@ -706,6 +711,9 @@ export default function App() {
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
+    // 正在等执行/MCP 授权时点停止：把挂起的确认框按「拒绝」结算，
+    // 否则 ask() 的 Promise 永不 resolve，发送流程会挂在串行工具层（复审 P1-1）。
+    answerExec("deny");
     // 正在等写入批复时点停止：直接按“放弃”处理，否则发送流程会一直挂在面板上
     if (pendingResolveRef.current) {
       setPending(null);
@@ -716,7 +724,7 @@ export default function App() {
     // 点停止就该真的停：通知 Rust 终止，没在跑的时候它什么也不做。
     const ws = stateRef.current.settings.workspace;
     if (ws) void runCancel(ws.sessionId);
-  }, []);
+  }, [answerExec]);
 
   const regenerate = useCallback(async () => {
     if (busyRef.current) return;

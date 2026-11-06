@@ -30,6 +30,7 @@
 
 import { EXPLORE_TOOL_NAMES, type ToolRunResult } from "./registry";
 import { truncateToolOutput, type ToolDefinition } from "./tools";
+import { waitAbortable } from "./abort";
 
 /** 一台 MCP 服务器的注册信息：存在 mcp.json 配置文件里（Rust 侧读写）。 */
 export interface McpServerConfig {
@@ -366,6 +367,8 @@ export async function executeMcpToolCall(opts: {
   exploreMode: boolean;
   /** Rust 侧授权 scope，由调用方按 `mcpScope(server, tool)` 生成 */
   scope: string[];
+  /** 主链路取消信号：审批框等待中用户点「停止」时立刻以 deny 结算（复审 P1-1）。 */
+  signal?: AbortSignal;
   /** 问用户。App 注入 askExec */
   ask: (req: McpApprovalRequest) => Promise<McpApprovalChoice>;
   /** 记账。App 注入 permGrant，写进 Rust 侧同一张授权表 */
@@ -386,20 +389,44 @@ export async function executeMcpToolCall(opts: {
 
   const defaultLabel = `MCP ${spec.server}/${spec.tool}`;
   for (let attempt = 0; ; attempt++) {
+    // 每一轮（含重试）都先看停止：已停止就绝不碰服务器，也不再弹审批框。
+    if (opts.signal?.aborted) return { error: "已停止：MCP 工具调用已取消" };
     try {
-      const text = await opts.call(spec.server, spec.tool, opts.args);
+      // Rust 的 tools/call 有 60s spawn_blocking 超时，前端无法中断它；
+      // 但至少不能让 await 把发送流程挂死——signal 一到就以空串结算，
+      // 紧接着的 aborted 检查把这一轮收掉。Rust 侧进程会自己超时结束（已知限制）。
+      const text = await waitAbortable(
+        opts.call(spec.server, spec.tool, opts.args),
+        opts.signal,
+        "",
+      );
+      if (opts.signal?.aborted) return { error: "已停止：MCP 工具调用已取消" };
       return { result: truncateToolOutput(text) };
     } catch (e) {
       const need = parseMcpGrantRequired(e);
       if (!need) return { error: mcpErrorMessage(e) };
+      if (opts.signal?.aborted) return { error: "已停止：MCP 工具调用已取消" };
       if (attempt >= 2) return { error: "多次授权后仍无法执行 MCP 工具，已停止重试" };
       const label = need.label || defaultLabel;
       const scope = need.scope.length ? need.scope : opts.scope;
-      const choice = await opts.ask({ server: spec.server, tool: spec.tool, label, scope });
+      // ask() 只有人点按钮才 resolve；主链路 abort 时必须由 signal 兜底结算，
+      // 否则 runToolBatch 的串行层永远等不到它，runRounds 的 finally 不复位 busy。
+      const choice = await waitAbortable(
+        opts.ask({ server: spec.server, tool: spec.tool, label, scope }),
+        opts.signal,
+        "deny",
+      );
+      if (opts.signal?.aborted) return { error: "已停止：MCP 工具调用已取消" };
       if (choice === "deny") return { error: "用户拒绝了这次 MCP 工具调用" };
       try {
-        await opts.grant(scope, choice === "once" ? 1 : null, label);
+        await waitAbortable(
+          opts.grant(scope, choice === "once" ? 1 : null, label),
+          opts.signal,
+          undefined,
+        );
+        if (opts.signal?.aborted) return { error: "已停止：MCP 工具调用已取消" };
       } catch (grantErr) {
+        if (opts.signal?.aborted) return { error: "已停止：MCP 工具调用已取消" };
         return { error: `MCP 授权记账失败：${mcpErrorMessage(grantErr)}` };
       }
       // 授权已记进 Rust 侧，下一轮 call 会过闸门；最多 3 轮防死循环
